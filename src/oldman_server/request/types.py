@@ -97,6 +97,9 @@ class Request(Generic[sanic_type, ctx_type]):
     """
 
     _current: ContextVar[Request] = ContextVar("request")
+    # orjson: integers beyond 64 bits become float (precision is lost) and
+    # NaN/Infinity are refused. Accepted for its speed and documented (README);
+    # an application needing exact big integers passes loads=json.loads.
     _loads = json_loads
 
     __slots__ = (

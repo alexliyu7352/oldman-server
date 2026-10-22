@@ -50,3 +50,34 @@ def test_change_decoder_to_some_custom():
 def test_default_decoder():
     OldmanServer("Test")
     assert Request._loads == uloads
+
+
+def test_big_integers_need_the_standard_library_loads():
+    # The documented trade-off of the default (orjson): beyond 64 bits an
+    # integer becomes a float; json.loads, which an application can pass as
+    # loads=, keeps it exact.
+    import json
+
+    from oldman_server import OldmanServer
+    from oldman_server.response import text
+
+    body = b'{"id": 18446744073709551616}'
+    # The default loads, named: an earlier app's loads= stays on the class.
+    from orjson import loads as orjson_loads
+    default = OldmanServer("BigIntDefault", loads=orjson_loads)
+
+    @default.post("/")
+    async def echo(request):
+        return text(repr(request.json["id"]))
+
+    _, response = default.test_client.post("/", content=body)
+    assert response.text == repr(1.8446744073709552e19)
+
+    exact = OldmanServer("BigIntExact", loads=json.loads)
+
+    @exact.post("/")
+    async def echo_exact(request):
+        return text(repr(request.json["id"]))
+
+    _, response = exact.test_client.post("/", content=body)
+    assert response.text == "18446744073709551616"

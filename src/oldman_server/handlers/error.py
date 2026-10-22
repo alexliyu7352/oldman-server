@@ -136,10 +136,12 @@ class ErrorHandler:
             response_message = (
                 'Exception raised in exception handler "%s" for uri: %s'
             )
-            error_logger.exception(response_message, handler.__name__, url)
+            # The failing handler may be the default one (handler is None).
+            name = getattr(handler, "__name__", "default")
+            error_logger.exception(response_message, name, url)
 
             if self.debug:
-                return text(response_message % (handler.__name__, url), 500)
+                return text(response_message % (name, url), 500)
             else:
                 return text("An error occurred while handling an error", 500)
         return response

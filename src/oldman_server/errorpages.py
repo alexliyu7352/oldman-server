@@ -21,8 +21,7 @@ import typing as t
 from traceback import extract_tb
 
 from oldman_server.exceptions import BadRequest, OldmanServerException
-from oldman_server.helpers import STATUS_CODES
-from oldman_server.helpers import json_text as dumps
+from oldman_server.helpers import STATUS_CODES, json_dumps
 from oldman_server.log import deprecation, logger
 from oldman_server.pages.error import ErrorPage
 from oldman_server.response import html, json, text
@@ -30,6 +29,13 @@ from oldman_server.response import html, json, text
 
 if t.TYPE_CHECKING:
     from oldman_server import HTTPResponse, Request
+
+
+def dumps(obj) -> str:
+    """JSON for error pages: what the encoder does not know (a Decimal, say)
+    is shown as its text, so that an exception's context never turns the
+    error response into another error."""
+    return json_dumps(obj, str).decode()
 
 DEFAULT_FORMAT = "auto"
 FALLBACK_TEXT = """\
