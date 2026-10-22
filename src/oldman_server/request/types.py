@@ -332,15 +332,20 @@ class Request(Generic[sanic_type, ctx_type]):
             return value.decode("utf-8", errors="surrogateescape") if value is not None else None
         return self.headers.getone("host", None)
 
+    @staticmethod
+    def _native_head(native: Any) -> bytes:
+        """A native request's request line and header fields, rebuilt from the
+        parsed ones (the host does not keep the bytes it received)."""
+        lines = [b"%s %s HTTP/%s" % (native.method.encode(), native.target,
+                                      native.http_version.encode())]
+        lines.extend(name + b": " + value for name, value in native.headers)
+        return b"\r\n".join(lines)
+
     @property
     def head(self) -> bytes:
         """The request line and headers (for the native host, rebuilt from them)."""
         if self._head is _NATIVE_UNSET:
-            native = self._native_request
-            lines = [b"%s %s HTTP/%s" % (self.method.encode(), native.target,
-                                          self.version.encode())]
-            lines.extend(name + b": " + value for name, value in native.headers)
-            self._head = b"\r\n".join(lines)
+            self._head = self._native_head(self._native_request)
         return self._head
 
     @head.setter

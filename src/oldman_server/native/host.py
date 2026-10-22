@@ -690,11 +690,12 @@ class NativeApplication:
         if not version or (client is None and not native.unix_socket) or server is None:
             raise ValueError("native request metadata is required")
         connection = server_types.native_connection(native)
+        # Positional, in Request's order (subclasses may name them differently).
         request = self._request_class(
             native.target,
             Header((name.decode("ascii"), value.decode("utf-8", errors="surrogateescape"))
                    for name, value in native.headers),
-            version, native.method, connection.transport, app)
+            version, native.method, connection.transport, app, Request._native_head(native))
         request.conn_info = connection.conn_info
         request._protocol = connection
         return request

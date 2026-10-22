@@ -577,3 +577,33 @@ def test_informational_status_from_a_handler_is_an_error():
     finally:
         host._final_status = check
     assert statuses == ["500", "500", "101", "500"]
+
+
+def test_a_request_subclass_has_the_request_head():
+    # A custom request class takes the general path: the same head as the
+    # exact class (rebuilt from the parsed request line and fields).
+    from oldman_server.request import Request
+
+    class Custom(Request):
+        pass
+
+    def factory(name):
+        app = OldmanServer(name, request_class=Custom, configure_logging=False)
+        app.config.ACCESS_LOG = False
+
+        @app.get("/head")
+        async def head(request):
+            return json({"class": type(request).__name__, "head": request.head.decode(),
+                         "line": request.request_line.decode(),
+                         "raw": request.raw_headers.decode()})
+        return app
+
+    async def scenario(reader, writer):
+        writer.write(b"GET /head?a=1 HTTP/1.1\r\nHost: x\r\nX-A: 1\r\n\r\n")
+        return await read_response(reader)
+
+    (status, _, body), = run("http1_request_subclass", scenario, app_factory=factory)
+    import json as json_module
+    assert status == 200 and json_module.loads(body) == {
+        "class": "Custom", "head": "GET /head?a=1 HTTP/1.1\r\nHost: x\r\nX-A: 1",
+        "line": "GET /head?a=1 HTTP/1.1", "raw": "Host: x\r\nX-A: 1"}
