@@ -1,6 +1,7 @@
 """HTTP/1.1 wire behavior of the framework host, over raw sockets."""
 import asyncio
 import dataclasses
+import os
 from http import HTTPStatus
 from pathlib import Path
 
@@ -804,7 +805,7 @@ def peer_leaving(backend):
 
     import json as json_module
     scenarios = uvloop.run(main_scenarios())
-    *_, recorded = run("http1_peer_leaves", *scenarios, app_factory=lost_app, backend=backend)
+    *_, recorded = run(f"http1_peer_leaves_{backend}", *scenarios, app_factory=lost_app, backend=backend)
     assert recorded == [["cancelled", True], "RequestCancelled handler",
                         ["cancelled", True], "RequestCancelled handler"]
 
@@ -842,7 +843,7 @@ def body_stops(backend):
         import json as json_module
         return json_module.loads((await read_response(reader))[2])
 
-    *_, recorded = run("http1_body_stops", reset_mid_body, fin_mid_body, ends, app_factory=lost_app,
+    *_, recorded = run(f"http1_body_stops_{backend}", reset_mid_body, fin_mid_body, ends, app_factory=lost_app,
                        backend=backend)
     assert recorded == ["reading cancelled", "reading cancelled"]
 
@@ -862,3 +863,93 @@ def test_connections_ending_abnormally_leave_no_state_behind():
         return len(native_connections)
 
     assert run("http1_reset_state", resets) == [0]  # (this connection sent no request)
+
+
+def output_app(name):
+    app = OldmanServer(name, configure_logging=False)
+    app.config.ACCESS_LOG = False
+    app.ctx.handled = 0
+
+    @app.get("/p")
+    async def piece(request):
+        app.ctx.handled += 1
+        return raw(b"p" * 15000)  # below the size written as its own buffer
+
+    @app.get("/tiny")
+    async def tiny(request):
+        return raw(b"t")
+
+    @app.get("/big")
+    async def big(request):
+        return raw(b"b" * (16 << 20))
+
+    @app.get("/handled")
+    async def handled(request):
+        return text(str(app.ctx.handled))
+    return app
+
+
+def test_pipelined_responses_wait_for_the_peer_to_read():
+    # Clients pipelining requests and not reading the responses: the host
+    # batched every small response into one buffer until no complete request
+    # was left (20 such clients held about 80 MiB more than for 1-byte
+    # responses). It writes once 64 KiB are batched; a peer that does not
+    # read then holds its responses in the kernel's buffers, not ours.
+    import socket
+
+    def rss_mib():
+        with open("/proc/self/statm") as statm:
+            return int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / (1 << 20)
+
+    async def growth(port, path):
+        request = f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode()
+        batch = request * (8192 // len(request))  # what the host's first read takes
+        before, socks = rss_mib(), []
+        for _ in range(20):
+            sock = socket.socket()
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            sock.connect(("127.0.0.1", port))
+            sock.sendall(batch)
+            socks.append(sock)
+        await asyncio.sleep(3)
+        peak = rss_mib()
+        for sock in socks:
+            sock.close()
+        await asyncio.sleep(0.5)
+        return peak - before
+
+    async def measure(reader, writer):
+        port = writer.get_extra_info("peername")[1]
+        return await growth(port, "/tiny"), await growth(port, "/p")
+
+    (tiny, piece), = run("http1_pipelined_output", measure, app_factory=output_app,
+                         max_requests=100000)
+    assert piece < tiny + 20, (tiny, piece)
+
+
+def test_a_peer_that_stops_reading_is_cut_off():
+    # Writes have a deadline (from KEEP_ALIVE_TIMEOUT and
+    # GRACEFUL_TCP_CLOSE_TIMEOUT, here 0.5 s): a peer that does not take a
+    # response held the connection and its memory until the server stopped.
+    async def stalled(reader, writer):
+        writer.write(b"GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+        await writer.drain()
+        await asyncio.sleep(3)
+        received = 0
+        try:
+            while chunk := await asyncio.wait_for(reader.read(1 << 20), 5):
+                received += len(chunk)
+        except ConnectionError:
+            pass
+        return received
+
+    received, = run("http1_write_deadline", stalled, app_factory=output_app, write_timeout_ms=500,
+                    max_response_bytes=32 << 20)
+    assert 0 < received < 16 << 20
+
+
+def test_the_write_deadline_follows_sanic_timeouts():
+    from oldman_server.native.host import native_config
+    app = OldmanServer("write_deadline_config", configure_logging=False)
+    app.config.KEEP_ALIVE_TIMEOUT, app.config.GRACEFUL_TCP_CLOSE_TIMEOUT = 2, 0.5
+    assert native_config(app).server.write_timeout_ms == 2500

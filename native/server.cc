@@ -488,6 +488,9 @@ class Service {
         bool tunnel = false;
         bool peer_gone = false;  // the peer closed (FIN) or reset (RST) it
         bool shut_here = false;  // this side shut the input (deadline, stop, the end)
+        // Armed while a write waits for the peer to take it (write_timeout_ms):
+        // a peer that stops reading has the connection shut, failing the write.
+        ss::timer<ss::lowres_clock> write_timer;
         explicit AppConnection(ss::connected_socket s)
             : socket(std::move(s)), input(socket.input()), output(socket.output()) {}
         void shut_input() {
@@ -540,10 +543,26 @@ class Service {
     std::string_view date() {
         return shared.config.generate_date_header ? date_line.get() : std::string_view{};
     }
-    static ss::future<> flush_output(AppConnection& connection, std::string& output) {
+    // One write the peer must take within write_timeout_ms (see AppConnection).
+    template <typename Write>
+    ss::future<> timed_write(AppConnection& connection, Write write) {
+        if (const auto timeout = shared.config.write_timeout_ms)
+            connection.write_timer.arm(ss::lowres_clock::now() + std::chrono::milliseconds(timeout));
+        std::exception_ptr failure;
+        try {
+            co_await write();
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        connection.write_timer.cancel();
+        if (failure) std::rethrow_exception(failure);
+    }
+    ss::future<> flush_output(AppConnection& connection, std::string& output) {
         if (output.empty()) co_return;
-        co_await connection.output.write(output.data(), output.size());
-        co_await connection.output.flush();
+        co_await timed_write(connection, [&]() -> ss::future<> {
+            co_await connection.output.write(output.data(), output.size());
+            co_await connection.output.flush();
+        });
         output.clear();
     }
     static uint64_t monotonic_ms() {
@@ -730,6 +749,11 @@ class Service {
             expired = waiting;
             connection.shut_input();
         });
+        connection.write_timer.set_callback([&connection, this] {
+            ++counts.errors;
+            connection.shut_input();
+            try { connection.socket.shutdown_output(); } catch (...) {}
+        });
         // The peer leaving (FIN or RST) while Python handles a request here.
         // One watch for the connection's life, which ends when either side
         // shuts the input; this side's own shutdowns are not the peer leaving.
@@ -756,6 +780,11 @@ class Service {
         };
         try {
             for (bool keep = true; keep && !closing;) {
+                // Responses to pipelined requests are batched into one write,
+                // up to 64 KiB (Sanic's write buffer limit): a client that
+                // pipelines requests and does not read their responses holds
+                // no more than that, until the write deadline.
+                if (output.size() >= 65536) co_await flush_output(connection, output);
                 http1::Head head;
                 // No field count of its own: the size limit bounds the head, as in Sanic.
                 const auto parsed = http1::parse_head(std::string_view(buffer).substr(consumed),
@@ -974,7 +1003,10 @@ class Service {
         deadline.cancel();
         if (!connection.shut_here) connection.shut_input();
         co_await std::move(watching);  // it refers to the connection
-        try { co_await connection.output.close(); } catch (...) {}
+        // Closing flushes what is left: within the write deadline too.
+        try {
+            co_await timed_write(connection, [&] { return connection.output.close(); });
+        } catch (...) {}
         try { co_await connection.input.close(); } catch (...) {}
         app_peers.erase(id);
     }
@@ -1073,13 +1105,17 @@ class Service {
         http1::append_head(output, answer->code, answer->body.size(), answer->headers, close,
                            date(), probe_lines);
         co_await flush_output(connection, output);
-        auto owned = std::make_unique<std::string>(std::move(answer->body));
-        // Read the pointer and size before the deleter takes ownership: argument
-        // evaluation order is unspecified.
-        char* data = owned->data();
+        auto owned = std::make_shared<std::string>(std::move(answer->body));
+        const char* data = owned->data();
         const size_t length = owned->size();
-        ss::temporary_buffer<char> view(data, length, ss::make_object_deleter(std::move(owned)));
-        co_await connection.output.write(std::move(view));
+        // In pieces, each one write within the write deadline: a slow peer that
+        // keeps reading gets all of it, one that stops reading is cut off.
+        constexpr size_t piece = 1 << 20;
+        for (size_t at = 0; at < length; at += piece) {
+            ss::temporary_buffer<char> view(const_cast<char*>(data) + at, std::min(piece, length - at),
+                                            ss::make_object_deleter(owned));
+            co_await timed_write(connection, [&]() { return connection.output.write(std::move(view)); });
+        }
     }
     // Writes a streamed response: the start decision's head and data, then the
     // chunks Python queues on the waiter until stream_end or stream_abort.

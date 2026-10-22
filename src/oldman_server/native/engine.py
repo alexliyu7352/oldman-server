@@ -93,6 +93,8 @@ class ServerConfig:
     keep_alive: bool = True
     keep_alive_timeout_ms: int = 0
     request_timeout_ms: int = 0
+    # A write the peer does not take within this time closes the connection.
+    write_timeout_ms: int = 0
     # Protocol errors are rendered by application_error_handler and request body
     # errors raised from Engine.receive, instead of plain native error responses.
     framework_errors: bool = False
@@ -416,7 +418,7 @@ class Engine:
             if type(s.keep_alive) is not bool or type(s.framework_errors) is not bool:
                 raise ValueError("keep_alive and framework_errors must be bool")
             if any(type(v) is not int or not 0 <= v <= 86_400_000
-                   for v in (s.keep_alive_timeout_ms, s.request_timeout_ms)):
+                   for v in (s.keep_alive_timeout_ms, s.request_timeout_ms, s.write_timeout_ms)):
                 raise ValueError("timeouts must be milliseconds within 0..86400000")
             if s.application_dispatch_all:
                 if (not s.http_port and s.listen_fd < 0) or s.application_routes or s.native_json:

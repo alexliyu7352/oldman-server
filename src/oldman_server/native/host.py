@@ -1030,6 +1030,11 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
                                       int(config.REQUEST_MAX_SIZE), _http1.Http.HEADER_CEILING)),
         keep_alive=bool(config.KEEP_ALIVE), framework_errors=True,
         keep_alive_timeout_ms=int(float(config.KEEP_ALIVE_TIMEOUT) * 1000),
+        # Sanic hands a response to its transport and closes an idle connection
+        # after KEEP_ALIVE_TIMEOUT, waiting GRACEFUL_TCP_CLOSE_TIMEOUT for the
+        # unsent rest: a peer that stops reading is cut off after about that.
+        write_timeout_ms=min(int((float(config.KEEP_ALIVE_TIMEOUT)
+                                  + float(config.GRACEFUL_TCP_CLOSE_TIMEOUT)) * 1000), 86_400_000),
         request_timeout_ms=int(float(config.REQUEST_TIMEOUT) * 1000))
     backend = config.get("NATIVE_REACTOR_BACKEND")
     return Config(shard_cpus=shards, server=server,

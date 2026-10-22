@@ -48,6 +48,10 @@ struct ServerConfig {
     size_t max_header_bytes = 8192;
     bool keep_alive = true;
     unsigned keep_alive_timeout_ms = 0, request_timeout_ms = 0;
+    // A write (of a response, or a piece of a large one) that the peer does
+    // not take within this time closes the connection: a client that stops
+    // reading holds the connection and the response's memory only that long.
+    unsigned write_timeout_ms = 0;
     // Protocol errors go to Python as error requests and body error events (the
     // framework renders them, as Sanic's error handler does); otherwise the host
     // answers them with a plain error response.

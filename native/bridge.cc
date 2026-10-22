@@ -525,6 +525,7 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("max_header_bytes", &probe::ServerConfig::max_header_bytes)
         .def_readwrite("keep_alive", &probe::ServerConfig::keep_alive)
         .def_readwrite("keep_alive_timeout_ms", &probe::ServerConfig::keep_alive_timeout_ms)
+        .def_readwrite("write_timeout_ms", &probe::ServerConfig::write_timeout_ms)
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
         .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors);
     m.attr("zlib_runtime_version") = ::zlibVersion();
