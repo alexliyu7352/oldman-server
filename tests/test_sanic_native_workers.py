@@ -139,3 +139,18 @@ def test_listening_and_plain_sockets_are_not_reservations():
         assert not reserved_for_listeners(listening)
         assert not reserved_for_listeners(plain)  # as sanic-testing passes: the host listens on it
         assert not reserved_for_listeners(unix)
+
+
+def test_a_shared_unix_socket_is_not_inherited_across_exec():
+    # The workers get it from multiprocessing (spawn) or with the process
+    # (fork); a program the application starts must not keep it listening,
+    # or the path is never removed and clients wait on it.
+    import tempfile
+    from oldman_server.server.socket import configure_socket
+    with tempfile.TemporaryDirectory() as directory:
+        settings = {"sock": None, "unix": f"{directory}/app.sock", "backlog": 100,
+                    "host": None, "port": None}
+        sock = configure_socket(settings, reserve=True)
+        with sock:
+            assert settings["sock"] is sock
+            assert not sock.get_inheritable()

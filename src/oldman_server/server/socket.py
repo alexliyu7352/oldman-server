@@ -190,7 +190,7 @@ def configure_socket(
         sock = bind_unix_socket(unix, mode=mode, backlog=backlog)
         server_settings["unix"] = unix
         if reserve:
-            sock.set_inheritable(True)
+            # Not inheritable: workers get it from multiprocessing, not exec.
             server_settings["sock"] = sock
     if sock is None:
         sock = bind_socket(
