@@ -129,7 +129,7 @@ server {
 
 接口：
 
-- 包名 `oldman_server`，不再提供 `import sanic` 的别名。类名去掉 Sanic：`Sanic` → `OldmanServer`、`SanicException` → `OldmanServerException`、`DefaultSanic` → `DefaultServer`、`SanicTestClient` → `TestClient`（内部类同样去掉 Sanic 字样）。配置环境变量前缀 `SANIC_` → `OLDMAN_SERVER_`（如 `OLDMAN_SERVER_NATIVE_SERVER`；不用 `OLDMAN_`，因为 oldman 自己的 `OLDMAN_*` 变量会被读成设置）；日志名 `sanic.root` / `error` / `access` / `server` / `websockets` → `oldman_server.*`；进程名 `Sanic-Main`、`Sanic-Server-*` → `Oldman-Main`、`Oldman-Server-*`。命令行程序名、`--version`、启动信息（MOTD）与 HTML 错误页显示 oldman-server，不再带 Sanic 的标志和 sanic.dev 链接；颜色 `Colors.SANIC` → `Colors.PINK`。
+- 包名 `oldman_server`，不再提供 `import sanic` 的别名。类名去掉 Sanic：`Sanic` → `OldmanServer`、`SanicException` → `OldmanServerException`、`DefaultSanic` → `DefaultServer`、`SanicTestClient` → `TestClient`（内部类同样去掉 Sanic 字样）。配置环境变量前缀 `SANIC_` → `OLDMAN_SERVER_`（如 `OLDMAN_SERVER_NATIVE_SERVER`；不用 `OLDMAN_`，因为 oldman 自己的 `OLDMAN_*` 变量会被读成设置）；日志名 `sanic.root` / `error` / `access` / `server` / `websockets` → `oldman_server.*`；进程名 `Sanic-Main`、`Sanic-Server-*` → `Oldman-Main`、`Oldman-Server-*`。命令行程序名、`--version`、启动信息（MOTD）与 HTML 错误页显示 oldman-server，不再带 Sanic 的标志和 sanic.dev 链接；颜色 `Colors.SANIC` → `Colors.PINK`；健康检查端点（`oldman_server.ext`）的蓝图 `SanicHealth` → `OldmanServerHealth`（路由名与 OpenAPI 标签随之改变）。日志与报错里仍指向 sanic.dev 的说明，是原版 Sanic 的文档（框架层源自它）。
 - Sanic Extensions 随包提供为 `oldman_server.ext`，只在应用要求时启用：`app.extend()`、`app.ext` 或 `Extend(app, ...)`。不再查找 `sanic_ext` 模块，服务器启动时也不会自动扩展应用（原版装了 sanic-ext 时会）；`AUTO_EXTEND = False` 时 `app.extend()` 抛 `RuntimeError`。
 - 不再把 setuptools 列为运行依赖（包里没有用到它；原版 Sanic 列着）；`oldman_server.ext` 在没有 pydantic 时也能导入（原版 sanic-ext 会因此导入失败）。
 - 测试客户端随包提供为 `oldman_server.testing`（源自 sanic-testing 24.6.0），`app.test_client` 需要 httpx；不再需要 sanic-testing。

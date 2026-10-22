@@ -24,12 +24,10 @@ def try_use_uvloop() -> None:
     uvloop_install_removed = str_to_bool(getenv("OLDMAN_SERVER_NO_UVLOOP", "no"))
     if uvloop_install_removed:
         error_logger.info(
-            "You are requesting to run oldman-server using uvloop, but the "
-            "install-time 'OLDMAN_SERVER_NO_UVLOOP' environment variable (used to "
-            "opt-out of installing uvloop with oldman-server) is set to true. If "
-            "you want to prevent oldman-server from overriding the event loop policy "
-            "during runtime, set the 'USE_UVLOOP' configuration value to "
-            "false."
+            "The 'OLDMAN_SERVER_NO_UVLOOP' environment variable is set, but "
+            "oldman-server always installs uvloop and uses it. To keep the "
+            "default event loop policy, set the 'USE_UVLOOP' configuration "
+            "value to false."
         )
 
     if not isinstance(asyncio.get_event_loop_policy(), uvloop.EventLoopPolicy):

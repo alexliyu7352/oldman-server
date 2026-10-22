@@ -133,9 +133,7 @@ def test_app_run_raise_type_error(app: OldmanServer, port):
 
     assert str(excinfo.value) == (
         "loop is not a valid argument. To use an existing loop, "
-        "change to create_server().\nSee more: "
-        "https://sanic.readthedocs.io/en/latest/sanic/deploying.html"
-        "#asynchronous-support"
+        "change to create_server()."
     )
 
 
@@ -337,9 +335,9 @@ def test_get_app_does_not_exist():
             "App name 'does-not-exist' not found.\n"
             "App instantiation must occur outside "
             "if __name__ == '__main__' "
-            "block or by using an AppLoader.\nSee "
+            "block or by using an AppLoader.\nSee Sanic's documentation "
+            r"\(the framework layer is a fork of Sanic\): "
             "https://sanic.dev/en/guide/deployment/app-loader.html"
-            " for more details."
         ),
     ):
         OldmanServer.get_app("does-not-exist")

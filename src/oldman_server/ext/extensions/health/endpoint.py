@@ -6,7 +6,8 @@ from oldman_server.response import json
 
 
 def setup_health_endpoint(app: OldmanServer) -> None:
-    bp = Blueprint("Health", url_prefix=app.config.HEALTH_URL_PREFIX)
+    # As Sanic Extensions' "SanicHealth": distinct from an application's own names.
+    bp = Blueprint("OldmanServerHealth", url_prefix=app.config.HEALTH_URL_PREFIX)
 
     @bp.get(app.config.HEALTH_URI_TO_INFO)
     async def info(request: Request):

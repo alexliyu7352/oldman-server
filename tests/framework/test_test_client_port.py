@@ -33,3 +33,21 @@ def test_test_client_port_default(app):
     request, response = test_client.get("/get")
     assert test_client.port > 0
     assert response.json == test_client.port
+
+
+def test_the_test_client_is_not_collected_as_a_test_class(tmp_path):
+    # Imported into a test module, a class named Test* is collected by
+    # pytest: a warning, and an error where collection warnings are errors.
+    import subprocess
+    import sys
+
+    (tmp_path / "test_uses_client.py").write_text(
+        "from oldman_server.testing.testing import TestClient\n\n"
+        "def test_nothing():\n    pass\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-W", "error::pytest.PytestCollectionWarning", str(tmp_path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

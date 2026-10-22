@@ -338,7 +338,7 @@ class Config(dict, metaclass=DescriptorMeta):
 
         Anything else will be imported as a ``str``. If you would like to add
         additional types to this list, you can use
-        :meth:`sanic.config.Config.register_type`. Just make sure that they
+        :meth:`oldman_server.config.Config.register_type`. Just make sure that they
         are registered before you instantiate your application.
 
         You likely won't need to call this method directly.
@@ -347,7 +347,7 @@ class Config(dict, metaclass=DescriptorMeta):
 
         Args:
             prefix (str): The prefix to use when looking for environment
-                variables. Defaults to `SANIC_`.
+                variables. Defaults to `OLDMAN_SERVER_`.
 
 
         Examples:

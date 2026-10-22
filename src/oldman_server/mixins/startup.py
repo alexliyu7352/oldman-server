@@ -381,9 +381,7 @@ class StartupMixin(metaclass=AppMeta):
         if loop is not None:
             raise TypeError(
                 "loop is not a valid argument. To use an existing loop, "
-                "change to create_server().\nSee more: "
-                "https://sanic.readthedocs.io/en/latest/sanic/deploying.html"
-                "#asynchronous-support"
+                "change to create_server()."
             )
 
         if sock is None:
@@ -608,9 +606,7 @@ class StartupMixin(metaclass=AppMeta):
         """Helper function used by `run` and `create_server`."""
         if self.config.PROXIES_COUNT and self.config.PROXIES_COUNT < 0:
             raise ValueError(
-                "PROXIES_COUNT cannot be negative. "
-                "https://sanic.readthedocs.io/en/latest/sanic/config.html"
-                "#proxy-configuration"
+                "PROXIES_COUNT cannot be negative."
             )
 
         if not self.state.is_debug:
@@ -647,7 +643,7 @@ class StartupMixin(metaclass=AppMeta):
             and not os.environ.get("OLDMAN_SERVER_IGNORE_PRODUCTION_WARNING")
         ):
             error_logger.warning(
-                f"{Colors.YELLOW}Sanic is running in PRODUCTION mode. "
+                f"{Colors.YELLOW}oldman-server is running in PRODUCTION mode. "
                 "Consider using '--debug' or '--dev' while actively "
                 f"developing your application.{Colors.END}"
             )
@@ -887,7 +883,7 @@ class StartupMixin(metaclass=AppMeta):
             if actual != method:
                 raise RuntimeError(
                     f"Start method '{method}' was requested, but '{actual}' "
-                    "was already set.\nFor more information, see: "
+                    "was already set.\nFor more information, see Sanic's documentation: "
                     "https://sanic.dev/en/guide/running/manager.html#overcoming-a-coderuntimeerrorcode"
                 ) from None
             # Already the method wanted (set by the application or a library).
@@ -901,7 +897,7 @@ class StartupMixin(metaclass=AppMeta):
         if method != actual:
             raise RuntimeError(
                 f"Start method '{method}' was requested, but '{actual}' "
-                "was already set.\nFor more information, see: "
+                "was already set.\nFor more information, see Sanic's documentation: "
                 "https://sanic.dev/en/guide/running/manager.html#overcoming-a-coderuntimeerrorcode"
             ) from None
         return get_context()
@@ -987,7 +983,7 @@ class StartupMixin(metaclass=AppMeta):
                 "The server could not start: worker process failed.\n\n"
                 "This may have happened if you are running the server in the "
                 "global scope and not inside of a "
-                '`if __name__ == "__main__"` block.\n\nSee more information: '
+                '`if __name__ == "__main__"` block.\n\nSee Sanic\'s documentation: '
                 "https://sanic.dev/en/guide/deployment/manager.html#"
                 "how-sanic-server-starts-processes\n"
             )

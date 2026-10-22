@@ -310,7 +310,7 @@ class WorkerManager:
             "It seems that one or more of your workers failed to come "
             "online in the allowed time. oldman-server is shutting down to avoid a "
             f"deadlock. The current threshold is {self.THRESHOLD / 10}s. "
-            "If this problem persists, please check out the documentation "
+            "If this problem persists, see Sanic's documentation: "
             "https://sanic.dev/en/guide/deployment/manager.html#worker-ack."
         )
         while not self._all_workers_ack():

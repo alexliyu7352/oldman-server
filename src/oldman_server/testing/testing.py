@@ -53,6 +53,9 @@ def _blank(*_, **__):
 
 
 class TestClient:
+    # Not a test class, although its name says so (pytest collects Test*).
+    __test__ = False
+
     def __init__(
         self, app: OldmanServer, port: typing.Optional[int] = PORT, host: str = HOST
     ) -> None:

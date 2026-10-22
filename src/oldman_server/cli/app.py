@@ -198,8 +198,8 @@ Additional commands:
             if app_loader.module_name.startswith(e.name):  # type: ignore
                 error_logger.error(
                     f"No module named {e.name} found.\n"
-                    "  Example File: project/sanic_server.py -> app\n"
-                    "  Example Module: project.sanic_server.app"
+                    "  Example File: project/server.py -> app\n"
+                    "  Example Module: project.server.app"
                 )
                 error_logger.error(
                     "\nThe error below might have caused the above one:\n"

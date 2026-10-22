@@ -80,3 +80,15 @@ def test_reload_dirs(app):
     mock.assert_called()
     assert mock.call_args.args[2]["auto-reload"] == f"enabled, {os.getcwd()}"
     assert mock.call_args.args[3] == {"foo": "bar"}
+
+
+def test_the_terminal_box_lines_up_with_the_logo():
+    # Every line of the box has the same width: the logo column too.
+    from oldman_server.application.logo import get_logo
+
+    out = []
+    MOTDTTY(get_logo(), "http://127.0.0.1:8000", {"app": "demo", "mode": "debug"},
+            {"server": "oldman_server, HTTP/1.1", "python": "3.14.7"}).display(out=out.append)
+    lines = [line.strip() for line in out[0].split("\n") if line.strip()]
+    assert len({len(line) for line in lines}) == 1, lines
+    assert any("oldman-server" in line and line.startswith("│") for line in lines[3:])

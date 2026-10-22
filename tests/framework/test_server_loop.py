@@ -51,16 +51,15 @@ def test_logs_when_install_and_runtime_config_mismatch(caplog, monkeypatch):
 
     getenv.assert_called_once_with("OLDMAN_SERVER_NO_UVLOOP", "no")
     for record in caplog.records:
-        if record.message.startswith("You are requesting to run"):
+        if record.message.startswith("The 'OLDMAN_SERVER_NO_UVLOOP'"):
             break
 
+    # The package always installs uvloop (no install-time opt-out).
     assert record.message == (
-        "You are requesting to run oldman-server using uvloop, but the "
-        "install-time 'OLDMAN_SERVER_NO_UVLOOP' environment variable (used to "
-        "opt-out of installing uvloop with oldman-server) is set to true. If "
-        "you want to prevent oldman-server from overriding the event loop policy "
-        "during runtime, set the 'USE_UVLOOP' configuration value to "
-        "false."
+        "The 'OLDMAN_SERVER_NO_UVLOOP' environment variable is set, but "
+        "oldman-server always installs uvloop and uses it. To keep the "
+        "default event loop policy, set the 'USE_UVLOOP' configuration "
+        "value to false."
     )
 
 

@@ -1,4 +1,4 @@
-"""The test client for applications: SanicTestClient (requests through a
+"""The test client for applications: TestClient (requests through a
 running server), as `app.test_client`. It needs httpx.
 
 Derived from sanic-testing 24.6.0 (MIT, LICENSE.sanic-testing) with imports

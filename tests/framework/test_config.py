@@ -494,9 +494,7 @@ def test_negative_proxy_count(app: OldmanServer):
     app.config.PROXIES_COUNT = -1
 
     message = (
-        "PROXIES_COUNT cannot be negative. "
-        "https://sanic.readthedocs.io/en/latest/sanic/config.html"
-        "#proxy-configuration"
+        "PROXIES_COUNT cannot be negative."
     )
     with pytest.raises(ValueError, match=message):
         app.prepare()

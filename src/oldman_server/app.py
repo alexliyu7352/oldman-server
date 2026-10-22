@@ -142,7 +142,7 @@ class OldmanServer(
         error_handler (Optional[ErrorHandler]): The error handler to
             use for the application. Defaults to `None`.
         env_prefix (Optional[str]): The prefix to use for environment
-            variables. Defaults to `SANIC_`.
+            variables. Defaults to `OLDMAN_SERVER_`.
         request_class (Optional[Type[Request]]): The request class to
             use for the application. Defaults to `Request`.
         strict_slashes (bool): Whether to enforce strict slashes.
@@ -1488,7 +1488,7 @@ class OldmanServer(
         It needs httpx, which oldman_server.testing (sanic-testing) uses.
 
         Returns:
-            SanicTestClient: oldman_server.testing's client.
+            TestClient: oldman_server.testing's client.
         """  # noqa: E501
         if self._test_client:
             return self._test_client
@@ -2170,9 +2170,9 @@ class OldmanServer(
                 f"App name '{name}' not found.\n"
                 "App instantiation must occur outside "
                 "if __name__ == '__main__' "
-                "block or by using an AppLoader.\nSee "
+                "block or by using an AppLoader.\nSee Sanic's documentation "
+                "(the framework layer is a fork of Sanic): "
                 "https://sanic.dev/en/guide/deployment/app-loader.html"
-                " for more details."
             )
 
     @classmethod
@@ -2323,7 +2323,7 @@ class OldmanServer(
                 f"Duplicate route names detected: {names}. You should rename "
                 "one or more of them explicitly by using the `name` param, "
                 "or changing the implicit name derived from the class and "
-                "function name. For more details, please see "
+                "function name. For more details, see Sanic's release notes: "
                 "https://sanic.dev/en/guide/release-notes/v23.3.html#duplicated-route-names-are-no-longer-allowed"  # noqa
             )
             raise ServerError(message)

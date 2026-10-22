@@ -429,8 +429,8 @@ class WebsocketImplProtocol:
             await self._close_transport()
 
     async def _close_transport(self) -> None:
-        """The end of close_connection: the transport never remains open,
-        even if close_connection is cancelled. (Its own method: a return in a
+        """The end of auto_close_connection: the transport never remains
+        open, even if auto_close_connection is cancelled. (Its own method: a return in a
         finally block is a SyntaxWarning from Python 3.14.)"""
         # Does this still exist?
         if self.keepalive_ping_task:

@@ -98,8 +98,18 @@ class MOTDTTY(MOTD):
                 max((*map(len, self.extra.values()), self.value_width)),
                 self.max_value_width,
             )
-        self.logo_lines = self.logo.split("\n") if self.logo else []
         self.logo_line_length = 24
+        # Each logo line fills the logo column (21 characters): one that
+        # does not is centered in it.
+        width = self.logo_line_length - 3
+        self.logo_lines = (
+            [
+                line if len(line) == width else line.strip().center(width)
+                for line in self.logo.split("\n")
+            ]
+            if self.logo
+            else []
+        )
         self.centering_length = (
             self.key_width + self.value_width + 2 + self.logo_line_length
         )
