@@ -48,6 +48,9 @@ fi
 dnf install -y --setopt=install_weak_deps=False \
   bzip2 zlib-devel lz4-devel lksctp-tools-devel valgrind-devel \
   perl-IPC-Cmd perl-Time-Piece perl-Data-Dumper
+# Seastar's file support includes the XFS headers (xfs/xfs.h), which AlmaLinux 8
+# ships in its powertools repository.
+dnf install -y --setopt=install_weak_deps=False --enablerepo=powertools xfsprogs-devel
 "$tools/python" -m pip install --quiet "cmake==4.4.3" "ninja==1.13.2" "pybind11==3.1.0" "uv==0.9.18"
 export PATH="$tools:$PATH"
 
