@@ -225,7 +225,9 @@ class Http(Stream, metaclass=TouchUpMeta):
             headers = []
 
             for name, value in (h.split(":", 1) for h in split_headers):
-                name, value = h = name.lower(), value.lstrip()
+                # Optional whitespace on both sides is not part of the value
+                # (RFC 9110 5.5), as the native host parses it.
+                name, value = h = name.lower(), value.strip()
 
                 if name in ("content-length", "transfer-encoding"):
                     if request_body:

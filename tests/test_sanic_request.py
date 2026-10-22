@@ -212,7 +212,8 @@ def test_request_native_fields_materialize_only_when_used():
     # whole-mapping operations, once.
     assert request.headers is headers and source.reads["sanic_header"] == 1
     assert source.reads["sanic_headers"] == 0
-    assert dict(headers.items()) == {"Host": "original.example", "X-Text": "café\udcff"}
+    # Lowercase names, as the asyncio server's parser gives them.
+    assert dict(headers.items()) == {"host": "original.example", "x-text": "café\udcff"}
     assert len(headers) == 2 and source.reads["sanic_headers"] == 1
     assert request.ip == "127.0.0.1" and request.port == 4321
     info = request.conn_info

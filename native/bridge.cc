@@ -77,14 +77,19 @@ struct ApplicationRequest {
         return out;
     }
 
-    // Request.headers input: (name.decode("ascii"), value.decode("utf-8",
-    // "surrogateescape")) pairs, with the same exceptions, built in one pass.
+    // Request.headers input: (name.decode("ascii").lower(), value.decode("utf-8",
+    // "surrogateescape")) pairs, with the same exceptions, built in one pass. The
+    // names are lowercase, as the asyncio server's parser makes them.
     py::list sanic_headers() const {
         py::list out(headers.size());
+        std::string lower;
         for (size_t i = 0; i < headers.size(); ++i) {
             const auto& [name, value] = headers[i];
+            lower.assign(name);
+            for (auto& c : lower)
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
             auto key = py::reinterpret_steal<py::object>(PyUnicode_DecodeASCII(
-                name.data(), static_cast<Py_ssize_t>(name.size()), nullptr));
+                lower.data(), static_cast<Py_ssize_t>(lower.size()), nullptr));
             if (!key) throw py::error_already_set();
             auto text = py::reinterpret_steal<py::object>(PyUnicode_DecodeUTF8(
                 value.data(), static_cast<Py_ssize_t>(value.size()), "surrogateescape"));

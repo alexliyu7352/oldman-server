@@ -692,9 +692,7 @@ class NativeApplication:
         connection = server_types.native_connection(native)
         # Positional, in Request's order (subclasses may name them differently).
         request = self._request_class(
-            native.target,
-            Header((name.decode("ascii"), value.decode("utf-8", errors="surrogateescape"))
-                   for name, value in native.headers),
+            native.target, Header(native.sanic_headers()),
             version, native.method, connection.transport, app, Request._native_head(native))
         request.conn_info = connection.conn_info
         request._protocol = connection

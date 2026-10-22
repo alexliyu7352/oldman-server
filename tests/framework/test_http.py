@@ -25,6 +25,11 @@ def test_app(app: OldmanServer):
         data = [part.decode("utf-8") async for part in request.stream]
         return json(data)
 
+    @app.get("/headers")
+    async def headers_handler(request):
+        return json({"items": list(request.headers.items()),
+                     "trail": request.headers.get("x-trail")})
+
     return app
 
 
@@ -343,3 +348,17 @@ def test_legit_pipelining_preserved(client):
     assert b"405 Method Not Allowed" in response
     assert b"200 OK" in response
     assert b"111122223333444455556666777788889999" in response
+
+
+def test_header_names_and_values_through_either_server(client):
+    # Iteration gives lowercase names; values lose the optional whitespace on
+    # both sides (RFC 9110 OWS). The same through the asyncio server and the
+    # native host.
+    client.send(
+        b"GET /headers HTTP/1.1\r\nHost: localhost\r\nX-Trail: v  \r\n"
+        b"X-Lead:   w\r\nConnection: close\r\n\r\n"
+    )
+    response = client.recv()
+    body = stdjson.loads(response.split(b"\r\n\r\n", 1)[1])
+    assert body == {"trail": "v", "items": [
+        ["host", "localhost"], ["x-trail", "v"], ["x-lead", "w"], ["connection", "close"]]}
