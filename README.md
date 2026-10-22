@@ -14,7 +14,7 @@
 pip install oldman-server               # 或 uv add oldman-server
 ```
 
-PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 glibc 2.28 及以上，如 Ubuntu 20.04、Debian 10、RHEL 8 及以后），CPython 3.12–3.14。Seastar 及其依赖的库已在 wheel 里，不需要另装。不提供源码包：从源码构建需要 Seastar 的整套依赖（见下文开发环境与「发布」）。
+PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 glibc 2.28 及以上，如 Ubuntu 20.04、Debian 10、RHEL 8 及以后），CPython 3.12–3.14。Seastar 及其依赖的库已在 wheel 里，不需要另装。不提供源码包：从源码构建需要 Seastar 的整套依赖（见下文开发环境与「发布」）。在源码树里构建的源码包只含 `pyproject.toml` 列出的公开源码（`[tool.hatch.build.targets.sdist]`）。
 
 ## 快速开始
 
@@ -179,7 +179,7 @@ python probes/sanic_comparison/run.py --python-only --out results/<新目录>   
 
 推送 tag `v<版本>`（与 `src/oldman_server/__version__.py` 一致，如 `v0.1.0`）后，`.github/workflows/release.yml`：
 
-1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载依赖源码并校验 SHA-256（`scripts/fetch_sources.py`，Seastar 打上 `patches/` 里的补丁），构建 Boost、OpenSSL、fmt、yaml-cpp、c-ares、protobuf、liburing、hwloc（不带插件）与 Seastar，再为 CPython 3.12–3.14 各构建扩展、打包（`hatch_build.py` 把扩展放进 wheel 并标上解释器与平台），由 auditwheel 把依赖库复制进 wheel、标为 manylinux_2_28。依赖与 Seastar 的构建结果按锁文件与脚本缓存。
+1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载依赖源码并校验 SHA-256（`scripts/fetch_sources.py`，Seastar 打上 `patches/` 里的补丁），构建 Boost、OpenSSL、fmt、yaml-cpp、c-ares、protobuf、liburing、hwloc（不带插件）与 Seastar，再为 CPython 3.12–3.14 各构建扩展、打包（`hatch_build.py` 把扩展放进 wheel 并标上解释器与平台；树里没有扩展时拒绝构建 wheel，`OLDMAN_SERVER_PURE_WHEEL=1` 才构建只能用 asyncio 服务器的纯 Python wheel），由 auditwheel 把依赖库复制进 wheel、标为 manylinux_2_28。依赖与 Seastar 的构建结果按锁文件与脚本缓存。
 2. 核对每个 wheel 所带的库都附有许可证（`scripts/check_wheel_licenses.py`），再把每个 wheel 装进全新环境，跑经原生主机的框架测试与原生主机的运行测试（`scripts/test_wheels.sh`）。
 3. 经 PyPI trusted publishing 发布（环境 `pypi`），再建 GitHub release 附上 wheel 与 SHA256SUMS。
 

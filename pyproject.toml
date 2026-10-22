@@ -55,8 +55,18 @@ path = "src/oldman_server/__version__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/oldman_server"]
 
-# hatch_build.py: a wheel built with the native extension in the tree carries it.
+# hatch_build.py: a wheel carries the native extension built in the tree, and
+# is not built without it (unless OLDMAN_SERVER_PURE_WHEEL=1).
 [tool.hatch.build.targets.wheel.hooks.custom]
+
+# Only the public sources needed to build. An explicit list: the working tree
+# also holds private material that git excludes through .git/info/exclude,
+# which hatchling does not read (tests/test_packaging.py).
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src", "native", "patches", "upstream", "LICENSES", "CMakeLists.txt", "hatch_build.py",
+    "dependency-lock.json", "scripts/build_wheels.sh", "scripts/fetch_sources.py",
+]
 
 [dependency-groups]
 build = ["cmake==4.4.3", "ninja==1.13.2", "pybind11==3.1.0"]
