@@ -11,6 +11,9 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 export PATH="/opt/python/cp312-cp312/bin:$PATH"  # uv, as scripts/build_wheels.sh installed it
+# Every wheel and every suite runs even after a failure, so that one run shows
+# them all; the exit status says whether any failed.
+failed=()
 for wheel in "$@"; do
   tag="$(basename "$wheel" | cut -d- -f3)"            # cp312 ...
   python="/opt/python/$tag-$tag/bin/python"
@@ -19,8 +22,15 @@ for wheel in "$@"; do
   uv pip install --quiet --python "$venv/bin/python" "$wheel" --group test
   echo "== $(basename "$wheel")"
   # Not the tree's package: the installed one.
-  "$venv/bin/python" -I -c "import oldman_server.native._native as n; assert '/site-packages/' in n.__file__, n.__file__"
+  "$venv/bin/python" -I -c "import oldman_server.native._native as n; assert '/site-packages/' in n.__file__, n.__file__" \
+    || failed+=("$tag: import")
   OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 \
-    "$venv/bin/python" -m pytest -q -p no:cacheprovider tests/framework tests/ext
-  "$venv/bin/python" -m pytest -q -p no:cacheprovider tests/test_sanic_native_run.py tests/test_sanic_native_workers.py
+    "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \
+    || failed+=("$tag: framework suites")
+  "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/test_sanic_native_run.py tests/test_sanic_native_workers.py \
+    || failed+=("$tag: native host runs")
 done
+if (( ${#failed[@]} )); then
+  printf 'failed: %s\n' "${failed[@]}"
+  exit 1
+fi
