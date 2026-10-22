@@ -592,11 +592,13 @@ def parse_credentials(
     if header is None:
         return None, None
     # RFC 9110 11.1: "<scheme> <credentials>", the scheme case-insensitive.
-    scheme, _, credentials = header.strip().partition(" ")
-    if not credentials:
-        # A bare token, without a scheme.
-        return None, header.strip() or None
+    scheme, *rest = header.split(None, 1) or [""]
+    credentials = rest[0].strip() if rest else ""
     for prefix in prefixes:
         if scheme.lower() == prefix.lower():
-            return prefix, credentials.strip()
+            # A scheme alone carries no credentials (not even itself).
+            return prefix, credentials or None
+    if not credentials:
+        # A bare token, without a scheme.
+        return None, scheme or None
     return None, None

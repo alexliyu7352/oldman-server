@@ -28,6 +28,11 @@ def basic(value: str) -> str:
         (f"Basic {basic('Bearer:x')}", ("Bearer",), (None, None)),
         # A bare token (no scheme) is the token, as before.
         ("abc", ("Bearer", "Token"), (None, "abc")),
+        # A scheme without credentials has no token (it is not one itself).
+        ("Bearer", None, ("Bearer", None)),
+        ("bearer  ", ("Bearer",), ("Bearer", None)),
+        # Whitespace other than a space separates too.
+        ("Bearer\tabc", None, ("Bearer", "abc")),
         (None, None, (None, None)),
     ),
 )
