@@ -26,7 +26,6 @@ __all__ = [
     "HTTPExtension",
     "InjectionExtension",
     "OpenAPIExtension",
-    "TemplatingExtension",
     "cors",
     "openapi",
     "render",
@@ -36,7 +35,8 @@ __all__ = [
 
 
 def __getattr__(name):
-    # TemplatingExtension needs Jinja2, an optional dependency: imported on use.
+    # TemplatingExtension needs Jinja2, an optional dependency: imported on use,
+    # and not in __all__, so that `import *` works without Jinja2.
     if name == "TemplatingExtension":
         from oldman_server.ext.extensions.templating.extension import (
             TemplatingExtension,

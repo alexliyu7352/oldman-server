@@ -33,8 +33,9 @@ dependencies = [
     "html5tagger>=1.2.1",
     "tracerite>=2.2.0",
     "typing-extensions>=4.4.0",
-    "setuptools>=70.1.0",
-    # oldman_server.ext (Sanic Extensions 25.12.0); Jinja2 is optional (templating).
+    # oldman_server.ext (Sanic Extensions 25.12.0). Optional: Jinja2 (templating),
+    # pydantic, msgspec and attrs (validation of models of those kinds).
+    # scripts/test_wheels.sh imports the package with only these installed.
     "pyyaml>=3.0.0",
 ]
 

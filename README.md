@@ -41,7 +41,7 @@ app.run(host="0.0.0.0", port=8000)
 
 `app.run()`、`oldman-server` 命令行（即 Sanic 的 CLI）、`app.create_server()`、测试客户端 `app.test_client`（`oldman_server.testing`）都会走原生主机，默认运行的 `main_process_*` 监听器照常触发。
 
-Sanic Extensions（sanic-ext 25.12.0，MIT）随包提供为 `oldman_server.ext`：依赖注入、OpenAPI、HTTP（CORS、自动 HEAD/OPTIONS 等）、健康检查、日志、模板（模板需要安装 Jinja2）与请求校验。与没有安装 sanic-ext 的 Sanic 一样，应用默认不被扩展；`app.extend()`、`app.ext` 或 `Extend(app, ...)` 时才启用。
+Sanic Extensions（sanic-ext 25.12.0，MIT）随包提供为 `oldman_server.ext`：依赖注入、OpenAPI、HTTP（CORS、自动 HEAD/OPTIONS 等）、健康检查、日志、模板与请求校验。可选的库按需另装：模板需要 Jinja2，用 pydantic、msgspec 或 attrs 的模型做校验时需要对应的库；不装它们，其余功能照常可用。与没有安装 sanic-ext 的 Sanic 一样，应用默认不被扩展；`app.extend()`、`app.ext` 或 `Extend(app, ...)` 时才启用。
 
 名称与 Sanic 不同：应用类是 `OldmanServer`，配置环境变量前缀是 `OLDMAN_SERVER_`，日志名是 `oldman_server.*`（对照见「与 Sanic 的差异」）。
 
@@ -128,6 +128,7 @@ server {
 
 - 包名 `oldman_server`，不再提供 `import sanic` 的别名。类名去掉 Sanic：`Sanic` → `OldmanServer`、`SanicException` → `OldmanServerException`、`DefaultSanic` → `DefaultServer`、`SanicTestClient` → `TestClient`（内部类同样去掉 Sanic 字样）。配置环境变量前缀 `SANIC_` → `OLDMAN_SERVER_`（如 `OLDMAN_SERVER_NATIVE_SERVER`；不用 `OLDMAN_`，因为 oldman 自己的 `OLDMAN_*` 变量会被读成设置）；日志名 `sanic.root` / `error` / `access` / `server` / `websockets` → `oldman_server.*`；进程名 `Sanic-Main`、`Sanic-Server-*` → `Oldman-Main`、`Oldman-Server-*`。命令行程序名、`--version`、启动信息（MOTD）与 HTML 错误页显示 oldman-server，不再带 Sanic 的标志和 sanic.dev 链接；颜色 `Colors.SANIC` → `Colors.PINK`。
 - Sanic Extensions 随包提供为 `oldman_server.ext`，只在应用要求时启用：`app.extend()`、`app.ext` 或 `Extend(app, ...)`。不再查找 `sanic_ext` 模块，服务器启动时也不会自动扩展应用（原版装了 sanic-ext 时会）；`AUTO_EXTEND = False` 时 `app.extend()` 抛 `RuntimeError`。
+- 不再把 setuptools 列为运行依赖（包里没有用到它；原版 Sanic 列着）；`oldman_server.ext` 在没有 pydantic 时也能导入（原版 sanic-ext 会因此导入失败）。
 - 测试客户端随包提供为 `oldman_server.testing`（源自 sanic-testing 24.6.0），`app.test_client` 需要 httpx；不再需要 sanic-testing。
 - 新增 `response.abort()`：对 `request.respond()` 得到的流式响应，在已发出的数据之后关闭连接、不完成响应（没有结束块，或少于 Content-Length），请求方因此知道内容不完整；之后再 `send()` 会抛出，handler 在下一次 await 被取消（与请求方断开时相同）。还没发出任何数据时抛 `ServerError`（这时应抛异常或返回错误响应），响应已结束时什么都不做。asyncio 服务器与原生主机行为相同；oldman 代理里的 `request.transport.get_protocol().close()`（在原生主机上不起作用）可以换成它。
 - 新增 `@app.rewrite_path`：注册的函数在路由与所有中间件之前对每个请求执行，返回新路径（以 `/` 开头）或 None；按注册顺序依次执行。之后请求的 `path` 和路由都用新路径，查询串保留，`raw_url` 仍是请求方发来的。抛出的异常交给错误处理器。oldman 的 `I18nRequest`（重写私有的 `_parsed_url`）可以换成它：自定义请求类会让原生主机走一般路径，用这个钩子则保留快速路径。
@@ -148,7 +149,7 @@ server {
 - `Authorization` 的认证方案取头部第一个词、不分大小写比较，不再按子字符串匹配：`request.token` 只认 `Bearer` / `Token`，其他方案（如 `Basic`）得到 None，不再返回整个头部；`request.credentials` 的 Basic 密码可以含冒号，非法 base64 视为没有凭据（oldman 的 `bearer_credential`、`basic_credentials`；只接受 Bearer 时用 `parse_credentials(header, ("Bearer",))` 并检查返回的方案）。不带方案的单个令牌仍按令牌处理。
 - 响应中间件抛出的异常与 handler 抛出的一样交给错误处理器，送出错误处理器的响应，这个响应不再经过响应中间件；原版只记一条日志、照样送出原响应（oldman session 的 `save_session` 为此自己把响应换成 500，切换后直接抛出即可）。流式响应在 `request.respond()` 处抛出，handler 不拦截时同样交给错误处理器。送错误响应时响应中间件再出错，仍只记日志、照送错误响应（与原版相同）。
 - `content_type=None` 的响应不发送 `Content-Type`，不再发送字面值 `None`（oldman 代理里的默认值）。
-- 内置扩展类 `HealthExtension`、`HTTPExtension`、`InjectionExtension`、`OpenAPIExtension`、`TemplatingExtension` 从 `oldman_server.ext` 导出（oldman 原先从内部模块路径导入）。
+- 内置扩展类 `HealthExtension`、`HTTPExtension`、`InjectionExtension`、`OpenAPIExtension`、`TemplatingExtension` 从 `oldman_server.ext` 导出（oldman 原先从内部模块路径导入）。`TemplatingExtension` 需要 Jinja2，用到时才导入，不在 `from oldman_server.ext import *` 里。
 
 经原生主机时：
 

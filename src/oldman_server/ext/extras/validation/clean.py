@@ -1,13 +1,17 @@
 from typing import Any, Optional, Type, get_origin, get_type_hints
 
-import pydantic
+# pydantic is optional, as attrs and msgspec are (validation/check.py).
+try:
+    from pydantic import BaseModel
+except ImportError:  # pragma: no cover
+    BaseModel = None
 
 
 def clean_data(
     model: type[object],
     data: dict[str, Any],
 ) -> dict[str, Any]:
-    if isinstance(model, pydantic.BaseModel):
+    if BaseModel is not None and isinstance(model, BaseModel):
         hints: dict[str, type] = {}
         for key, field in model.__annotations__.items():
             hints[key] = field.annotation
