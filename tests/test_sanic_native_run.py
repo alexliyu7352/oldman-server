@@ -35,10 +35,26 @@ APP = textwrap.dedent('''
     async def echo(request):
         return text(request.body.decode())
 
+    def record(name):
+        if name.startswith("main_process"):
+            # One argument, as Sanic's documentation writes these listeners.
+            def listener(app):
+                events.append(name)
+        else:
+            def listener(app, *_):
+                events.append(name)
+        return listener
+
     for name in ("main_process_start", "main_process_ready", "before_server_start",
                  "after_server_start", "before_server_stop", "after_server_stop",
                  "main_process_stop"):
-        getattr(app, name)(lambda app, *_, name=name: events.append(name))
+        getattr(app, name)(record(name))
+
+    main_loops = []
+
+    @app.main_process_start
+    def main_loop(app, loop):
+        main_loops.append([type(app).__name__, f"{type(loop).__module__}.{type(loop).__name__}"])
 
     async def exchange(port, raw):
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -115,8 +131,12 @@ def test_environment_switch_with_default_run():
         app.run(host="127.0.0.1", port={port}, motd=False)
         print("NATIVE " + json.dumps([app.config.NATIVE_SERVER, "oldman_server.native.host" in sys.modules]))
         print("EVENTS " + json.dumps(events))
+        print("MAINLOOPS " + json.dumps(main_loops))
     ''', env={"OLDMAN_SERVER_NATIVE_SERVER": "true", "OLDMAN_SERVER_NATIVE_SHARDS": "1"})
     assert json.loads(lines["NATIVE"]) == [True, True]
+    # Main process listeners get the application and the main process's loop,
+    # a uvloop loop as in Sanic.serve.
+    assert json.loads(lines["MAINLOOPS"]) == [["OldmanServer", "uvloop.Loop"]]
     assert json.loads(lines["RESULTS"])[1] == ["200", "hi"]
     # The default run would use the worker manager; serving it from this process
     # still runs the main process listeners (explicit single_process does not).
@@ -679,3 +699,28 @@ def test_reactor_backend_setting(backend):
     ''')
     assert json.loads(lines["BACKENDS"]) == [backend]
     assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
+
+
+def test_failing_main_process_start_still_runs_main_process_stop():
+    # As Sanic.serve: main_process_start runs before the socket is bound, and
+    # main_process_stop runs even when it fails.
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "app.sock")
+        lines, _ = run(f'''
+            app.config.NATIVE_SERVER = True
+            app.config.NATIVE_SHARDS = 1
+
+            @app.main_process_start
+            def fail(app):
+                raise RuntimeError("main start failed")
+
+            try:
+                app.run(unix={path!r}, motd=False)
+            except RuntimeError as error:
+                print("FAILED " + json.dumps(str(error)))
+            print("EVENTS " + json.dumps(events))
+            print("LEFT " + json.dumps(os.path.exists({path!r})))
+        ''')
+    assert json.loads(lines["FAILED"]) == "main start failed"
+    assert json.loads(lines["EVENTS"]) == ["main_process_start", "main_process_stop"]
+    assert json.loads(lines["LEFT"]) is False

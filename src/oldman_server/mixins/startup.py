@@ -1204,36 +1204,41 @@ class StartupMixin(metaclass=AppMeta):
         }
         kwargs["app_name"] = primary.name
         kwargs["app_loader"] = None
-        sock = configure_socket(
-            kwargs, reserve=native_server(primary.config)
-        )
 
+        sock = None
         main_loop = None
-        main_stop = primary_server_info.settings.get("main_stop")
-        if primary.state.native_main_process:
-            # This process is also the main process the worker manager would
-            # have run: its listeners run as in Sanic.serve.
-            main_loop = new_event_loop()
-            trigger_events(
-                primary_server_info.settings.get("main_start"),
-                main_loop,
-                primary,
-            )
-            trigger_events(
-                primary.listeners["main_process_ready"], main_loop, primary
-            )
-
-        kwargs["server_info"] = {}
-        kwargs["server_info"][primary.name] = []
-        for server_info in primary.state.server_info:
-            server_info.settings = {
-                k: v
-                for k, v in server_info.settings.items()
-                if k not in ("main_start", "main_stop", "app")
-            }
-            kwargs["server_info"][primary.name].append(server_info)
-
         try:
+            if primary.state.native_main_process:
+                # This process is also the main process the worker manager
+                # would have run: its listeners run as in Sanic.serve (the
+                # registered functions, with the application and a loop of the
+                # configured kind, before the socket is bound), and
+                # main_process_stop runs below even when they fail.
+                primary.setup_loop()
+                main_loop = new_event_loop()
+                trigger_events(
+                    primary.listeners.get("main_process_start"),
+                    main_loop,
+                    primary,
+                )
+            sock = configure_socket(
+                kwargs, reserve=native_server(primary.config)
+            )
+            if main_loop is not None:
+                trigger_events(
+                    primary.listeners["main_process_ready"], main_loop, primary
+                )
+
+            kwargs["server_info"] = {}
+            kwargs["server_info"][primary.name] = []
+            for server_info in primary.state.server_info:
+                server_info.settings = {
+                    k: v
+                    for k, v in server_info.settings.items()
+                    if k not in ("main_start", "main_stop", "app")
+                }
+                kwargs["server_info"][primary.name].append(server_info)
+
             worker_serve(monitor_publisher=None, **kwargs)
         except BaseException:
             error_logger.exception(
@@ -1256,7 +1261,11 @@ class StartupMixin(metaclass=AppMeta):
 
             if main_loop is not None:
                 primary.state.native_main_process = False
-                trigger_events(main_stop, main_loop, primary)
+                trigger_events(
+                    primary.listeners.get("main_process_stop"),
+                    main_loop,
+                    primary,
+                )
                 main_loop.close()
 
             cls._cleanup_env_vars()
