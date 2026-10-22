@@ -179,10 +179,10 @@ python probes/sanic_comparison/run.py --python-only --out results/<新目录>   
 推送 tag `v<版本>`（与 `src/oldman_server/__version__.py` 一致，如 `v0.1.0`）后，`.github/workflows/release.yml`：
 
 1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载依赖源码并校验 SHA-256（`scripts/fetch_sources.py`，Seastar 打上 `patches/` 里的补丁），构建 Boost、OpenSSL、fmt、yaml-cpp、c-ares、protobuf、liburing、hwloc（不带插件）与 Seastar，再为 CPython 3.12–3.14 各构建扩展、打包（`hatch_build.py` 把扩展放进 wheel 并标上解释器与平台），由 auditwheel 把依赖库复制进 wheel、标为 manylinux_2_28。依赖与 Seastar 的构建结果按锁文件与脚本缓存。
-2. 把每个 wheel 装进全新环境，跑经原生主机的框架测试与原生主机的运行测试（`scripts/test_wheels.sh`）。
+2. 核对每个 wheel 所带的库都附有许可证（`scripts/check_wheel_licenses.py`），再把每个 wheel 装进全新环境，跑经原生主机的框架测试与原生主机的运行测试（`scripts/test_wheels.sh`）。
 3. 经 PyPI trusted publishing 发布（环境 `pypi`），再建 GitHub release 附上 wheel 与 SHA256SUMS。
 
-每次推送与 PR 由 `.github/workflows/ci.yml` 构建并测试同样的 wheel，不发布。wheel 带上所含第三方库的许可证（`LICENSES/`，作为包的 license files）。
+每次推送与 PR 由 `.github/workflows/ci.yml` 构建并测试同样的 wheel，不发布。wheel 带上所含第三方库的许可证（`LICENSES/`，作为包的 license files）：auditwheel 复制进 wheel 的每个库、编进扩展的 pybind11，都要在上述脚本的清单里并有许可证文件，否则测试失败。Seastar 以 `--as-needed` 链接：它只用到 SCTP 头文件里的常量，所以 wheel 不带 libsctp（LGPL）。
 
 ## 目录
 
@@ -197,4 +197,4 @@ python probes/sanic_comparison/run.py --python-only --out results/<新目录>   
 
 ## 许可证
 
-MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.ext` 源自 sanic-ext 25.12.0，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方库（Seastar、Boost、OpenSSL 等）的许可证见 `LICENSES/`。
+MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.ext` 源自 sanic-ext 25.12.0，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方库（Seastar、Boost、OpenSSL、pybind11 等）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0`。wheel 里的 Seastar 打过一个补丁（`patches/`，说明见 `LICENSES/seastar-CHANGES.txt`）。

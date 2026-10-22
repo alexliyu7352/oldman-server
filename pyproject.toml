@@ -14,10 +14,10 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
 requires-python = ">=3.12,<3.15"
-license = "MIT"
-# This project's license, and those of the libraries the release wheels carry
-# (LICENSES/); the framework layer's own (Sanic, Sanic Extensions,
-# sanic-testing) are in the package.
+# This project's license (MIT, as are Sanic, Sanic Extensions and sanic-testing,
+# whose own are in the package), and those of the libraries the release wheels
+# carry (LICENSES/; scripts/check_wheel_licenses.py keeps the two in step).
+license = "MIT AND Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0"
 license-files = ["LICENSE", "LICENSES/*"]
 # The framework is a fork of Sanic 25.12.1 (MIT, src/oldman_server/LICENSE.sanic);
 # these are its runtime requirements.

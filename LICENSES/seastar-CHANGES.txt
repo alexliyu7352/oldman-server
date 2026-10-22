@@ -1,0 +1,7 @@
+The Seastar library in the oldman-server wheels (libseastar) is built from
+Seastar commit f8ec4bd4178a5015ab7324a8cbbb3c8d65808fa8
+(https://github.com/scylladb/seastar) with one change, the patch
+patches/seastar-header-lines.patch of the oldman-server repository:
+
+  src/http/reply.cc, reply::write_reply_headers: each header and Set-Cookie
+  line is built with make_sstring instead of chained operator+ (same output).

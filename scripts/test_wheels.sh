@@ -11,9 +11,11 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 export PATH="/opt/python/cp312-cp312/bin:$PATH"  # uv, as scripts/build_wheels.sh installed it
+failed=()
+# Every library a wheel carries comes with its license.
+python scripts/check_wheel_licenses.py "$@" || failed+=("licenses")
 # Every wheel and every suite runs even after a failure, so that one run shows
 # them all; the exit status says whether any failed.
-failed=()
 for wheel in "$@"; do
   tag="$(basename "$wheel" | cut -d- -f3)"            # cp312 ...
   python="/opt/python/$tag-$tag/bin/python"

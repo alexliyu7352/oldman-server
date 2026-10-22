@@ -105,10 +105,13 @@ if [[ "$(cat "$prefix/.stamp" 2>/dev/null)" != "$stamp" ]]; then
     --disable-gl --disable-io --disable-doxygen \
     && make -j "$jobs" && make install)
 
-  # As scripts/build.sh configures it for development.
+  # As scripts/build.sh configures it for development. --as-needed (the
+  # default of Ubuntu's linker, not of this image's): Seastar uses only the
+  # SCTP header's constants, so libsctp (LGPL) is not linked into the wheels.
   cmake -S "$src/seastar" -B "$build/seastar" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23 \
     -DCMAKE_CXX_FLAGS="-DSEASTAR_DEFAULT_ALLOCATOR" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--as-needed" \
     -DCMAKE_PREFIX_PATH="$prefix" -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
     -DBOOST_ROOT="$prefix" -DOPENSSL_ROOT_DIR="$prefix" \
     -Dc-ares_LIBRARY="$prefix/lib/libcares.so" -Dc-ares_INCLUDE_DIR="$prefix/include" \
