@@ -64,3 +64,34 @@ jobs:
           name: wheels-${{ matrix.arch }}
           path: dist/*.whl
           if-no-files-found: error
+
+  # The wheels on the distributions users run them on: manylinux allows the
+  # wheels to need a few system libraries (libstdc++, libgcc_s, libz,
+  # libatomic) without carrying them, which a slim image may not have.
+  slim:
+    name: slim images (${{ matrix.arch }})
+    needs: wheels
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: wheels-${{ matrix.arch }}
+          path: dist
+      - name: Install and load the extension in python:3.x-slim
+        run: |
+          failed=0
+          for minor in 12 13 14; do
+            docker run --rm -v "$PWD/dist:/dist:ro" "python:3.$minor-slim" sh -c "
+              pip install --quiet --root-user-action=ignore /dist/*-cp3$minor-*.whl &&
+              python -c 'import oldman_server.native._native, oldman_server.native.engine; print(\"3.$minor ok\")'
+            " || failed=1
+          done
+          exit $failed
