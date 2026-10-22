@@ -68,3 +68,11 @@ def test_wheel_without_the_extension_is_refused(sdist, tmp_path):
                    env={"OLDMAN_SERVER_PURE_WHEEL": "1"})
     assert result.returncode == 0, result.stderr
     assert [path.name for path in (tmp_path / "dist").glob("*-py3-none-any.whl")]
+
+
+def test_runtime_requirements_are_not_pinned():
+    # Exact versions the tests rely on belong in the lock and its constraints
+    # (uv.lock, [tool.uv]), not in what users install the package with.
+    import tomllib
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    assert [requirement for requirement in project["dependencies"] if "==" in requirement] == []

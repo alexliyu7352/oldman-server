@@ -16,6 +16,7 @@ constraints = [
     { name = "propcache", specifier = "==0.5.4" },
     { name = "pygments", specifier = "==2.21.0" },
     { name = "typing-extensions", specifier = "==4.16.0" },
+    { name = "uvloop", specifier = "==0.22.1" },
     { name = "yarl", specifier = "==1.25.1" },
 ]
 
@@ -779,7 +780,7 @@ requires-dist = [
     { name = "sanic-routing", specifier = ">=23.12.0" },
     { name = "tracerite", specifier = ">=2.2.0" },
     { name = "typing-extensions", specifier = ">=4.4.0" },
-    { name = "uvloop", specifier = "==0.22.1" },
+    { name = "uvloop", specifier = ">=0.22.1" },
     { name = "websockets", specifier = ">=10.0" },
 ]
 

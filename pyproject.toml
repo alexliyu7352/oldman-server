@@ -22,7 +22,7 @@ license-files = ["LICENSE", "LICENSES/*"]
 # The framework is a fork of Sanic 25.12.1 (MIT, src/oldman_server/LICENSE.sanic);
 # these are its runtime requirements.
 dependencies = [
-    "uvloop==0.22.1",
+    "uvloop>=0.22.1",
     "sanic-routing>=23.12.0",
     "httptools>=0.0.10",
     # json() and request.json (the default dumps/loads).
@@ -81,8 +81,10 @@ benchmark = ["granian==2.8.1", "ujson==6.0.0", {include-group = "http"}]
 
 [tool.uv]
 default-groups = ["build", "test", "benchmark"]
-# Preserve the existing dependency versions during the interpreter migration.
+# Preserve the existing dependency versions during the interpreter migration;
+# uvloop 0.22.1 is the version the tests' strict expectations describe.
 constraint-dependencies = [
+    "uvloop==0.22.1",
     "aiohappyeyeballs==2.7.1",
     "aiosignal==1.4.0",
     "attrs==26.1.0",
