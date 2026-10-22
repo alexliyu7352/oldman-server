@@ -29,6 +29,7 @@ from oldman_server.native.listen import worker_address
 from oldman_server.server.async_server import AsyncioServer
 from oldman_server.server.protocols.http_protocol import HttpProtocol
 from oldman_server.server.socket import (
+    bind_socket,
     bind_unix_socket,
     remove_unix_socket,
     reserved_for_listeners,
@@ -363,7 +364,11 @@ def _serve_native(
     # address Sanic reserved (configure_socket), this process listens with
     # its own SO_REUSEPORT socket: the kernel spreads connections over the
     # worker processes, whose shard 0 hands them to the other shards.
-    sockets = [] if sock is None else [sock]
+    if sock is None:
+        # create_server() without a socket: bound here as Sanic's bind_socket
+        # binds (a host name resolves), then served like a socket passed in.
+        sock = bind_socket(host or "127.0.0.1", port or 0, backlog=backlog)
+    sockets = [sock]
     accept = None
     if sock is not None and reserved_for_listeners(sock):
         sock = reuseport_listener(sock, backlog)

@@ -800,3 +800,28 @@ def test_a_native_host_that_cannot_start_fails_the_run():
     assert result.returncode != 0
     assert "RUN RETURNED" not in result.stdout
     assert "shard_cpus must be distinct" in result.stderr
+
+
+def test_create_server_with_a_host_name():
+    # Without a socket, create_server() binds as Sanic does: a host name works.
+    port = free_port()
+    lines, _ = run(f'''
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SHARDS = 1
+
+        async def main():
+            server = await app.create_server(host="localhost", port={port},
+                                             return_asyncio_server=True)
+            await server.startup()
+            await server.before_start()
+            await server.after_start()
+            status, body = await exchange({port}, b"GET /json HTTP/1.1\\r\\nHost: named\\r\\n\\r\\n")
+            print("RESULT " + json.dumps([status, json.loads(body)["host"]]), flush=True)
+            await server.before_stop()
+            await server.close()
+            await server.after_stop()
+
+        import uvloop
+        uvloop.run(main())
+    ''')
+    assert json.loads(lines["RESULT"]) == ["200", "named"]
