@@ -358,7 +358,9 @@ class Engine:
         application_error_handler(request): renders a protocol error the host
         detected (request.error is "<status>:<message>") like application_handler;
         without it the host's plain error response is used.
-        application_connections: a dict of the open connections by request.connection.
+        application_connections: a dict of the open connections by request.connection
+            (a state with connection_lost(), or None or False while none exists;
+            False: its peer left).
         A connection maps to None until the handler stores its state there; on
         close the entry is removed and the state's connection_lost() called."""
         if (not config.shard_cpus or len(set(config.shard_cpus)) != len(config.shard_cpus)
@@ -462,6 +464,9 @@ class Engine:
         self.application_connections = (application_connections
                                         if application_connections is not None else {})
         self._application_timeouts = set()
+        # Requests whose peer left (FIN or RST) while they ran: cancelled,
+        # as Sanic's connection_lost cancels the handler.
+        self._application_lost = set()
         self._application_native_results = application_native_results
         self._application_bytes_headers = application_bytes_headers
         self._application_tasks = {}
@@ -707,6 +712,10 @@ class Engine:
         """Whether the host reported the response deadline of this request."""
         return request_id in self._application_timeouts
 
+    def lost(self, request_id):
+        """Whether the host reported that this request's peer left."""
+        return request_id in self._application_lost
+
     async def stream_send(self, request_id, shard, kind, body, status=0, headers=(), length=-1):
         """Queue one piece of a streamed application response.
 
@@ -885,6 +894,8 @@ class Engine:
                 self._application_inbound.pop(request_id, None)
             if self._application_timeouts:
                 self._application_timeouts.discard(request_id)
+            if self._application_lost:
+                self._application_lost.discard(request_id)
             try:
                 if result is not None:
                     self._queue_application_result(request_id, shard, result)
@@ -970,6 +981,22 @@ class Engine:
                             future.set_exception(OSError(code, os.strerror(code), path))
                         else:
                             future.set_result(size)
+                return
+            if route == "application_lost":
+                # The peer left; size is the connection's key. Its state is
+                # marked lost (False: created later, as lost) before the
+                # cancellation, as Sanic's connection_lost does.
+                connections = self.application_connections
+                state = connections.get(size)
+                if state:
+                    state.connection_lost()
+                elif size in connections:
+                    connections[size] = False
+                entry = self._application_tasks.get(parent)
+                if entry is not None:
+                    self._application_lost.add(parent)
+                    entry[0].cancel()
+                    self._reap_unstarted_application(parent)
                 return
             if route == "application_timeout":
                 entry = self._application_tasks.get(parent)
@@ -1103,7 +1130,8 @@ class Engine:
                                                             self.application_connections):
                 if (len(values) <= 4 or (len(values) == 10 and values[3] == "application")
                         or values[3] in ("application_done", "application_written", "application_data",
-                                         "application_timeout", "application_file")):
+                                         "application_timeout", "application_file",
+                                         "application_lost")):
                     self._application_event(values)
                     continue
                 request = Request(*values)
@@ -1241,7 +1269,7 @@ class Engine:
     def _release_connections(self):
         """The server stopped: every connection is gone."""
         for state in tuple(self.application_connections.values()):
-            if state is not None:
+            if state:  # None or False: no state was created for it
                 state.connection_lost()
         self.application_connections.clear()
 

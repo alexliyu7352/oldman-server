@@ -129,9 +129,10 @@ class _NativeConnection:
         return await request.stream.websocket_handshake(request, subprotocols)
 
 
-# Open native connections by id, None until a request asks for their state. The
-# native host registers each connection and removes it when it closes.
-native_connections: dict[int, _NativeConnection | None] = {}
+# Open native connections by id, None until a request asks for their state
+# (False: the peer left before then). The native host registers each
+# connection and removes it when it closes.
+native_connections: dict[int, _NativeConnection | None | bool] = {}
 
 
 def native_connection(native) -> _NativeConnection:
@@ -140,9 +141,12 @@ def native_connection(native) -> _NativeConnection:
     key = native.connection
     if key and key in native_connections:
         connection = native_connections[key]
-        if connection is None:
+        if connection is None or connection is False:
+            lost = connection is False
             connection = native_connections[key] = _NativeConnection(
                 native.client, native.server, native.unix_socket)
+            if lost:
+                connection.connection_lost()
     else:
         connection = _NativeConnection(native.client, native.server, native.unix_socket)
         if key:

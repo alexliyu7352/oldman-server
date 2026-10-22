@@ -757,6 +757,8 @@ class NativeApplication:
         server stops) ends the request."""
         if _engine is not None and _engine.timed_out(exchange.native.request_id):
             exception = ServiceUnavailable("Response Timeout")
+        elif _engine is not None and _engine.lost(exchange.native.request_id):
+            exception = RequestCancelled()  # the peer left: Sanic's connection_lost
         elif asyncio.current_task().cancelling():
             raise error
         else:

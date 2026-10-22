@@ -633,7 +633,9 @@ PYBIND11_MODULE(_native, m) {
                         if (kept) {
                             auto state = py::reinterpret_borrow<py::object>(kept);
                             if (PyDict_DelItem(registry, key.ptr()) < 0) throw py::error_already_set();
-                            if (!state.is_none()) state.attr("connection_lost")();
+                            // None or False: no state was created for it.
+                            if (state.ptr() != Py_None && state.ptr() != Py_False)
+                                state.attr("connection_lost")();
                         }
                     }
                     continue;

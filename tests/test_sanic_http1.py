@@ -1,10 +1,12 @@
 """HTTP/1.1 wire behavior of the framework host, over raw sockets."""
 import asyncio
+import dataclasses
 from http import HTTPStatus
 from pathlib import Path
 
 from oldman_server import OldmanServer
 from oldman_server.response import HTTPResponse, empty, file_stream, json, raw, text
+import pytest
 import uvloop
 
 from test_http import config
@@ -162,11 +164,14 @@ async def read_chunked(reader):
         body += data[:-2]
 
 
-def run(name, *scenarios, app_factory=None, **overrides):
-    """Each scenario gets its own connection; one Seastar lifecycle per test."""
+def run(name, *scenarios, app_factory=None, backend=None, **overrides):
+    """Each scenario gets its own connection; one Seastar lifecycle per test.
+    backend: Seastar's reactor backend (default epoll)."""
     async def main():
         app = (app_factory or make_app)(name)
         cfg = config(application_dispatch_all=True, **overrides)
+        if backend is not None:
+            cfg = dataclasses.replace(cfg, reactor_backend=backend)
         results = []
         async with serve()(app, cfg):
             for scenario in scenarios:
@@ -697,3 +702,163 @@ def test_accepting_resumes_after_running_out_of_descriptors():
 
     import os
     assert uvloop.run(main()) == "200"
+
+
+def lost_app(name):
+    """A handler that waits, and records how it ended, for the tests of a
+    peer leaving."""
+    from oldman_server.exceptions import RequestCancelled
+
+    app = OldmanServer(name, configure_logging=False)
+    app.config.ACCESS_LOG = False
+    app.config.RESPONSE_TIMEOUT = 30
+    app.ctx.ends = []
+
+    @app.get("/wait")
+    async def wait(request):
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            app.ctx.ends.append(("cancelled", request.conn_info.lost))
+            raise
+        app.ctx.ends.append("completed")
+        return text("done")
+
+    @app.post("/stream-then-read", stream=True)
+    async def stream_then_read(request):
+        # Answers first, then reads the body (as a proxy streaming both ways).
+        response = await request.respond()
+        await response.send(b"started\n")
+        try:
+            async for _ in request.stream:
+                pass
+        except asyncio.CancelledError:
+            app.ctx.ends.append("reading cancelled")
+            raise
+        app.ctx.ends.append("body ended")
+        await response.eof()
+
+    @app.exception(RequestCancelled)
+    async def cancelled(request, exception):
+        app.ctx.ends.append("RequestCancelled handler")
+        return text("cancelled", status=499)
+
+    @app.get("/ends")
+    async def ends(request):
+        return json(app.ctx.ends)
+
+    return app
+
+
+def reset(writer):
+    import socket
+    import struct
+    sock = writer.get_extra_info("socket")
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    writer.transport.abort()
+
+
+def on_backend(backend):
+    """For a test of each reactor backend (one per function: a process runs
+    one Seastar, with one backend)."""
+    from test_sanic_native_run import io_uring_available
+    if backend == "io_uring" and not io_uring_available():
+        pytest.skip("io_uring_setup is not permitted here")
+    return backend
+
+
+def test_a_peer_leaving_cancels_its_handler_as_in_sanic():
+    peer_leaving(on_backend("epoll"))
+
+
+def test_a_peer_leaving_cancels_its_handler_on_linux_aio():
+    peer_leaving(on_backend("linux-aio"))
+
+
+def test_a_peer_leaving_cancels_its_handler_on_io_uring():
+    peer_leaving(on_backend("io_uring"))
+
+
+def peer_leaving(backend):
+    # The handler of a request whose client closes (FIN) or resets (RST) the
+    # connection is cancelled, and RequestCancelled goes to the error
+    # handler, as Sanic does; the native host ran it to the end unnoticed.
+    async def leave(how):
+        async def scenario(reader, writer):
+            writer.write(b"GET /wait HTTP/1.1\r\nHost: x\r\n\r\n")
+            await writer.drain()
+            await asyncio.sleep(0.3)
+            if how == "fin":
+                writer.write_eof()
+            else:
+                reset(writer)
+            await asyncio.sleep(0.5)
+        return scenario
+
+    async def ends(reader, writer):
+        writer.write(b"GET /ends HTTP/1.1\r\nHost: x\r\n\r\n")
+        return json_module.loads((await read_response(reader))[2])
+
+    async def main_scenarios():
+        return [await leave("fin"), await leave("rst"), ends]
+
+    import json as json_module
+    scenarios = uvloop.run(main_scenarios())
+    *_, recorded = run("http1_peer_leaves", *scenarios, app_factory=lost_app, backend=backend)
+    assert recorded == [["cancelled", True], "RequestCancelled handler",
+                        ["cancelled", True], "RequestCancelled handler"]
+
+
+def test_a_body_that_stops_arriving_ends_its_handler():
+    body_stops(on_backend("epoll"))
+
+
+def test_a_body_that_stops_arriving_ends_its_handler_on_linux_aio():
+    body_stops(on_backend("linux-aio"))
+
+
+def test_a_body_that_stops_arriving_ends_its_handler_on_io_uring():
+    body_stops(on_backend("io_uring"))
+
+
+def body_stops(backend):
+    # Reset mid-body: the handler reading it is cancelled at once (it waited
+    # for the response deadline); the client closing after the response has
+    # started: the handler still reading is cancelled (it waited forever).
+    async def reset_mid_body(reader, writer):
+        writer.write(b"POST /stream-then-read HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nabc")
+        await reader.readuntil(b"started\n")
+        reset(writer)
+        await asyncio.sleep(0.5)
+
+    async def fin_mid_body(reader, writer):
+        writer.write(b"POST /stream-then-read HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nabc")
+        await reader.readuntil(b"started\n")
+        writer.write_eof()
+        await asyncio.sleep(0.5)
+
+    async def ends(reader, writer):
+        writer.write(b"GET /ends HTTP/1.1\r\nHost: x\r\n\r\n")
+        import json as json_module
+        return json_module.loads((await read_response(reader))[2])
+
+    *_, recorded = run("http1_body_stops", reset_mid_body, fin_mid_body, ends, app_factory=lost_app,
+                       backend=backend)
+    assert recorded == ["reading cancelled", "reading cancelled"]
+
+
+def test_connections_ending_abnormally_leave_no_state_behind():
+    # Python keeps per-connection state until the host says the connection
+    # closed; a reset connection was never reported, and the state stayed.
+    from oldman_server.models.server_types import native_connections
+
+    async def resets(reader, writer):
+        for _ in range(20):
+            r, w = await asyncio.open_connection("127.0.0.1", writer.get_extra_info("peername")[1])
+            w.write(b"GET /small HTTP/1.1\r\nHost: x\r\n\r\n")
+            await read_response(r)
+            reset(w)
+        await asyncio.sleep(0.5)
+        return len(native_connections)
+
+    assert run("http1_reset_state", resets) == [0]  # (this connection sent no request)

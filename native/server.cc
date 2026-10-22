@@ -481,9 +481,32 @@ class Service {
         // sent after a request that switches protocols belong to the tunnel.
         std::string* buffer = nullptr;
         size_t* consumed = nullptr;
+        // The request Python handles on this connection (its id), while it
+        // does: the peer leaving cancels it. tunnel: a WebSocket tunnel
+        // reads the peer itself and reports its end.
+        uint64_t handling = 0;
+        bool tunnel = false;
+        bool peer_gone = false;  // the peer closed (FIN) or reset (RST) it
+        bool shut_here = false;  // this side shut the input (deadline, stop, the end)
         explicit AppConnection(ss::connected_socket s)
             : socket(std::move(s)), input(socket.input()), output(socket.output()) {}
+        void shut_input() {
+            shut_here = true;
+            try { socket.shutdown_input(); } catch (...) {}  // ENOTCONN after a reset
+        }
     };
+    // The peer of a connection left: as Sanic's connection_lost, the request
+    // Python is handling there is cancelled (application_lost; the event's
+    // size is the connection key, whose state Python marks lost).
+    void peer_left(AppConnection& connection, uint64_t connection_key) {
+        if (connection.peer_gone) return;
+        connection.peer_gone = true;
+        if (!connection.handling || connection.tunnel || closing) return;
+        RequestEvent lost{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
+                          {}, "application_lost", connection_key};
+        lost.parent = connection.handling;
+        shared.publish(std::move(lost), true);
+    }
     std::optional<ss::server_socket> app_listener, worker_listener;
     ss::future<> app_accepting = ss::make_ready_future<>(), worker_accepting = ss::make_ready_future<>();
     // Shared listen_fd: shard 0's accept loop (accept_shared) and the eventfd
@@ -705,8 +728,16 @@ class Service {
         ss::lowres_clock::time_point request_started{};
         ss::timer<ss::lowres_clock> deadline([&] {
             expired = waiting;
-            connection.socket.shutdown_input();
+            connection.shut_input();
         });
+        // The peer leaving (FIN or RST) while Python handles a request here.
+        // One watch for the connection's life, which ends when either side
+        // shuts the input; this side's own shutdowns are not the peer leaving.
+        auto watching = connection.socket.wait_input_shutdown().then_wrapped(
+            [this, &connection, connection_key](ss::future<> done) {
+                done.ignore_ready_future();
+                if (!connection.shut_here) peer_left(connection, connection_key);
+            });
         // mid_request: a body is being received even if nothing of it is buffered.
         auto read_more = [&](bool mid_request = false) -> ss::future<bool> {
             const bool idle = !mid_request && buffer.size() == consumed;
@@ -830,7 +861,7 @@ class Service {
                 if (complete) {
                     co_await respond_application(connection, method, std::move(input), std::move(body),
                                                  head_request, http11, close, output, 0);
-                    keep = !close;
+                    keep = !close && !connection.peer_gone;
                     continue;
                 }
                 // Sanic stops keep-alive once a body fails to read.
@@ -889,9 +920,23 @@ class Service {
                         if (!piece.empty() || end) publish_data(std::move(piece), end ? "end" : "");
                         if (end) co_return;
                         if (more_here) continue;
-                        if (!co_await read_more(true)) {
-                            body_ok = false;  // peer closed or deadline mid-body
-                            abort_request(root, expired == Wait::request ? 408 : 503);
+                        bool more = false;
+                        try {
+                            more = co_await read_more(true);
+                        } catch (...) {}  // reset by the peer
+                        if (!more) {
+                            body_ok = false;
+                            if (expired == Wait::request) {
+                                // A response may have started: its handler's read
+                                // ends with the timeout either way.
+                                publish_data({}, "error:408:Request Timeout");
+                                abort_request(root, 408);
+                            } else {
+                                // The peer closed or reset it mid-body: the handler
+                                // is cancelled, also once its response started.
+                                peer_left(connection, connection_key);
+                                abort_request(root, 503);
+                            }
                             co_return;
                         }
                     }
@@ -910,14 +955,7 @@ class Service {
                     close = true;
                     break;
                 }
-                keep = !close;
-            }
-            if (sequence) {
-                // Python keeps per-connection state (ConnInfo, protocol) until this.
-                RequestEvent closed{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                                    {}, "application_closed", 0};
-                closed.parent = connection_key;
-                shared.publish(std::move(closed), true);
+                keep = !close && !connection.peer_gone;
             }
             if (expired == Wait::request) {
                 // Sanic answers a request that did not arrive in time with 408.
@@ -925,7 +963,17 @@ class Service {
             }
             co_await flush_output(connection, output);
         } catch (...) { if (!closing) ++counts.errors; }
+        if (sequence) {
+            // Python keeps per-connection state (ConnInfo, protocol) until this,
+            // however the connection ended (a reset or a failed write included).
+            RequestEvent closed{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
+                                {}, "application_closed", 0};
+            closed.parent = connection_key;
+            shared.publish(std::move(closed), true);
+        }
         deadline.cancel();
+        if (!connection.shut_here) connection.shut_input();
+        co_await std::move(watching);  // it refers to the connection
         try { co_await connection.output.close(); } catch (...) {}
         try { co_await connection.input.close(); } catch (...) {}
         app_peers.erase(id);
@@ -946,7 +994,9 @@ class Service {
         uint64_t root = 0;
         unsigned terminal_status = 500;
         bool retired = false;
+        const auto connection_key = input.connection;
         auto finished = ss::defer([&] () noexcept {
+            connection.handling = 0;
             if (!root || retired) return;
             RequestEvent event{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
                                method, "application_done", terminal_status};
@@ -965,9 +1015,18 @@ class Service {
         std::optional<Decision> answer;
         try {
             if (closing) { reject(error_status ? error_status : 503); co_return; }
-            answer = co_await decide("application", method, size, &body,
-                                     streamed_id ? "more" : std::move(parameter), 0, &root, &input,
-                                     streamed_id, true);
+            // decide publishes the request (and sets root) before it waits.
+            auto deciding = decide("application", method, size, &body,
+                                   streamed_id ? "more" : std::move(parameter), 0, &root, &input,
+                                   streamed_id, true);
+            connection.handling = root;
+            if (connection.peer_gone) {
+                // Gone before the request reached Python (a reset while the
+                // head or body arrived): it is cancelled as it starts.
+                connection.peer_gone = false;
+                peer_left(connection, connection_key);
+            }
+            answer = co_await std::move(deciding);
         } catch (...) {
             ++counts.errors;
             reject(error_status ? error_status : closing ? 503 : 500);
@@ -1042,6 +1101,7 @@ class Service {
         auto& waiter = *found->second;
         enum class Framing { chunked, length, until_close, raw };
         const bool tunnel = start.code == 101;
+        connection.tunnel = tunnel;
         const auto framing = tunnel ? Framing::raw : start.content_length >= 0 ? Framing::length :
                              http11 ? Framing::chunked : Framing::until_close;
         const bool has_body = tunnel || http1::status_has_body(start.code);
@@ -1227,7 +1287,7 @@ class Service {
         if (tunnel) {
             // Stop reading the peer: the input shutdown ends a pending read.
             tunnel_over = true;
-            connection.socket.shutdown_input();
+            connection.shut_input();
             if (waiter.resumed) waiter.resumed->set_value();
         }
         co_await std::move(reading);
@@ -1648,7 +1708,7 @@ public:
             peer->socket.shutdown_input(); peer->socket.shutdown_output();
         }
         for (auto& [id, peer] : app_peers) {
-            peer->socket.shutdown_input(); peer->socket.shutdown_output();
+            peer->shut_input(); peer->socket.shutdown_output();
         }
         for (auto& [id, waiter] : waiters) {
             if (!waiter->replied) {
