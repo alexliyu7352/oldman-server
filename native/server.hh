@@ -108,8 +108,10 @@ struct RequestDecision {
     int kind = DecisionKind::complete;
     int64_t content_length = -1;  // stream_start: application Content-Length, or -1
 };
+// upgrade: the status of a framework host stream start, where a 101 begins a tunnel.
 bool valid_http_response(int status,
-    const std::vector<std::pair<std::string, std::string>>& headers, bool no_body_statuses = false);
+    const std::vector<std::pair<std::string, std::string>>& headers, bool no_body_statuses = false,
+    bool upgrade = false);
 // A deliberately small, typed native operation contract, not a Python compiler.
 // Each shard owns a copy; version acknowledges an update on every shard.
 struct NativePolicy {

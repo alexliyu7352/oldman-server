@@ -223,15 +223,19 @@ bool copy_latin1(PyObject* value, std::string& out) {
     return true;
 }
 
+// Writes the decision only when every field is valid, so a caller's invalid
+// branch still holds its empty 500. upgrade: a 101 may start a tunnel.
 bool checked_http_response_fields(PyObject* status, PyObject* body, PyObject* headers,
                                   size_t max_response_bytes, probe::RequestDecision& decision,
-                                  bool bytes_headers = false, bool no_body_statuses = false) {
+                                  bool bytes_headers = false, bool no_body_statuses = false,
+                                  bool upgrade = false) {
     if (!PyLong_CheckExact(status) || !PyBytes_CheckExact(body) || !PyTuple_CheckExact(headers))
         return false;
     int overflow = 0;
     const auto code = PyLong_AsLongAndOverflow(status, &overflow);
     if (PyErr_Occurred()) throw py::error_already_set();
-    if (overflow || (code < 200 && !(code == 101 && no_body_statuses)) || code > 599) return false;
+    if (overflow || (code < 200 && !(code == 101 && upgrade && no_body_statuses)) || code > 599)
+        return false;
     if (!no_body_statuses && (code == 204 || code == 304)) return false;
     if (static_cast<size_t>(PyBytes_GET_SIZE(body)) > max_response_bytes) return false;
     const auto count = PyTuple_GET_SIZE(headers);
@@ -275,7 +279,8 @@ bool checked_http_response_fields(PyObject* status, PyObject* body, PyObject* he
                    !copy_latin1(PyTuple_GET_ITEM(pair, 1), value)) return false;
         owned_headers.emplace_back(std::move(name), std::move(value));
     }
-    if (!probe::valid_http_response(static_cast<int>(code), owned_headers, no_body_statuses)) return false;
+    if (!probe::valid_http_response(static_cast<int>(code), owned_headers, no_body_statuses, upgrade))
+        return false;
     decision.body.assign(PyBytes_AS_STRING(body), static_cast<size_t>(PyBytes_GET_SIZE(body)));
     decision.code = static_cast<int>(code);
     decision.headers = std::move(owned_headers);
@@ -284,9 +289,10 @@ bool checked_http_response_fields(PyObject* status, PyObject* body, PyObject* he
 
 bool checked_http_response(py::tuple item, size_t max_response_bytes,
                            probe::RequestDecision& decision, bool bytes_headers,
-                           bool no_body_statuses = false) {
+                           bool no_body_statuses = false, bool upgrade = false) {
     return checked_http_response_fields(item[2].ptr(), item[3].ptr(), item[4].ptr(),
-                                         max_response_bytes, decision, bytes_headers, no_body_statuses);
+                                         max_response_bytes, decision, bytes_headers, no_body_statuses,
+                                         upgrade);
 }
 
 struct ApplicationResponseBatch {
@@ -742,8 +748,8 @@ PYBIND11_MODULE(_native, m) {
                         ++invalid;
                     }
                 } else if (checked_http_response(item, max_response_bytes, decision, bytes_headers,
-                                                 no_body_statuses) &&
-                           (decision.code != 101 || kind == probe::DecisionKind::stream_start)) {
+                                                 no_body_statuses,
+                                                 kind == probe::DecisionKind::stream_start)) {
                     // A 101 only starts a tunnel.
                     decision.kind = kind;
                     if (size == 7) decision.content_length = py::cast<int64_t>(item[6]);

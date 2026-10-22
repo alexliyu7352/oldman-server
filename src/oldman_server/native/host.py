@@ -100,6 +100,16 @@ def _log_access(request, exchange, started):
     _http1.access_logger.info("", extra=extra)
 
 
+def _final_status(status):
+    """Http.http1_response_header's check, for a status that is not a plain
+    int of at least 200: a handler's response has a final status (only the
+    WebSocket handshake sends a 101, not through here). An int subclass such
+    as HTTPStatus is sent as its int value."""
+    if not isinstance(status, int) or status < 200:
+        raise RuntimeError(f"Invalid response status {status!r}")
+    return int(status)
+
+
 def _encode_header(name, value):
     name = name.translate(HEADER_TRANSLATION_TABLE).encode("ascii")
     value = f"{value}".translate(HEADER_TRANSLATION_TABLE).encode(errors="surrogateescape")
@@ -384,6 +394,9 @@ class _BufferedExchange:
             self._fail("streaming responses are not supported")
         response = self.response
         try:
+            status = response.status
+            if type(status) is not int or status < 200:
+                status = _final_status(status)
             body = response.body or b""
             if type(body) is not bytes or type(data) is not bytes:
                 self._fail("response body must be bytes")
@@ -401,7 +414,7 @@ class _BufferedExchange:
         # produce an error response, only end the connection.
         self.streaming, self.stage = "open", Stage.RESPONSE
         await _engine.stream_send(
-            self.native.request_id, self.native.shard, STREAM_START, first, response.status,
+            self.native.request_id, self.native.shard, STREAM_START, first, status,
             tuple(headers), int(lengths[0]) if lengths else -1)
 
     async def _stream_more(self, data, end_stream):
@@ -451,11 +464,13 @@ class _BufferedExchange:
                 self._fail("response body exceeds the native limit")
             body = body + data if data else body
             response = self.response
+            status = response.status
+            if type(status) is not int or status < 200:
+                status = _final_status(status)
             if type(response) in _COMPLETE_TYPES and response._headers is None:
                 # Headers never accessed: processed_headers yields only the default
                 # Content-Type, which the response's headers still show afterwards.
-                status = response.status
-                if (status not in (204, 304) and not (100 <= status < 200)  # has_message_body
+                if (status not in (204, 304)  # has_message_body (status is final)
                         and response.content_type is not None):
                     response._headers, headers = _sent_content_type(response.content_type)
                 else:
@@ -470,9 +485,9 @@ class _BufferedExchange:
             native = self.native
             if (lengths and native is not None and lengths[0].isdigit()
                     and native.method == "HEAD"):
-                self.result = response.status, body, tuple(headers), 0, int(lengths[0])
+                self.result = status, body, tuple(headers), 0, int(lengths[0])
             else:
-                self.result = response.status, body, tuple(headers)
+                self.result = status, body, tuple(headers)
             self.stage = Stage.IDLE
         except Exception as error:
             self.failure = error

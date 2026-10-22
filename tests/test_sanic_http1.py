@@ -1,9 +1,10 @@
 """HTTP/1.1 wire behavior of the framework host, over raw sockets."""
 import asyncio
+from http import HTTPStatus
 from pathlib import Path
 
 from oldman_server import OldmanServer
-from oldman_server.response import empty, file_stream, json, raw, text
+from oldman_server.response import HTTPResponse, empty, file_stream, json, raw, text
 import uvloop
 
 from test_http import config
@@ -119,6 +120,19 @@ def make_app(name):
     @app.get("/cancelled")
     async def cancelled(request):
         return text(str(getattr(app.ctx, "cancelled", False)))
+
+    @app.get("/informational")
+    async def informational(request):
+        # Not a final status: Sanic raises RuntimeError("Invalid response status").
+        kind = request.args.get("kind")
+        if kind == "stream":
+            response = await request.respond(status=101, headers={"Upgrade": "x"})
+            await response.send(b"data")
+            return
+        if kind == "enum":  # an int subclass is a valid status
+            return HTTPResponse(b"created", status=HTTPStatus.CREATED)
+        return HTTPResponse(status=int(request.args.get("status", 101)),
+                            headers={"Upgrade": "x"} if kind == "headers" else None)
     return app
 
 
@@ -541,3 +555,25 @@ def test_sanic_error_handling_timeouts_and_connection_state():
     assert results[4] == (True, (200, b"short"))
     assert results[5] == [b"1:1", b"2:2", b"3:3"]
     assert results[6] == 0  # only connections Python still keeps state for
+
+
+def test_informational_status_from_a_handler_is_an_error():
+    # Only the WebSocket handshake sends a 101; a handler's 1xx response goes
+    # to the error handler (500), as RuntimeError in Sanic's response header.
+    def request(query):
+        async def scenario(reader, writer):
+            writer.write(f"GET /informational?{query} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            return (await reader.readuntil(b"\r\n")).decode().split(" ")[1]
+        return scenario
+    queries = ("kind=plain", "kind=headers", "kind=stream", "status=102")
+    statuses = run("http1_informational", *(request(query) for query in (*queries, "kind=enum")))
+    assert statuses == ["500"] * 4 + ["201"]
+    # The native boundary holds too, without the adapter's check: the host
+    # answers an empty 500, and a 101 stream start still opens a tunnel.
+    from oldman_server.native import host
+    check, host._final_status = host._final_status, lambda status: status
+    try:
+        statuses = run("http1_informational_native", *(request(query) for query in queries))
+    finally:
+        host._final_status = check
+    assert statuses == ["500", "500", "101", "500"]

@@ -44,15 +44,17 @@
 namespace probe {
 namespace ss = seastar;
 bool valid_http_response(int status,
-    const std::vector<std::pair<std::string, std::string>>& headers, bool no_body_statuses) {
+    const std::vector<std::pair<std::string, std::string>>& headers, bool no_body_statuses,
+    bool upgrade) {
     // Pinned Seastar httpd unconditionally adds framing, including to 204/304.
     // Only the HTTP/1.1 application host (no_body_statuses) writes them correctly.
     // That host sends the application's fields as Sanic does: any name, with its
     // own Content-Length / Transfer-Encoding / Connection in place of the
     // application's (http1::append_head); only the syntax is checked. 101 (a
-    // protocol switch) is framework host only.
-    const bool upgrade = status == 101 && no_body_statuses;
-    if ((status < 200 && !upgrade) || status > 599 || headers.size() > 128) return false;
+    // protocol switch) only starts a framework host stream (upgrade): as the
+    // status of a complete response it would claim a switch that never happens.
+    if ((status < 200 && !(status == 101 && upgrade && no_body_statuses)) || status > 599 ||
+        headers.size() > 128) return false;
     if (!no_body_statuses && (status == 204 || status == 304)) return false;
     size_t header_bytes = 0;
     for (const auto& [name, value] : headers) {
@@ -926,7 +928,7 @@ class Service {
         // Sanic closes the connection after a response timeout's error response.
         if (answer->timed_out) close = true;
         if (answer->code == 3) { reject(answer->reject_status); co_return; }
-        if (!valid_http_response(answer->code, answer->headers, true) ||
+        if (!valid_http_response(answer->code, answer->headers, true, streamed) ||
             answer->body.size() > shared.config.max_response_bytes) {
             ++counts.errors;
             if (streamed) {
