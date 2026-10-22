@@ -640,3 +640,60 @@ def test_many_short_header_fields_within_the_size_limit():
         writer.write(b"GET /small HTTP/1.1\r\nHost: x\r\n" + fields + b"\r\n")
         return (await read_response(reader))[0]
     assert run("http1_many_fields", scenario) == [200]
+
+
+def test_accepting_resumes_after_running_out_of_descriptors():
+    # One accept that failed (EMFILE: the process at its descriptor limit)
+    # ended the listener's accept loop, so the process never accepted again,
+    # though descriptors were free soon after. It pauses and goes on, as
+    # asyncio does.
+    import resource
+    import subprocess
+    import sys
+
+    client = (
+        "import socket, sys, time\n"
+        "port, count = int(sys.argv[1]), int(sys.argv[2])\n"
+        "sys.stdin.readline()\n"
+        "socks = []\n"
+        "for _ in range(count):\n"
+        "    s = socket.socket(); s.settimeout(1.0)\n"
+        "    try:\n"
+        "        s.connect(('127.0.0.1', port)); s.sendall(b'GET /small HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n')\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    socks.append(s)\n"
+        "time.sleep(1.0)\n"
+        "for s in socks:\n"
+        "    s.close()\n"
+        "time.sleep(1.5)\n"
+        "s = socket.socket(); s.settimeout(5.0)\n"
+        "try:\n"
+        "    s.connect(('127.0.0.1', port))\n"
+        "    s.sendall(b'GET /small HTTP/1.1\\r\\nHost: x\\r\\nConnection: close\\r\\n\\r\\n')\n"
+        "    data = s.recv(65536)\n"
+        "    print(data.split(b' ')[1].decode() if data else 'EOF')\n"
+        "except OSError as error:\n"
+        "    print(type(error).__name__)\n"
+    )
+
+    async def main():
+        app = make_app("http1_emfile")
+        cfg = config(application_dispatch_all=True)
+        async with serve()(app, cfg):
+            port = cfg.server.http_port
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            child = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", client, str(port), "60",
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (len(os.listdir("/proc/self/fd")) + 20, hard))
+            try:
+                child.stdin.write(b"go\n")
+                await child.stdin.drain()
+                out, _ = await asyncio.wait_for(child.communicate(), 30)
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+            return out.decode().strip()
+
+    import os
+    assert uvloop.run(main()) == "200"

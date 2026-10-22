@@ -495,6 +495,20 @@ class Service {
     AcceptSlot* own_slot = nullptr;
     uint64_t own_pid = 0;
     ss::timer<ss::lowres_clock> accept_heartbeat;
+    // Ends the pauses of the accept loops after a failed accept (stop()).
+    ss::abort_source accept_pause;
+    // After a failed accept: wait before accepting again, longer while the
+    // failures go on (from 10 ms to 1 s; asyncio waits 1 s after EMFILE).
+    // False when the server stops meanwhile.
+    ss::future<bool> pause_accepting(unsigned failures) {
+        const auto pause = std::chrono::milliseconds(10 << std::min(failures, 6u));
+        try {
+            co_await ss::sleep_abortable(std::min(pause, std::chrono::milliseconds(1000)), accept_pause);
+        } catch (const ss::sleep_aborted&) {
+            co_return false;
+        }
+        co_return !closing;
+    }
     ss::gate app_connections;
     std::map<uint64_t, std::unique_ptr<AppConnection>> app_peers;
     http1::DateLine date_line;
@@ -580,6 +594,7 @@ class Service {
             }
             ss::pollable_fd ready(std::move(watched));
             ss::net::conntrack shards;
+            unsigned failures = 0;
             while (!closing) {
                 if (own_slot) {
                     auto pause = std::chrono::microseconds(50);
@@ -595,16 +610,23 @@ class Service {
                 socklen_t length = sizeof(remote.u);
                 const int fd = ::accept4(socket.get(), &remote.u.sa, &length, SOCK_NONBLOCK | SOCK_CLOEXEC);
                 if (fd < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ECONNABORTED) {
+                    const int error = errno;
+                    if (error == EAGAIN || error == EWOULDBLOCK || error == EINTR || error == ECONNABORTED) {
                         co_await ready.readable();  // a connection, or stop()
-                    } else if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
-                        ++counts.errors;  // out of descriptors or memory: try again shortly
-                        co_await ss::sleep(std::chrono::milliseconds(10));
+                    } else if (error == EBADF || error == EINVAL || error == ENOTSOCK || error == EFAULT) {
+                        // The listening socket itself is unusable.
+                        throw std::system_error(error, std::system_category(), "accept4");
                     } else {
-                        throw std::system_error(errno, std::system_category(), "accept4");
+                        // Out of descriptors or memory (EMFILE, ENFILE, ENOBUFS,
+                        // ENOMEM), or what accept(2) says to retry on a TCP
+                        // socket (EPROTO, ENETDOWN, EHOSTUNREACH, ..., EPERM from
+                        // a firewall): this connection failed, the next may not.
+                        ++counts.errors;
+                        if (!co_await pause_accepting(failures++)) break;
                     }
                     continue;
                 }
+                failures = 0;
                 remote.addr_length = length;
                 auto handle = shards.get_handle();
                 const auto shard = handle.cpu();
@@ -615,14 +637,40 @@ class Service {
                         std::nullopt, ss::memory::malloc_allocator);
                 });
             }
-        } catch (...) { if (!closing) ++counts.errors; }
+        } catch (...) {
+            if (!closing) {
+                ++counts.errors;
+                // This process no longer accepts: its siblings stop waiting
+                // for its turn (its heartbeat would say it still does).
+                if (own_slot) {
+                    accept_heartbeat.cancel();
+                    if (owns_slot()) own_slot->heartbeat_ms.store(0, std::memory_order_release);
+                }
+            }
+        }
     }
     // unix_path (a ServerConfig member, so it outlives the connections): what
     // requests over an AF_UNIX listener report as the server address.
     ss::future<> accept_application(ss::server_socket& listener, const std::string& unix_path) {
         try {
+            unsigned failures = 0;
             while (!closing) {
-                auto accepted = co_await listener.accept();
+                std::optional<ss::accept_result> result;
+                try {
+                    result = co_await listener.accept();
+                } catch (...) {}
+                if (!result) {
+                    // Seastar's listener throws for every accept error: out of
+                    // descriptors (EMFILE under load), a connection reset before
+                    // it was accepted. The listener is still usable: the loop
+                    // ended here, and the process never accepted again.
+                    if (closing) break;
+                    ++counts.errors;
+                    if (!co_await pause_accepting(failures++)) break;
+                    continue;
+                }
+                failures = 0;
+                auto accepted = std::move(*result);
                 if (closing) break;
                 auto id = ++next_peer;
                 app_peers.emplace(id, std::make_unique<AppConnection>(std::move(accepted.connection)));
@@ -1577,6 +1625,7 @@ public:
     void install_policy(NativePolicy next) noexcept { policy = next; }
     ss::future<> stop() {
         closing = true;
+        accept_pause.request_abort();
         auto active = std::vector<ss::abort_source*>(upstream_active.begin(), upstream_active.end());
         for (auto* operation : active) operation->request_abort();
         if (tcp) tcp->abort_accept();
