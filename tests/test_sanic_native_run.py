@@ -825,3 +825,30 @@ def test_create_server_with_a_host_name():
         uvloop.run(main())
     ''')
     assert json.loads(lines["RESULT"]) == ["200", "named"]
+
+
+def test_a_passed_socket_is_served_as_it_is():
+    # Bound, not listening, with SO_REUSEPORT (as an application may prepare
+    # it): the host listens on this socket, as Sanic does, rather than taking
+    # it for its own address reservation.
+    lines, _ = run('''
+        import socket
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SHARDS = 1
+
+        @app.after_server_start
+        async def check(app):
+            print("LISTENING " + json.dumps(bool(
+                sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))), flush=True)
+            print("STATUS " + json.dumps((await exchange(port, b"GET /json HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n"))[0]),
+                  flush=True)
+            app.stop()
+
+        app.run(sock=sock, single_process=True, motd=False)
+    ''')
+    assert json.loads(lines["LISTENING"]) is True
+    assert json.loads(lines["STATUS"]) == "200"

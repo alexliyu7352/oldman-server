@@ -32,7 +32,6 @@ from oldman_server.server.socket import (
     bind_socket,
     bind_unix_socket,
     remove_unix_socket,
-    reserved_for_listeners,
     reuseport_listener,
     unix_socket_mode,
     worker_listener,
@@ -337,7 +336,7 @@ def _native_unavailable(loop) -> str | None:
 
 def _serve_native(
     host, port, app, sock, unix, bound_unix, backlog, loop,
-    register_sys_signals, run_multiple, run_async,
+    register_sys_signals, run_multiple, run_async, sock_reserved=False,
 ):
     """HTTP/1.1 through the native (Seastar) host when NATIVE_SERVER is set.
 
@@ -370,7 +369,7 @@ def _serve_native(
         sock = bind_socket(host or "127.0.0.1", port or 0, backlog=backlog)
     sockets = [sock]
     accept = None
-    if sock is not None and reserved_for_listeners(sock):
+    if sock_reserved:
         sock = reuseport_listener(sock, backlog)
         sockets.append(sock)
     elif sock is not None:
@@ -484,6 +483,7 @@ def _serve_http_1(
     signal,
     state,
     asyncio_server_kwargs,
+    sock_reserved=False,
 ):
     connections = connections if connections is not None else set()
     # Each worker process of Sanic's worker manager (run_multiple) serves
@@ -505,7 +505,7 @@ def _serve_http_1(
                 bound_unix = unix
             return _serve_native(
                 host, port, app, sock, unix, bound_unix, backlog, loop,
-                register_sys_signals, run_multiple, run_async,
+                register_sys_signals, run_multiple, run_async, sock_reserved,
             )
     protocol_kwargs = _build_protocol_kwargs(protocol, app.config)
     server = partial(

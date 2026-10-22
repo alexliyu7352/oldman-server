@@ -8,7 +8,11 @@ import pytest
 
 from oldman_server.config import Config
 from oldman_server.native import accept, cpus, listen
-from oldman_server.server.socket import bind_socket, reserved_for_listeners, reuseport_listener
+from oldman_server.server.socket import bind_socket, reuseport_listener
+
+
+def listening(sock):
+    return bool(sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
 
 
 @pytest.fixture
@@ -107,10 +111,11 @@ def test_a_reserved_address_takes_listeners_and_no_connections():
     reservation = bind_socket("127.0.0.1", 0, reserve=True)
     listeners = []
     try:
-        assert reserved_for_listeners(reservation)
+        assert not listening(reservation)
+        assert reservation.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT)
         address = reservation.getsockname()
         listeners = [reuseport_listener(reservation) for _ in range(2)]
-        assert not any(reserved_for_listeners(listener) for listener in listeners)
+        assert all(listening(listener) for listener in listeners)
         # Taken, as by any listener: another server (Sanic's bind_socket, or
         # another reservation) fails to bind it.
         with pytest.raises(OSError) as error:
@@ -132,15 +137,22 @@ def test_a_reserved_address_takes_listeners_and_no_connections():
             sock.close()
 
 
-def test_listening_and_plain_sockets_are_not_reservations():
-    listening = bind_socket("127.0.0.1", 0)
-    with listening, socket.socket() as plain, socket.socket(socket.AF_UNIX) as unix:
-        plain.bind(("127.0.0.1", 0))
-        assert not reserved_for_listeners(listening)
-        assert not reserved_for_listeners(plain)  # as sanic-testing passes: the host listens on it
-        assert not reserved_for_listeners(unix)
-
-
+def test_only_a_reservation_is_one():
+    # configure_socket says when the socket is its reservation; a socket the
+    # application passes is served as it is, whatever its options.
+    import tempfile
+    from oldman_server.server.socket import configure_socket
+    settings = {"sock": None, "unix": None, "backlog": 100, "host": "127.0.0.1", "port": 0}
+    with configure_socket(settings, reserve=True):
+        assert settings["sock_reserved"] is True
+    settings = {"sock": None, "unix": None, "backlog": 100, "host": "127.0.0.1", "port": 0}
+    with configure_socket(settings):
+        assert settings["sock_reserved"] is False
+    with tempfile.TemporaryDirectory() as directory:
+        settings = {"sock": None, "unix": f"{directory}/a.sock", "backlog": 100,
+                    "host": None, "port": None}
+        with configure_socket(settings, reserve=True):
+            assert "sock_reserved" not in settings
 def test_a_shared_unix_socket_is_not_inherited_across_exec():
     # The workers get it from multiprocessing (spawn) or with the process
     # (fork); a program the application starts must not keep it listening,

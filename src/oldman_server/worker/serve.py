@@ -46,6 +46,7 @@ def worker_serve(
     asyncio_server_kwargs=None,
     config: bytes | str | dict[str, Any] | Any | None = None,
     passthru: dict[str, Any] | None = None,
+    sock_reserved: bool = False,
 ):
     app = None
     try:
@@ -124,6 +125,7 @@ def worker_serve(
             signal,
             state,
             asyncio_server_kwargs,
+            sock_reserved=sock_reserved,
         )
     except Exception as e:
         warnings.simplefilter("ignore", category=RuntimeWarning)

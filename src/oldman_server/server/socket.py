@@ -19,8 +19,9 @@ def bind_socket(
     :param host: IPv4, IPv6 or hostname may be specified
     :param port: TCP port number
     :param backlog: Maximum number of connections to queue
-    :param reserve: Only reserve the address for the native host (see
-        reserved_for_listeners) instead of listening
+    :param reserve: Only reserve the address for the native host, whose
+        serving processes each listen there (reuseport_listener), instead of
+        listening
     :return: socket.socket object
     """
     location = (host, port)
@@ -39,21 +40,21 @@ def bind_socket(
         # Bound without SO_REUSEPORT, so a taken address fails here as for a
         # listener; marked afterwards, so the serving processes can bind
         # their own listeners to it. Not listening, it gets no connections.
+        #
+        # Accepted limit: while no serving process listens yet (startup, a
+        # restart of all workers) the reservation alone holds the address,
+        # and a socket that is not listening does not keep others away from
+        # it: another socket with SO_REUSEADDR (another instance, or another
+        # user's program) can bind it then, and connections are refused
+        # rather than queued. SO_REUSEADDR is still needed here: without it
+        # the bind fails while the previous run's connections are in
+        # TIME_WAIT. Holding a listening socket instead would mean one
+        # socket shared by all workers (as for a unix socket). README notes.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     else:
         sock.listen(backlog)
     sock.set_inheritable(True)
     return sock
-
-
-def reserved_for_listeners(sock: socket.socket) -> bool:
-    """Whether sock is an address reservation (bind_socket(reserve=True)): a
-    bound TCP socket, not listening, that allows SO_REUSEPORT listeners."""
-    return (
-        sock.family in (socket.AF_INET, socket.AF_INET6)
-        and not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
-        and bool(sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT))
-    )
 
 
 def reuseport_listener(reservation: socket.socket, backlog=DEFAULT_BACKLOG):
@@ -201,6 +202,10 @@ def configure_socket(
         )
         sock.set_inheritable(True)
         server_settings["sock"] = sock
+        # Our reservation, not a socket the application passed (which may
+        # also be bound, not listening, with SO_REUSEPORT): the serving
+        # processes open their listeners at its address.
+        server_settings["sock_reserved"] = reserve
         server_settings["host"] = None
         server_settings["port"] = None
     return sock
