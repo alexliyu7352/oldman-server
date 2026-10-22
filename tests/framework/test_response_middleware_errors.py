@@ -79,3 +79,40 @@ def test_response_middleware_error_on_an_error_response_is_only_logged(app, capl
         logging.ERROR,
         "Exception occurred in one of response middleware handlers",
     ) in caplog.record_tuples
+
+
+def test_an_error_handler_that_responds_itself_keeps_its_response(app):
+    # The error handler sends with request.respond(): already the error
+    # response, so a failing response middleware is only logged.
+    @app.on_response
+    async def fail(request, response):
+        raise ValueError("middleware fails")
+
+    @app.exception(Unauthorized)
+    async def handle(request, exception):
+        await request.respond(text("from the error handler", status=418))
+
+    @app.get("/")
+    async def handler(request):
+        raise Unauthorized("no")
+
+    _, response = app.test_client.get("/")
+    assert response.status == 418
+    assert response.text == "from the error handler"
+
+
+def test_a_handler_may_catch_the_middleware_error_and_answer_otherwise(app):
+    @app.on_response
+    async def fail(request, response):
+        raise ValueError("middleware fails")
+
+    @app.get("/")
+    async def handler(request):
+        try:
+            await request.respond(text("first"))
+        except ValueError:
+            return text("second", status=202)
+
+    _, response = app.test_client.get("/")
+    assert response.status == 202
+    assert response.text == "second"

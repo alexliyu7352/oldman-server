@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from asyncio import BaseProtocol
 from collections import defaultdict
+from contextlib import suppress
 from contextvars import ContextVar
 from inspect import isawaitable
 from types import SimpleNamespace
@@ -566,6 +567,10 @@ class Request(Generic[sanic_type, ctx_type]):
             if not getattr(self, "_handling_exception", False):
                 # Like an exception from the handler: app.handle_exception
                 # answers with the error handler, without this middleware.
+                # Nothing is sent yet: the handler may catch this and
+                # answer otherwise (the middleware does not run again).
+                with suppress(ServerError):
+                    self.reset_response()
                 raise
             # Already the error response: send it, as Sanic does.
             error_logger.exception(

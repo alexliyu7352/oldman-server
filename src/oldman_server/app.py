@@ -1203,6 +1203,10 @@ class OldmanServer(
                 return await self.handle_exception(request, e, False)
         # No middleware results
         if not response:
+            # From here on this is the error response, also when the error
+            # handler sends it itself (request.respond): a failing response
+            # middleware is then only logged.
+            request._handling_exception = True
             try:
                 response = self.error_handler.response(request, exception)
                 if isawaitable(response):
