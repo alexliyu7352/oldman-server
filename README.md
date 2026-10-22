@@ -161,6 +161,7 @@ server {
 经原生主机时：
 
 - `request.headers` 是 `NativeHeaders`：`[]`、`get`、`getone`、`getall`、`in` 与属性访问（`headers.content_type`）直接查原生请求；迭代、`items()`、`len()`、`==`、`copy()` 与修改在第一次用到时建一个 `Header`，之后都在它上面进行，结果与 `Header` 相同。它是 `multidict.MultiMapping`（也是 `Mapping`），但不是 `CIMultiDict`：`isinstance(request.headers, CIMultiDict)` 为 False。
+- 请求行之前的空行按 RFC 9112 跳过，计入请求头上限（`REQUEST_MAX_HEADER_SIZE` 等），超出回 413；原版对任何前导空行都回 400。
 - `request.head`、`raw_headers`、`request_line` 由解析出的请求行与字段重建（冒号后一个空格、值已去掉两端空白、名字保留请求方的大小写），不是请求方发来的原始字节。
 - 响应头最多 128 个字段、合计约 8 KiB，超出时交给错误处理器（500）；asyncio 服务器没有这个上限（放在 nginx 之后时，nginx 默认的 `proxy_buffer_size` 也只容纳 4 或 8 KiB 的上游响应头）。
 - `request.protocol` 是原生连接的替身：提供 `state`、`version`、`conn_info`，不是 `HttpProtocol` 实例。

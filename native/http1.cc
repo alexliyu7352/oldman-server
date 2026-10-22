@@ -96,18 +96,20 @@ Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& 
     auto too_large = [&] {
         return fail(Parse::too_large, 413, "Request header exceeds the size limit");
     };
-    // RFC 9112 2.2: ignore empty lines received before the request line.
+    // RFC 9112 2.2: ignore empty lines received before the request line. They
+    // count towards the limit like the head: otherwise a peer sending only
+    // CRLF would grow the buffer without end, each read rescanning it all.
     size_t start = 0;
     while (data.size() - start >= 2 && data[start] == '\r' && data[start + 1] == '\n') start += 2;
     const auto end = data.find("\r\n\r\n", start);
     if (end == std::string_view::npos) {
-        if (data.size() - start >= limit) return too_large();
+        if (data.size() >= limit) return too_large();
         // A bare LF cannot complete a head; reject it rather than waiting forever.
         for (size_t i = start; i < data.size(); ++i)
             if (data[i] == '\n' && (i == start || data[i - 1] != '\r')) return bad();
         return Parse::incomplete;
     }
-    if (end + 4 - start > limit) return too_large();
+    if (end + 4 > limit) return too_large();
     head.size = end + 4;
     const auto text = data.substr(start, end + 2 - start);  // every line keeps its CRLF
 

@@ -44,7 +44,8 @@ struct Head {
 };
 
 // Parses one request head from the start of `data`. `limit` bounds the head
-// size and `max_headers` the field count (both report too_large). Failures set
+// size, empty lines before it included, and `max_headers` the field count
+// (both report too_large). Failures set
 // head.error_status and head.error; head.target is set when the request line
 // was split.
 Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& head);

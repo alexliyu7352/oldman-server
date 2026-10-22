@@ -607,3 +607,27 @@ def test_a_request_subclass_has_the_request_head():
     assert status == 200 and json_module.loads(body) == {
         "class": "Custom", "head": "GET /head?a=1 HTTP/1.1\r\nHost: x\r\nX-A: 1",
         "line": "GET /head?a=1 HTTP/1.1", "raw": "Host: x\r\nX-A: 1"}
+
+
+def test_blank_lines_before_a_request_count_towards_the_head_limit():
+    # RFC 9112 2.2 lets a server skip empty lines before a request line; they
+    # count towards REQUEST_MAX_HEADER_SIZE like the head itself, or a client
+    # sending CRLF without end filled the buffer and kept the shard rescanning.
+    async def few(reader, writer):
+        writer.write(b"\r\n\r\nGET /small HTTP/1.1\r\nHost: x\r\n\r\n")
+        return (await read_response(reader))[0]
+
+    async def many_then_request(reader, writer):
+        writer.write(b"\r\n" * 5000 + b"GET /small HTTP/1.1\r\nHost: x\r\n\r\n")
+        status, headers, _ = await read_response(reader)
+        return status, ("Connection", "close") in headers
+
+    async def only_blank_lines(reader, writer):
+        for _ in range(9):
+            writer.write(b"\r\n" * 512)
+            await writer.drain()
+        status, _, _ = await asyncio.wait_for(read_response(reader), 5)
+        return status, await asyncio.wait_for(reader.read(), 5)
+
+    results = run("http1_blank_lines", few, many_then_request, only_blank_lines)
+    assert results == [200, (413, True), (413, b"")]
