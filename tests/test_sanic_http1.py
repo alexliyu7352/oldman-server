@@ -946,9 +946,15 @@ def test_a_peer_that_stops_reading_is_cut_off():
             pass
         return received
 
-    received, = run("http1_write_deadline", stalled, app_factory=output_app, write_timeout_ms=500,
-                    max_response_bytes=32 << 20)
+    async def reading(reader, writer):
+        writer.write(b"GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+        status, _, body = await read_response(reader)
+        return status, len(body)
+
+    received, whole = run("http1_write_deadline", stalled, reading, app_factory=output_app,
+                          write_timeout_ms=500, max_response_bytes=32 << 20)
     assert 0 < received < 16 << 20
+    assert whole == (200, 16 << 20)  # one that reads gets all of it
 
 
 def test_the_write_deadline_follows_sanic_timeouts():

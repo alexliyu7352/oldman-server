@@ -1105,15 +1105,18 @@ class Service {
         http1::append_head(output, answer->code, answer->body.size(), answer->headers, close,
                            date(), probe_lines);
         co_await flush_output(connection, output);
-        auto owned = std::make_shared<std::string>(std::move(answer->body));
-        const char* data = owned->data();
+        auto owned = std::make_unique<std::string>(std::move(answer->body));
+        // Read the pointer and size before the deleter takes ownership: argument
+        // evaluation order is unspecified.
+        char* data = owned->data();
         const size_t length = owned->size();
-        // In pieces, each one write within the write deadline: a slow peer that
-        // keeps reading gets all of it, one that stops reading is cut off.
+        ss::temporary_buffer<char> whole(data, length, ss::make_object_deleter(std::move(owned)));
+        // In pieces that share the body, each one write within the write
+        // deadline: a slow peer that keeps reading gets all of it, one that
+        // stops reading is cut off.
         constexpr size_t piece = 1 << 20;
         for (size_t at = 0; at < length; at += piece) {
-            ss::temporary_buffer<char> view(const_cast<char*>(data) + at, std::min(piece, length - at),
-                                            ss::make_object_deleter(owned));
+            auto view = whole.share(at, std::min(piece, length - at));
             co_await timed_write(connection, [&]() { return connection.output.write(std::move(view)); });
         }
     }
