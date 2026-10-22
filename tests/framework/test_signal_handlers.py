@@ -1,8 +1,8 @@
 import asyncio
+import signal
 
 from queue import Queue
 from typing import Optional
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,15 +25,12 @@ async def stop(app, loop):
 calledq = Queue()
 
 
-def set_loop(app, loop):
-    global mock
-    mock = MagicMock()
-    loop.add_signal_handler = mock
-
-
-def after(app, loop):
-    print("...")
-    calledq.put(mock.called)
+def registered(app, loop):
+    # A Python-level handler: it also sees a signal while the loop is not
+    # running, which uvloop's own (add_signal_handler) would drop.
+    handler = signal.getsignal(signal.SIGTERM)
+    calledq.put(handler not in (signal.SIG_IGN, signal.SIG_DFL, None)
+                and handler is signal.getsignal(signal.SIGINT))
 
 
 def test_register_system_signals(app):
@@ -43,9 +40,8 @@ def test_register_system_signals(app):
     async def hello_route(request):
         return HTTPResponse()
 
+    app.listener("after_server_start")(registered)
     app.listener("after_server_start")(stop)
-    app.listener("before_server_start")(set_loop)
-    app.listener("after_server_stop")(after)
 
     app.run(HOST, PORT, single_process=True)
     assert calledq.get() is True
@@ -58,9 +54,8 @@ def test_no_register_system_signals_fails(app):
     async def hello_route(request):
         return HTTPResponse()
 
+    app.listener("after_server_start")(registered)
     app.listener("after_server_start")(stop)
-    app.listener("before_server_start")(set_loop)
-    app.listener("after_server_stop")(after)
 
     message = (
         r"Cannot run OldmanServer\.serve with register_sys_signals=False\. Use "
@@ -78,9 +73,8 @@ def test_dont_register_system_signals(app):
     async def hello_route(request):
         return HTTPResponse()
 
+    app.listener("after_server_start")(registered)
     app.listener("after_server_start")(stop)
-    app.listener("before_server_start")(set_loop)
-    app.listener("after_server_stop")(after)
 
     app.run(HOST, PORT, register_sys_signals=False, single_process=True)
     assert calledq.get() is False

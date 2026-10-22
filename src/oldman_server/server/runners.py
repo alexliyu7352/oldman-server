@@ -142,30 +142,51 @@ def serve(
     )
 
 
+class _Stop:
+    """SIGINT and SIGTERM in a serving process: app.stop() once the server
+    serves, so the stop phases run.
+
+    A Python-level handler, not the loop's add_signal_handler: uvloop drops a
+    signal that arrives while it is not running (between the startup steps'
+    run_until_complete calls and run_forever), and the process then never
+    stopped. A signal during startup is kept until the start is complete (a
+    loop stopped in the middle of a startup step fails that step); a second
+    one stops at once.
+    """
+
+    def __init__(self, app: OldmanServer, loop: asyncio.AbstractEventLoop):
+        self.app, self.loop = app, loop
+        self.requested = self.serving = False
+
+    def __call__(self, signum=None, frame=None) -> None:
+        if self.serving or self.requested:
+            self.loop.call_soon_threadsafe(
+                partial(self.app.stop, terminate=False)
+            )
+        self.requested = True
+
+
 def _setup_system_signals(
     app: OldmanServer,
     run_multiple: bool,
     register_sys_signals: bool,
     loop: asyncio.AbstractEventLoop,
-) -> None:  # no cov
-    signal_func(SIGINT, SIG_IGN)
-    signal_func(SIGTERM, SIG_IGN)
+) -> _Stop:  # no cov
+    stop = _Stop(app, loop)
     os.environ["OLDMAN_SERVER_WORKER_PROCESS"] = "true"
     # Register signals for graceful termination
-    if register_sys_signals:
-        for _signal in [SIGINT, SIGTERM]:
-            loop.add_signal_handler(
-                _signal, partial(app.stop, terminate=False)
-            )
-        if run_multiple:
-            _stop_with_parent()
+    for _signal in [SIGINT, SIGTERM]:
+        signal_func(_signal, stop if register_sys_signals else SIG_IGN)
+    if register_sys_signals and run_multiple:
+        _stop_with_parent(stop)
+    return stop
 
 
 # prctl(2) option: the signal this process gets when its parent dies.
 PR_SET_PDEATHSIG = 1
 
 
-def _stop_with_parent() -> None:
+def _stop_with_parent(stop: _Stop) -> None:
     """A worker process stops (SIGTERM, handled as app.stop()) when the main
     process that started it dies, even by SIGKILL; otherwise it would keep
     serving, and holding its socket, with nothing managing it. Linux only."""
@@ -180,7 +201,7 @@ def _stop_with_parent() -> None:
         return
     if os.getppid() != parent.pid:
         # The parent died before the request took effect.
-        os.kill(os.getpid(), SIGTERM)
+        stop(SIGTERM)
 
 
 def _run_shutdown_coro(loop, coro):
@@ -233,27 +254,32 @@ def _run_before_start(loop, app):
         raise
 
 
-def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid):
+def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid,
+                        stop=None):
     """Start (after_server_start), serve until stopped, then stop:
     before_server_stop, the server's cleanup, after_server_stop.
 
-    A failing start stops the server the same way. Every stop step runs even
-    if an earlier one failed; the first failure then propagates.
+    A failing start stops the server the same way, as does a stop signal
+    received while starting (`stop`, from _setup_system_signals). Every stop
+    step runs even if an earlier one failed; the first failure then
+    propagates.
     """
     errors = []
     try:
         start()
         server_logger.info("Worker ready [%s]", pid)
-        loop.run_forever()
+        if stop is not None:
+            stop.serving = True
+        if stop is None or not stop.requested:
+            loop.run_forever()
     except BaseException as error:
         errors.append(error)
     server_logger.info("Stopping worker [%s]", pid)
 
-    for _signal in [SIGINT, SIGTERM]:
-        try:
-            loop.remove_signal_handler(_signal)
-        except (NotImplementedError, OSError):
-            pass
+    if stop is not None:
+        # The stop phases run once; further signals are ignored meanwhile.
+        for _signal in [SIGINT, SIGTERM]:
+            signal_func(_signal, SIG_IGN)
 
     for step in (
         partial(_run_shutdown_coro, loop, before_stop),
@@ -365,6 +391,9 @@ def _serve_native(
         close_sockets()
         raise
     app.ack()
+    # Before the engine opens, which answers requests at once: a stop signal
+    # from then on stops the server once it has started.
+    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     # A worker process: Python runs on its group's first CPU, apart from its
     # shards and the other workers.
     group = worker_group(app.config)
@@ -396,7 +425,6 @@ def _serve_native(
         except (BrokenPipeError, ConnectionResetError, EOFError):
             pass
 
-    _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     _run_server_forever(
         loop,
         partial(_after_start, loop, app),
@@ -405,6 +433,7 @@ def _serve_native(
         _cleanup,
         bound_unix,
         pid,
+        stop,
     )
 
 
@@ -538,7 +567,7 @@ def _serve_http_1(
         except (BrokenPipeError, ConnectionResetError, EOFError):
             pass
 
-    _setup_system_signals(app, run_multiple, register_sys_signals, loop)
+    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     _run_server_forever(
         loop,
         partial(_after_start, loop, app),
@@ -547,6 +576,7 @@ def _serve_http_1(
         _cleanup,
         unix,
         pid,
+        stop,
     )
 
 

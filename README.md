@@ -149,6 +149,7 @@ server {
 - worker 在 `after_server_start` 里失败（已确认启动之后）时，主进程结束服务，而不是把这条消息当作要重启的进程名、留下没有 worker 的主进程（oldman 的 `_handle_message`）。
 - multiprocessing 的启动方式已被设为本包需要的那一种时不再报错（oldman 的 `prepare_process_context` 直接设 `START_METHOD_SET`）。
 - 服务器监听器成对执行：`before_server_start` 失败时仍执行 `after_server_stop`；`after_server_start` 失败时照常停止服务器并执行 `before_server_stop`、`after_server_stop`；`before_server_stop` 失败时清理与 `after_server_stop` 仍执行；失败最后照样抛出。监听器抛出的 `RuntimeError` 也不再被当成事件循环提前停止而吞掉或再执行一次。（oldman 的 `_services_*_server_*` 里的 except 清理）
+- 服务进程的 SIGINT / SIGTERM 处理在开始应答之前就装好，并且是 Python 层的处理：启动期间收到的信号等启动完成再停止（第二个信号立即停止），停止阶段照常执行。原版用事件循环的 `add_signal_handler`，uvloop 会丢掉循环没在运行时（启动的各步骤之间）到达的信号，进程就停不下来；原生主机还会在注册之前就应答请求，这时的 SIGTERM 直接杀死进程、不执行停止监听器。`loop.add_signal_handler` 不再被调用。
 - worker 进程在主进程退出（包括被 SIGKILL）时收到 SIGTERM 而停止，不再成为无人管理、仍占着端口的孤儿进程（Linux；oldman 的 `_process_group` 检查仍可保留给其他子进程）。
 - worker manager 结束服务时（worker 启动失败、关机时再收到信号等）只杀 worker 进程：原版对 worker 所在的进程组 `killpg`，而 worker 与主进程同组，主进程也随之被 SIGKILL，`main_process_stop` 监听器、套接字与 unix socket 文件的清理都不执行。现在主进程照常收尾，以退出码 1 结束；自成进程组的 worker 仍连同其进程组一起杀掉。
 - `Authorization` 的认证方案取头部第一个词、不分大小写比较，不再按子字符串匹配：`request.token` 只认 `Bearer` / `Token`，其他方案（如 `Basic`）得到 None，不再返回整个头部；`request.credentials` 的 Basic 密码可以含冒号，非法 base64 视为没有凭据（oldman 的 `bearer_credential`、`basic_credentials`；只接受 Bearer 时用 `parse_credentials(header, ("Bearer",))` 并检查返回的方案）。不带方案的单个令牌仍按令牌处理。

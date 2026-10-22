@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 
 import pytest
 
@@ -727,3 +728,62 @@ def test_failing_main_process_start_still_runs_main_process_stop():
     assert json.loads(lines["FAILED"]) == "main start failed"
     assert json.loads(lines["EVENTS"]) == ["main_process_start", "main_process_stop"]
     assert json.loads(lines["LEFT"]) is False
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_sigterm_right_after_the_first_response_stops_gracefully(short_dir, native):
+    # The native host answers while it starts, and uvloop drops a signal that
+    # arrives while its loop is not running: the process was killed by the
+    # SIGTERM (no stop listeners) or never stopped.
+    path = str(short_dir / "app.sock")
+    server = textwrap.dedent(f'''
+        from oldman_server import OldmanServer
+        from oldman_server.response import text
+        app = OldmanServer("sigterm_race", configure_logging=False)
+        app.config.NATIVE_SERVER = {native}
+        app.config.NATIVE_SHARDS = 1
+
+        @app.get("/")
+        async def index(request):
+            return text("ok")
+
+        @app.after_server_stop
+        def stopped(app):
+            print("STOPPED", flush=True)
+
+        app.run(unix={path!r}, motd=False{"" if native else ", single_process=True"})
+    ''')
+    outcomes = []
+    for _ in range(3):
+        process = subprocess.Popen([sys.executable, "-c", server], cwd=ROOT,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                import socket
+                client = socket.socket(socket.AF_UNIX)
+                client.settimeout(1)
+                try:
+                    client.connect(path)
+                    client.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    data = b""
+                    while chunk := client.recv(65536):
+                        data += chunk
+                    if data.startswith(b"HTTP/1.1 200"):
+                        break
+                except OSError:
+                    time.sleep(0.005)
+                finally:
+                    client.close()
+            process.send_signal(signal.SIGTERM)
+            try:
+                code = process.wait(8)
+                outcomes.append((code, "STOPPED" in process.stdout.read()))
+            except subprocess.TimeoutExpired:
+                outcomes.append("hung")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdout.close()
+    assert outcomes == [(0, True)] * 3
