@@ -373,7 +373,7 @@ class JSONResponse(HTTPResponse):
             dumped = self._use_dumps(body)
         if type(self) is JSONResponse:
             # The body setter and _encode_body, for the exact class.
-            self._body = dumped if type(dumped) is bytes else dumped.encode()
+            self._body = dumped if type(dumped) is bytes else self._encode_body(dumped)
         else:
             self.body = self._encode_body(dumped)
         self.status = status

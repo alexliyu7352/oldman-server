@@ -222,3 +222,23 @@ def test_json_response_class_sets_proper_content_type(json_app: OldmanServer):
 
     _, resp = json_app.test_client.get("/json-class")
     assert resp.headers["content-type"] == "application/json"
+
+
+@pytest.mark.parametrize("dumped, body", [
+    (bytearray(b"{}"), b"{}"), (memoryview(b"{}"), b"{}"), (None, b""),
+    (type("Raw", (bytes,), {})(b"{}"), b"{}"), ("{}", b"{}"),
+])
+def test_custom_dumps_return_values_as_any_response_body(dumped, body):
+    # As HTTPResponse's body setter takes them: str is encoded, None is
+    # empty, and bytes-like values are used as they are.
+    response = json_response({}, dumps=lambda value: dumped)
+    assert bytes(response.body) == body
+
+
+def test_a_bytes_like_body_is_sent(app: OldmanServer):
+    @app.get("/")
+    async def handler(request: Request):
+        return json_response({}, dumps=lambda value: bytearray(b'{"a":1}'))
+
+    _, response = app.test_client.get("/")
+    assert response.status == 200 and response.body == b'{"a":1}'

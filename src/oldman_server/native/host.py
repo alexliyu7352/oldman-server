@@ -100,6 +100,15 @@ def _log_access(request, exchange, started):
     _http1.access_logger.info("", extra=extra)
 
 
+def _bytes_body(data):
+    """A response body other than bytes, as the asyncio server sends it:
+    bytes-like (bytearray, memoryview, a bytes subclass) as its bytes."""
+    try:
+        return bytes(memoryview(data))
+    except TypeError:
+        raise ValueError("response body must be bytes") from None
+
+
 def _final_status(status):
     """Http.http1_response_header's check, for a status that is not a plain
     int of at least 200: a handler's response has a final status (only the
@@ -398,8 +407,10 @@ class _BufferedExchange:
             if type(status) is not int or status < 200:
                 status = _final_status(status)
             body = response.body or b""
-            if type(body) is not bytes or type(data) is not bytes:
-                self._fail("response body must be bytes")
+            if type(body) is not bytes:
+                body = _bytes_body(body)
+            if type(data) is not bytes:
+                data = _bytes_body(data)
             if len(body) + len(data) > self.max_body:
                 self._fail("response body exceeds the native limit")
             first = body + data if data else body
@@ -425,7 +436,7 @@ class _BufferedExchange:
                 return  # Sanic finalizes once more after an explicit eof.
             self._fail("response is already submitted")
         if type(data) is not bytes:
-            self._fail("response body must be bytes")
+            data = _bytes_body(data)
         if len(data) > self.max_body:
             self._fail("response body exceeds the native limit")
         if end_stream:
@@ -458,8 +469,10 @@ class _BufferedExchange:
             self._fail("response is missing")
         try:
             body = self.response.body or b""
-            if type(body) is not bytes or type(data) is not bytes:
-                self._fail("response body must be bytes")
+            if type(body) is not bytes:
+                body = _bytes_body(body)
+            if type(data) is not bytes:
+                data = _bytes_body(data)
             if len(body) + len(data) > self.max_body:
                 self._fail("response body exceeds the native limit")
             body = body + data if data else body
