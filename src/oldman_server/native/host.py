@@ -33,7 +33,7 @@ from oldman_server.touchup.schemes.base import BaseScheme
 from sanic_routing.exceptions import NotFound
 
 from . import _native
-from .cpus import shard_count, worker_group
+from .cpus import parse_cpus, shard_count, worker_group
 from .engine import (BodyError, Config, Engine, ServerConfig, STREAM_DATA, STREAM_END,
                      STREAM_START)
 from oldman_server.request import form as _form
@@ -953,11 +953,9 @@ def _shard_cpus(config):
     group = worker_group(config)
     if group:
         return group[1:]
-    explicit = config.get("NATIVE_SHARD_CPUS")
-    if explicit:
-        if isinstance(explicit, str):
-            explicit = [part for part in explicit.split(",") if part.strip()]
-        return tuple(int(cpu) for cpu in explicit)
+    explicit = parse_cpus(config.get("NATIVE_SHARD_CPUS"))
+    if explicit is not None:
+        return explicit
     available = sorted(os.sched_getaffinity(0))
     return tuple(available[-shard_count(config, len(available)):])
 

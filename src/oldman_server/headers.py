@@ -411,9 +411,7 @@ def trusted_peer(conn_info, trusted) -> bool:
     IPv4 clients, matches IPv4 networks), or "unix" for a unix socket."""
     if conn_info is None:
         return False
-    unix, networks = trusted_networks(
-        trusted if isinstance(trusted, str) else tuple(trusted)
-    )
+    unix, networks = trusted_networks(trusted_sources(trusted))
     if isinstance(conn_info.sockname, str):
         return unix
     try:
@@ -425,6 +423,15 @@ def trusted_peer(conn_info, trusted) -> bool:
         address in network or (mapped is not None and mapped in network)
         for network in networks
     )
+
+
+def trusted_sources(trusted) -> str | tuple[str, ...]:
+    """TRUSTED_PROXIES as trusted_networks takes it: a string, or a tuple of
+    entries. A number (the environment loader's reading of a lone value
+    such as "10") is its text."""
+    if isinstance(trusted, (str, int, float)):
+        return str(trusted)
+    return tuple(trusted)
 
 
 @lru_cache(maxsize=16)

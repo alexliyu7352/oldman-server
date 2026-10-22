@@ -56,7 +56,7 @@ from oldman_server.exceptions import (
     URLBuildError,
 )
 from oldman_server.handlers import ErrorHandler
-from oldman_server.headers import trusted_networks
+from oldman_server.headers import trusted_networks, trusted_sources
 from oldman_server.helpers import Default, _default
 from oldman_server.http import Stage
 from oldman_server.log import LOGGING_CONFIG_DEFAULTS, error_logger, logger
@@ -2299,7 +2299,7 @@ class OldmanServer(
 
         trusted = self.config.TRUSTED_PROXIES
         if trusted is not None:  # a malformed entry fails here, not per request
-            trusted_networks(trusted if isinstance(trusted, str) else tuple(trusted))
+            trusted_networks(trusted_sources(trusted))
 
         if hasattr(self, "_ext"):
             self.ext._display()

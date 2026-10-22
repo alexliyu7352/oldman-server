@@ -141,3 +141,16 @@ def test_the_request_signal_sees_the_forwarded_client(app):
     assert seen == [["203.0.113.9", "https"]]
     assert response.json == {"remote_addr": "203.0.113.9",
                              "client_ip": "203.0.113.9", "scheme": "https"}
+
+
+def test_a_lone_number_from_the_environment_is_read_as_text(monkeypatch):
+    # The environment loader reads "127" as the int 127: a malformed entry,
+    # reported as such (ValueError), not a TypeError about an int.
+    from oldman_server.config import Config
+    from oldman_server.headers import trusted_sources
+    monkeypatch.setenv("OLDMAN_SERVER_TRUSTED_PROXIES", "127")
+    trusted = Config().TRUSTED_PROXIES
+    assert trusted == 127 and trusted_sources(trusted) == "127"
+    with pytest.raises(ValueError, match="'127' does not appear"):
+        trusted_networks(trusted_sources(trusted))
+    assert trusted_networks(trusted_sources(["unix", "10.0.0.0/8"]))[0] is True

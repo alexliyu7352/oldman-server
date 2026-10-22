@@ -154,3 +154,15 @@ def test_a_shared_unix_socket_is_not_inherited_across_exec():
         with sock:
             assert settings["sock"] is sock
             assert not sock.get_inheritable()
+
+
+@pytest.mark.parametrize("value, expected", [("3", (3,)), ("0", (0,)), ("1,2", (1, 2)), ("5, 6", (5, 6))])
+def test_shard_cpus_from_the_environment(monkeypatch, value, expected):
+    # The environment loader turns "3" into the int 3 (and "0" into 0), as for
+    # any setting: one CPU must still be a CPU list.
+    from oldman_server.native.host import _shard_cpus
+    monkeypatch.setenv("OLDMAN_SERVER_NATIVE_SHARD_CPUS", value)
+    monkeypatch.delenv("OLDMAN_SERVER_WORKER_NAME", raising=False)
+    assert _shard_cpus(Config()) == expected
+    with pytest.raises(ValueError, match="NATIVE_SHARD_CPUS"):
+        cpus.worker_groups(Config(), 2)

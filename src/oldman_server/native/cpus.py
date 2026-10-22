@@ -19,6 +19,18 @@ def _available():
     return sorted(os.sched_getaffinity(0))
 
 
+def parse_cpus(value):
+    """A CPU list setting: a sequence of CPUs, "1,2", or one CPU (the
+    environment loader turns "3" into the int 3). None or "" when unset."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return (value,)
+    if isinstance(value, str):
+        value = [part for part in value.split(",") if part.strip()]
+    return tuple(int(cpu) for cpu in value)
+
+
 def _parse_groups(value):
     """NATIVE_WORKER_CPUS as groups: a list of CPU lists, or "0,1,2;3,4,5"."""
     if isinstance(value, str):
@@ -44,7 +56,7 @@ def worker_groups(config, workers):
     """CPU groups for `workers` server processes (each its Python CPU, then its
     shard CPUs): NATIVE_WORKER_CPUS, or consecutive groups of this process's
     CPUs. Workers beyond the groups share them (worker n uses group n % len)."""
-    if config.get("NATIVE_SHARD_CPUS"):
+    if parse_cpus(config.get("NATIVE_SHARD_CPUS")) is not None:
         raise ValueError("NATIVE_SHARD_CPUS names one process's shard CPUs; "
                          "with worker processes use NATIVE_SHARDS or NATIVE_WORKER_CPUS")
     if config.get("NATIVE_WORKER_CPUS"):

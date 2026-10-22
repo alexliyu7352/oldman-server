@@ -159,7 +159,7 @@ class Config(dict, metaclass=DescriptorMeta):
     NATIVE_MAX_RESPONSE_SIZE: int
     NATIVE_REACTOR_BACKEND: str
     NATIVE_SERVER: bool
-    NATIVE_SHARD_CPUS: str | Sequence[int] | None
+    NATIVE_SHARD_CPUS: str | int | Sequence[int] | None
     NATIVE_SHARDS: int | None
     NATIVE_WORKER_CPUS: str | None
     NATIVE_WORKER_LISTEN: str | None
