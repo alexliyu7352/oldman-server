@@ -852,3 +852,121 @@ def test_a_passed_socket_is_served_as_it_is():
     ''')
     assert json.loads(lines["LISTENING"]) is True
     assert json.loads(lines["STATUS"]) == "200"
+
+
+DRAIN_SERVER = textwrap.dedent('''
+    import asyncio, sys
+    from oldman_server import OldmanServer
+    from oldman_server.response import file_stream, raw, text
+    port, path = int(sys.argv[1]), sys.argv[2]
+    app = OldmanServer("drain", configure_logging=False)
+    app.config.NATIVE_SERVER = True
+    app.config.NATIVE_SHARDS = 1
+    app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 8
+    app.config.ACCESS_LOG = False
+
+    @app.get("/fast")
+    async def fast(request):
+        return text("fast")
+
+    @app.get("/slow")
+    async def slow(request):
+        await asyncio.sleep(2)
+        return text("slow")
+
+    @app.get("/file")
+    async def file(request):
+        await asyncio.sleep(1)
+        return await file_stream(path)
+
+    @app.get("/big")
+    async def big(request):
+        return raw(b"b" * (8 << 20))
+
+    @app.after_server_start
+    def ready(app):
+        print("READY", flush=True)
+
+    app.run(host="127.0.0.1", port=port, single_process=True, motd=False)
+''')
+
+
+def test_a_graceful_stop_stops_accepting_and_finishes_what_is_in_progress(tmp_path):
+    # As Sanic: on SIGTERM the server stops accepting and closes idle
+    # connections, while requests in progress finish, a file stream and a
+    # large response still being read by a slow client included. The native
+    # host went on accepting and answered new requests with 503, failed
+    # file_stream with 500, and cut off responses still being written.
+    import socket
+
+    content = os.urandom(300_000)
+    path = tmp_path / "data.bin"
+    path.write_bytes(content)
+    port = free_port()
+    server = subprocess.Popen([sys.executable, "-c", DRAIN_SERVER, str(port), str(path)],
+                              cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def connect():
+        return socket.create_connection(("127.0.0.1", port), timeout=5)
+
+    def get(sock, target):
+        sock.sendall(f"GET {target} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+
+    readers = {}
+
+    def response(sock):
+        """(status, body) of the next response on sock, ("closed", b"") at its end."""
+        reader = readers.setdefault(sock, sock.makefile("rb"))
+        status_line = reader.readline()
+        if not status_line:
+            return "closed", b""
+        headers = {}
+        while (line := reader.readline()) != b"\r\n":
+            name, value = line.decode().rstrip("\r\n").split(": ", 1)
+            headers[name.lower()] = value
+        if "content-length" in headers:
+            return int(status_line.split()[1]), reader.read(int(headers["content-length"]))
+        body = b""  # chunked
+        while size := int(reader.readline(), 16):
+            body += reader.read(size)
+            reader.readline()
+        reader.readline()
+        return int(status_line.split()[1]), body
+
+    try:
+        assert server.stdout.readline().strip() == "READY"
+        idle = connect()
+        get(idle, "/fast")
+        assert response(idle)[0] == 200
+        slow, streamed, big = connect(), connect(), connect()
+        big.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)  # not read until the end
+        slow.sendall(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\nGET /fast HTTP/1.1\r\nHost: x\r\n\r\n")
+        get(streamed, "/file")
+        get(big, "/big")
+        time.sleep(0.3)
+        server.send_signal(signal.SIGTERM)
+        time.sleep(0.5)
+        # The idle keep-alive connection is closed, a new one refused.
+        assert response(idle) == ("closed", b"")
+        try:
+            fresh = connect()
+            get(fresh, "/fast")
+            refused = response(fresh)[0] == "closed"
+        except (ConnectionRefusedError, ConnectionResetError):
+            refused = True
+        assert refused
+        # A busy connection is served, a request pipelined behind included;
+        # then it closes.
+        assert response(slow) == (200, b"slow")
+        assert response(slow) == (200, b"fast")
+        assert response(slow) == ("closed", b"")
+        assert response(streamed) == (200, content)
+        status, body = response(big)
+        assert status == 200 and len(body) == 8 << 20
+        assert server.wait(10) == 0
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.wait()
+        server.stdout.close()
+        server.stderr.close()

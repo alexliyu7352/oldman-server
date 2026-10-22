@@ -93,6 +93,7 @@ struct alignas(64) Counts {
     std::atomic<uint64_t> compute_ns{0}, compute_cpu_ns{0}, worker_queue_ns{0};
     std::atomic<uint64_t> upstream_requests{0}, upstream_responses{0}, upstream_bytes{0}, upstream_wait_ns{0};
     std::atomic<uint64_t> tcp_connections{0}, tcp_frames{0}, udp_received{0}, udp_sent{0}, udp_dropped{0};
+    std::atomic<uint64_t> connections_open{0};  // framework host connections
     size_t limit_count = 0, limit_bytes = 0;
     std::map<std::string,uint64_t> snapshot() const {
         std::map<std::string,uint64_t> d;
@@ -106,6 +107,7 @@ struct alignas(64) Counts {
         FIELD(compute_ns); FIELD(compute_cpu_ns); FIELD(worker_queue_ns);
         FIELD(upstream_requests); FIELD(upstream_responses); FIELD(upstream_bytes); FIELD(upstream_wait_ns);
         FIELD(tcp_connections); FIELD(tcp_frames); FIELD(udp_received); FIELD(udp_sent); FIELD(udp_dropped);
+        FIELD(connections_open);
 #undef FIELD
         return d;
     }
@@ -297,6 +299,10 @@ class Service {
     }
     uint64_t& next_id = shard_counter(0);
     bool closing = false;
+    // Stopping gracefully (drain): no new connections, idle ones closed, the
+    // others closed after their response.
+    bool draining = false;
+    bool accepts() const { return !closing && !draining; }
     NativePolicy policy;
     ss::semaphore compression_slot{1};
     std::vector<std::unique_ptr<ss::http::client>> upstreams;
@@ -491,6 +497,7 @@ class Service {
         // Armed while a write waits for the peer to take it (write_timeout_ms):
         // a peer that stops reading has the connection shut, failing the write.
         ss::timer<ss::lowres_clock> write_timer;
+        bool idle = false;  // waiting for a request, nothing of it received
         explicit AppConnection(ss::connected_socket s)
             : socket(std::move(s)), input(socket.input()), output(socket.output()) {}
         void shut_input() {
@@ -533,7 +540,7 @@ class Service {
         } catch (const ss::sleep_aborted&) {
             co_return false;
         }
-        co_return !closing;
+        co_return accepts();
     }
     ss::gate app_connections;
     std::map<uint64_t, std::unique_ptr<AppConnection>> app_peers;
@@ -589,6 +596,10 @@ class Service {
     }
     // No sibling that is accepting has fewer open connections than this process.
     bool least_loaded() const {
+        // A restarted successor took over this process's line, which counts
+        // its connections, not ours: this process is about to stop, and takes
+        // a connection only when no other one does.
+        if (!owns_slot()) return false;
         const auto mine = open_connections(*own_slot);
         if (mine == 0) return true;
         const auto now = monotonic_ms();
@@ -637,17 +648,17 @@ class Service {
             ss::pollable_fd ready(std::move(watched));
             ss::net::conntrack shards;
             unsigned failures = 0;
-            while (!closing) {
+            while (accepts()) {
                 if (own_slot) {
                     auto pause = std::chrono::microseconds(50);
                     const auto give_up = ss::steady_clock_type::now() + std::chrono::milliseconds(1);
-                    while (!closing && !least_loaded()) {
+                    while (accepts() && !least_loaded()) {
                         co_await ss::sleep(pause);
                         pause = std::min(pause * 2, std::chrono::microseconds(1000));
                         if (ss::steady_clock_type::now() >= give_up && connection_waiting()) break;
                     }
                 }
-                if (closing) break;
+                if (!accepts()) break;
                 ss::socket_address remote;
                 socklen_t length = sizeof(remote.u);
                 const int fd = ::accept4(socket.get(), &remote.u.sa, &length, SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -680,7 +691,7 @@ class Service {
                 });
             }
         } catch (...) {
-            if (!closing) {
+            if (accepts()) {
                 ++counts.errors;
                 // This process no longer accepts: its siblings stop waiting
                 // for its turn (its heartbeat would say it still does).
@@ -696,7 +707,7 @@ class Service {
     ss::future<> accept_application(ss::server_socket& listener, const std::string& unix_path) {
         try {
             unsigned failures = 0;
-            while (!closing) {
+            while (accepts()) {
                 std::optional<ss::accept_result> result;
                 try {
                     result = co_await listener.accept();
@@ -706,16 +717,17 @@ class Service {
                     // descriptors (EMFILE under load), a connection reset before
                     // it was accepted. The listener is still usable: the loop
                     // ended here, and the process never accepted again.
-                    if (closing) break;
+                    if (!accepts()) break;
                     ++counts.errors;
                     if (!co_await pause_accepting(failures++)) break;
                     continue;
                 }
                 failures = 0;
                 auto accepted = std::move(*result);
-                if (closing) break;
+                if (!accepts()) break;
                 auto id = ++next_peer;
                 app_peers.emplace(id, std::make_unique<AppConnection>(std::move(accepted.connection)));
+                ++counts.connections_open;
                 // Every open connection counts towards this process's load.
                 if (own_slot) count_connection(1);
                 (void)ss::with_gate(app_connections, [this, id, remote = accepted.remote_address, &unix_path] {
@@ -724,7 +736,7 @@ class Service {
                     if (own_slot) count_connection(-1);
                 });
             }
-        } catch (...) { if (!closing) ++counts.errors; }
+        } catch (...) { if (accepts()) ++counts.errors; }
     }
     ss::future<> serve_application(uint64_t id, ss::socket_address remote, const std::string& unix_path) {
         auto& connection = *app_peers.at(id);
@@ -765,13 +777,16 @@ class Service {
         // mid_request: a body is being received even if nothing of it is buffered.
         auto read_more = [&](bool mid_request = false) -> ss::future<bool> {
             const bool idle = !mid_request && buffer.size() == consumed;
+            if (idle && draining) co_return false;  // Sanic's close_if_idle
             waiting = idle ? Wait::idle : Wait::request;
             const auto timeout = idle ? config.keep_alive_timeout_ms : config.request_timeout_ms;
             if (timeout) {
                 deadline.arm(idle ? ss::lowres_clock::now() + std::chrono::milliseconds(timeout)
                                   : request_started + std::chrono::milliseconds(timeout));
             }
+            connection.idle = idle;
             auto chunk = co_await connection.input.read();
+            connection.idle = false;
             deadline.cancel();
             if (chunk.empty()) co_return false;
             if (idle) request_started = ss::lowres_clock::now();
@@ -1009,6 +1024,7 @@ class Service {
         } catch (...) {}
         try { co_await connection.input.close(); } catch (...) {}
         app_peers.erase(id);
+        --counts.connections_open;
     }
     // streamed_id: nonzero when the body is still arriving; the request is
     // published under that id (application_data events refer to it).
@@ -1064,6 +1080,9 @@ class Service {
             reject(error_status ? error_status : closing ? 503 : 500);
             co_return;
         }
+        // The server is stopping: unless a pipelined request follows (served as
+        // Sanic serves a busy connection), this is the connection's last response.
+        if (draining && connection.buffer->size() == *connection.consumed) close = true;
         retired = answer->retire;
         const bool streamed = answer->kind == DecisionKind::stream_start;
         // Sanic closes the connection after a response timeout's error response.
@@ -1722,12 +1741,13 @@ public:
                                           kind, content_length});
     }
     void install_policy(NativePolicy next) noexcept { policy = next; }
-    ss::future<> stop() {
-        closing = true;
+    // The framework host's listeners accept no more connections (again: a
+    // no-op). A listener of this process's own is shut down, as Sanic's
+    // server.close(): the kernel refuses new connections or, with
+    // SO_REUSEPORT, gives them to the other processes' sockets. On a socket
+    // shared with other processes, this process leaves accepting to them.
+    void stop_accepting() {
         accept_pause.request_abort();
-        auto active = std::vector<ss::abort_source*>(upstream_active.begin(), upstream_active.end());
-        for (auto* operation : active) operation->request_abort();
-        if (tcp) tcp->abort_accept();
         if (app_listener) app_listener->abort_accept();  // on a shared socket, this shard's queue only
         if (worker_listener) worker_listener->abort_accept();
         if (shared_wake) {
@@ -1739,6 +1759,24 @@ public:
             accept_heartbeat.cancel();
             if (owns_slot()) own_slot->heartbeat_ms.store(0, std::memory_order_release);
         }
+    }
+    // A graceful stop's first step (GRACEFUL_SHUTDOWN_TIMEOUT), as Sanic's
+    // server.close() and close_if_idle(): no new connections; idle ones close
+    // now, the others after their response (sent with Connection: close).
+    // Python waits for those to end, then stop() cuts off what is left.
+    void drain() {
+        if (!accepts()) return;
+        draining = true;
+        stop_accepting();
+        for (auto& [id, peer] : app_peers)
+            if (peer->idle) peer->shut_input();
+    }
+    ss::future<> stop() {
+        closing = true;
+        auto active = std::vector<ss::abort_source*>(upstream_active.begin(), upstream_active.end());
+        for (auto* operation : active) operation->request_abort();
+        if (tcp) tcp->abort_accept();
+        stop_accepting();
         if (udp) {
             udp->shutdown(SHUT_RD, ss::pollable_fd::shutdown_kernel_only::no);
             udp->shutdown(SHUT_WR, ss::pollable_fd::shutdown_kernel_only::no);
@@ -1969,6 +2007,10 @@ ss::future<> NetworkServer::stop() {
         }(*p));
     }
     return p->stopping->get_future();
+}
+ss::future<> NetworkServer::drain() {
+    if (!p->started || p->stopping) return ss::make_ready_future<>();
+    return p->services.invoke_on_all(&Service::drain);
 }
 std::vector<RequestEvent> NetworkServer::drain(size_t count) {
     std::vector<RequestEvent> result;

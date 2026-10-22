@@ -338,6 +338,15 @@ struct Runtime::Impl {
         server_running = true;
         co_return generation;
     }
+    ss::future<> drain_server_here(uint64_t generation) {
+        NetworkServer* network;
+        {
+            std::lock_guard lock(mutex);
+            if (generation && generation != server_generation) co_return;
+            network = server.get();
+        }
+        if (network) co_await network->drain();  // a no-op once it stops
+    }
     ss::future<> stop_server_here(uint64_t generation) {
         NetworkServer* network;
         {
@@ -610,6 +619,17 @@ uint64_t Runtime::start_server(ServerConfig config) {
         if (impl->server_running)
             return ss::make_exception_future<uint64_t>(std::runtime_error("a network server is already running"));
         return impl->start_server_here(std::move(config));
+    }).get();
+}
+void Runtime::drain_server(uint64_t generation) {
+    ss::alien::instance* alien = nullptr;
+    {
+        std::lock_guard lock(p->mutex);
+        if (p->status.state != 1) return;
+        alien = p->alien;
+    }
+    ss::alien::submit_to(*alien, 0, [impl = p.get(), generation] {
+        return impl->drain_server_here(generation);
     }).get();
 }
 void Runtime::stop_server(uint64_t generation) {

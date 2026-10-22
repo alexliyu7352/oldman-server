@@ -137,6 +137,8 @@ public:
     ~NetworkServer();
     seastar::future<> start();
     seastar::future<> stop();
+    // A graceful stop's first step: see Service::drain.
+    seastar::future<> drain();
     seastar::future<> install_policy(NativePolicy policy);
     std::vector<RequestEvent> drain(size_t count);
     void resolve(uint64_t id, unsigned shard, int decision, std::string body, bool retire = false);

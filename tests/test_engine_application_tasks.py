@@ -46,7 +46,7 @@ def request():
                               client=("127.0.0.1", 1), server=("127.0.0.1", 2))
 
 
-def run(scenario):
+def run(scenario, handler=None):
     async def main():
         runtime = FakeRuntime()
         binding = {name: getattr(_seastar_probe, name) for name in dir(_seastar_probe)}
@@ -54,14 +54,14 @@ def run(scenario):
         original, probe_engine._native = probe_engine._native, SimpleNamespace(**binding)
         started = []
 
-        async def handler(req):
+        async def default(req):
             started.append(req)
             await asyncio.sleep(0)
             return 200, b"ok", ()
         try:
             config = Config(shard_cpus=(sorted(os.sched_getaffinity(0))[0],),
                             server=ServerConfig(http_port=1, application_dispatch_all=True))
-            engine = await Engine.open(config, application_handler=handler)
+            engine = await Engine.open(config, application_handler=handler or default)
             try:
                 return await scenario(engine, runtime, started)
             finally:
@@ -128,4 +128,38 @@ def test_unstarted_task_cancelled_by_others_is_answered_at_close():
         engine._flush_application()
         assert runtime.responses == [(1 << 16, 503)] and not engine._application_tasks
         assert engine._decision_stats["python_application_errors"] == 1
+    run(scenario)
+
+
+def test_a_handler_that_ignores_its_cancellation_does_not_hold_up_close():
+    # aclose waited for every cancelled handler: one that catches its
+    # CancelledError and carries on kept the server from ever stopping. It is
+    # left running, as Sanic leaves it, and its late answer is dropped.
+    async def stubborn(req):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(30)  # the event loop's own end cancels this
+        return 200, b"late", ()
+
+    async def scenario(engine, runtime, started):
+        engine._application_event((1 << 16, 0, request()))
+        await asyncio.sleep(0)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await asyncio.wait_for(engine.aclose(), 10)
+        assert loop.time() - began < probe_engine._CANCELLED_WAIT + 1
+        assert not engine._application_tasks and runtime.responses == []
+    run(scenario, handler=stubborn)
+
+
+def test_a_request_answered_at_close_leaves_no_body_buffer():
+    # A request whose body was still arriving got a 503 once the Engine was
+    # closing, but its buffer stayed: the rest of its body piled up there.
+    async def scenario(engine, runtime, started):
+        engine._closed = True
+        engine._application_event((1 << 16, 0, request(), "more"))
+        assert engine._application_inbound == {}
+        engine._flush_application()
+        assert runtime.responses == [(1 << 16, 503)]
     run(scenario)

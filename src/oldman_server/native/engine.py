@@ -7,6 +7,7 @@ import asyncio
 import atexit
 from collections import deque
 from dataclasses import dataclass
+import logging
 import os
 import threading
 import time
@@ -223,6 +224,10 @@ _persistent = None
 # twice in a process: such a child cannot serve natively.
 _started = False
 _forked_after_start = False
+
+# How long aclose waits for cancelled handlers. One that ignores its
+# cancellation is left running, as Sanic leaves it when it closes the loop.
+_CANCELLED_WAIT = 1.0
 
 
 def _after_fork_in_child():
@@ -458,6 +463,7 @@ class Engine:
         self._file_id = 0
         self._server_generation = 0  # the persistent runtime's server this Engine started
         self._abandoned = False  # its server stopped by abandon(); the runtime may serve another
+        self._draining = False
         self._reader_registered = False
         self._decision_handler = decision_handler
         self._http_handler = http_handler
@@ -1025,6 +1031,8 @@ class Engine:
                     self._reap_unstarted_application(parent)
                 return
         if self._closed or handler is None:
+            if self._application_inbound:
+                self._application_inbound.pop(request_id, None)
             self._queue_application(request_id, shard, 503)
             return
         try:
@@ -1048,6 +1056,8 @@ class Engine:
                     task.add_done_callback(
                         lambda _, rid=request_id: self._reap_unstarted_application(rid))
         except Exception:
+            if self._application_inbound:
+                self._application_inbound.pop(request_id, None)
             self._decision_stats["python_application_errors"] += 1
             self._queue_application(request_id, shard, 500)
 
@@ -1215,17 +1225,36 @@ class Engine:
         for request_id in tuple(self._application_tasks):
             self._reap_unstarted_application(request_id)
 
+    async def _finish_cancelled(self, tasks):
+        """Wait up to _CANCELLED_WAIT for cancelled Tasks. A handler that ignores
+        its cancellation is left running; its late answer is dropped."""
+        if not tasks:
+            return
+        await asyncio.wait((asyncio.gather(*tasks, return_exceptions=True),),
+                           timeout=_CANCELLED_WAIT)
+        stuck = 0
+        for request_id, (task, _) in tuple(self._application_tasks.items()):
+            if task in tasks and not task.done():
+                del self._application_tasks[request_id]
+                self._application_terminal.add(request_id)
+                stuck += 1
+        for task in tasks:
+            if not task.done() and task in self._http_tasks:
+                self._http_tasks.discard(task)
+                stuck += 1
+        if stuck:
+            logging.getLogger("oldman_server.error").warning(
+                "%d request handler(s) kept running after being cancelled; "
+                "the server stops without them", stuck)
+
     async def _close(self):
-        application_tasks = self._cancel_applications()
-        if application_tasks:
-            await asyncio.gather(*application_tasks, return_exceptions=True)
+        await self._finish_cancelled(self._cancel_applications())
         self._reap_applications()
         self._flush_application()
         tasks = tuple(self._http_tasks)
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._finish_cancelled(tasks)
         self._flush_http()
         await self._empty.wait()
         # After abandon() the runtime (its notification fd, queue and connection
@@ -1239,9 +1268,7 @@ class Engine:
                 await self._stopped
             while self._native.server_stats().get("queued_decisions", 0):
                 self._drain()
-                application_tasks = self._cancel_applications()
-                if application_tasks:
-                    await asyncio.gather(*application_tasks, return_exceptions=True)
+                await self._finish_cancelled(self._cancel_applications())
                 self._reap_applications()
                 self._flush_application()
             self._loop.remove_reader(self.notification_fd)
@@ -1288,11 +1315,17 @@ class Engine:
         return self._close_task is not None and self._close_task.done()
 
     async def drain_applications(self, timeout):
-        """Answer new application requests with 503 and give running ones up to
-        `timeout` seconds to finish; aclose then cancels whatever remains."""
-        self._closed = True
+        """A graceful stop, as Sanic's within GRACEFUL_SHUTDOWN_TIMEOUT: the
+        server accepts no more connections and closes idle ones (the others
+        after their response); requests keep being served for up to `timeout`
+        seconds, until no request runs and no connection is open (a response
+        is still being written). aclose then cancels and cuts off the rest."""
         deadline = self._loop.time() + timeout
-        while self._application_tasks and self._loop.time() < deadline:
+        if not self._draining and not self._closed and not self._abandoned:
+            self._draining = True
+            await _off_loop(self._native.drain_server, self._server_generation)
+        while (self._application_tasks or self._native.server_stats().get("connections_open", 0)) \
+                and self._loop.time() < deadline:
             await asyncio.sleep(0.01)
 
     async def aclose(self):

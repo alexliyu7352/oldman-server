@@ -878,6 +878,8 @@ PYBIND11_MODULE(_native, m) {
         })
         .def("start_server", &probe::Runtime::start_server, py::arg("server"),
              py::call_guard<py::gil_scoped_release>())
+        .def("drain_server", &probe::Runtime::drain_server, py::arg("generation") = 0,
+             py::call_guard<py::gil_scoped_release>())
         .def("stop_server", &probe::Runtime::stop_server, py::arg("generation") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("stop", &probe::Runtime::stop, py::call_guard<py::gil_scoped_release>())

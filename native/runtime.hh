@@ -85,6 +85,9 @@ public:
     // start_server returns the server's generation; stop_server(generation)
     // stops that server only if it is still the current one (0: the current).
     uint64_t start_server(ServerConfig server);
+    // A graceful stop's first step (no new connections, idle ones closed);
+    // stop_server ends it. The same generation rule as stop_server.
+    void drain_server(uint64_t generation = 0);
     void stop_server(uint64_t generation = 0);
     void stop();
     void join();

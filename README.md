@@ -55,6 +55,8 @@ Sanic 的设置照常生效：
 | `REQUEST_MAX_SIZE`、`REQUEST_MAX_HEADER_SIZE`、`REQUEST_BUFFER_SIZE` | 请求体与请求头上限，与 Sanic 的计算相同 |
 | `REQUEST_TIMEOUT`、`KEEP_ALIVE`、`KEEP_ALIVE_TIMEOUT` | 由原生层执行 |
 | `RESPONSE_TIMEOUT` | 到期时取消 handler，由错误处理器回 503 “Response Timeout” |
+| `GRACEFUL_SHUTDOWN_TIMEOUT` | 停止时不再接受连接、关闭空闲连接，在这段时间内等在途请求结束、响应写完，之后取消与切断剩下的（见「与 Sanic 的差异」） |
+| `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` | 写出的期限：请求方这么久不接收响应（一次写出，大响应按每 1 MiB 计）就断开连接 |
 | `ACCESS_LOG`、`WEBSOCKET_*`、错误处理器、`FALLBACK_ERROR_FORMAT` | 与原版相同 |
 
 原生专属设置（都在 `DEFAULT_CONFIG` 里有默认值，`app.config.NATIVE_*` 总能读到；也可用 `OLDMAN_SERVER_NATIVE_*` 环境变量设置）：
@@ -171,6 +173,7 @@ server {
 - `app.create_server()` 创建后即开始服务：`asyncio_server_kwargs`（如 `start_serving=False`）只用于 asyncio 服务器。
 - 关机时被截断的请求不另记 `Request: ... stopped. Transport is closed.` 日志（asyncio 服务器会记）。
 - 流式响应开始后不再受 `RESPONSE_TIMEOUT` 约束；原版在两次发送之间计时。
+- 优雅停止与原版一样先停止接受新连接、关闭空闲连接，忙的连接照常服务（已经送达的 pipelined 请求也服务），在 `GRACEFUL_SHUTDOWN_TIMEOUT` 内等在途请求结束、响应写完；不同的是忙的连接在最后一个响应之后关闭（响应带 `Connection: close`），原版则让它保持 keep-alive，到宽限期结束才断开。宽限期过后取消仍在运行的 handler，最多再等 1 秒：不理会取消、继续运行的 handler 被留下（记一条警告），服务器照常停止（原版关闭事件循环时同样不等它）。
 
 ## 测试与测量
 
