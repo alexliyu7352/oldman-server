@@ -5,7 +5,8 @@ its patch, Boost, OpenSSL, fmt, yaml-cpp, c-ares, liburing) and its
 "release_archives" (hwloc, protobuf, ragel; the development host uses its own
 packages of these). Each archive must match its SHA-256; it is unpacked into
 DIRECTORY/<Name> (the lock's StripComponents applied) and its patches applied.
-An archive already unpacked from the same checksum is left alone.
+An archive already unpacked from the same checksums (archive and patches) is
+left alone.
 
     python scripts/fetch_sources.py DIRECTORY
 """
@@ -47,7 +48,9 @@ def download(entry, cache):
 def unpack(entry, archive, directory):
     destination = directory / entry["Name"]
     marker = destination / ".source-sha256"
-    if marker.exists() and marker.read_text() == entry["SHA256"]:
+    # A changed patch needs a fresh unpack too: patches apply only once.
+    checksums = " ".join([entry["SHA256"], *(patch["SHA256"] for patch in entry.get("Patches", []))])
+    if marker.exists() and marker.read_text() == checksums:
         return
     shutil.rmtree(destination, ignore_errors=True)
     destination.mkdir(parents=True)
@@ -58,7 +61,7 @@ def unpack(entry, archive, directory):
         if hashlib.sha256(data).hexdigest() != patch["SHA256"]:
             raise RuntimeError(f"patch checksum mismatch: {patch['File']}")
         subprocess.run(["git", "apply", "-"], input=data, cwd=destination, check=True)
-    marker.write_text(entry["SHA256"])
+    marker.write_text(checksums)
 
 
 def main():

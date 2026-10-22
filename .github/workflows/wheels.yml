@@ -16,13 +16,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The image is pinned (tag and digest) and part of the cache key: the
+        # cached prefix is only reused with the compiler that built it.
         include:
           - arch: x86_64
             runner: ubuntu-24.04
+            image: quay.io/pypa/manylinux_2_28_x86_64:2026.10.22-0@sha256:076b19ef6e698f28649fa817c49d14443201e01da85240e8e52f93e8daa49bff
           - arch: aarch64
             runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64:2026.10.22-0@sha256:270a5e59af09f02dfc07fe4bb2cb2c5625c76d085cfa47f87dd93d9026eacc75
     runs-on: ${{ matrix.runner }}
-    container: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
+    container: ${{ matrix.image }}
     # Building the dependencies and Seastar takes most of an hour on a fresh
     # cache; the cached prefix leaves the extension, wheels and tests.
     timeout-minutes: 240
@@ -34,7 +38,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/oldman-server-wheels/prefix
-          key: native-prefix-${{ matrix.arch }}-${{ hashFiles('dependency-lock.json', 'patches/**', 'scripts/fetch_sources.py', 'scripts/build_wheels.sh') }}
+          key: native-prefix-${{ matrix.arch }}-${{ hashFiles('dependency-lock.json', 'patches/**', 'scripts/fetch_sources.py', 'scripts/build_wheels.sh') }}-${{ matrix.image }}
 
       - name: Build the dependencies and Seastar
         id: prepare

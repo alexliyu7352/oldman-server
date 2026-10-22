@@ -179,7 +179,7 @@ python probes/sanic_comparison/run.py --python-only --out results/<新目录>   
 
 推送 tag `v<版本>`（与 `src/oldman_server/__version__.py` 一致，如 `v0.1.0`）后，`.github/workflows/release.yml`：
 
-1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载依赖源码并校验 SHA-256（`scripts/fetch_sources.py`，Seastar 打上 `patches/` 里的补丁），构建 Boost、OpenSSL、fmt、yaml-cpp、c-ares、protobuf、liburing、hwloc（不带插件）与 Seastar，再为 CPython 3.12–3.14 各构建扩展、打包（`hatch_build.py` 把扩展放进 wheel 并标上解释器与平台；树里没有扩展时拒绝构建 wheel，`OLDMAN_SERVER_PURE_WHEEL=1` 才构建只能用 asyncio 服务器的纯 Python wheel），由 auditwheel 把依赖库复制进 wheel、标为 manylinux_2_28。依赖与 Seastar 的构建结果按锁文件与脚本缓存。
+1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载依赖源码并校验 SHA-256（`scripts/fetch_sources.py`，Seastar 打上 `patches/` 里的补丁），构建 Boost、OpenSSL、fmt、yaml-cpp、c-ares、protobuf、liburing、hwloc（不带插件）与 Seastar，再为 CPython 3.12–3.14 各构建扩展、打包（`hatch_build.py` 把扩展放进 wheel 并标上解释器与平台；树里没有扩展时拒绝构建 wheel，`OLDMAN_SERVER_PURE_WHEEL=1` 才构建只能用 asyncio 服务器的纯 Python wheel），由 auditwheel 把依赖库复制进 wheel、标为 manylinux_2_28。容器镜像按标签与摘要固定（`wheels.yml`）；lz4 与构建所需的头文件取自镜像的发行版仓库（签名的 RPM，版本不在锁文件里，记入构建日志与缓存键）。依赖与 Seastar 的构建结果按锁文件、补丁、脚本、镜像、编译器与这些 RPM 的版本缓存。
 2. 核对每个 wheel 所带的库都附有许可证（`scripts/check_wheel_licenses.py`），再把每个 wheel 装进全新环境，跑经原生主机的框架测试与原生主机的运行测试（`scripts/test_wheels.sh`）。
 3. 经 PyPI trusted publishing 发布（环境 `pypi`），再建 GitHub release 附上 wheel 与 SHA256SUMS。
 

@@ -44,7 +44,7 @@ if (( $(gcc -dumpversion | cut -d. -f1) < 13 )); then
 fi
 
 # Headers and small libraries the image's distribution provides; auditwheel
-# copies the libraries into the wheels.
+# copies those the build links (lz4) into the wheels.
 dnf install -y --setopt=install_weak_deps=False \
   bzip2 zlib-devel lz4-devel lksctp-tools-devel valgrind-devel \
   perl-IPC-Cmd perl-Time-Piece perl-Data-Dumper
@@ -54,8 +54,13 @@ dnf install -y --setopt=install_weak_deps=False --enablerepo=powertools xfsprogs
 "$tools/python" -m pip install --quiet "cmake==4.4.3" "ninja==1.13.2" "pybind11==3.1.0" "uv==0.9.18"
 export PATH="$tools:$PATH"
 
-stamp="$(cat "$root/dependency-lock.json" "$root"/patches/* "$root/scripts/fetch_sources.py" "$0" \
-  | sha256sum | cut -d' ' -f1)-$arch"
+# What the prefix is built from: the lock, patches and scripts, and the image's
+# compiler and the distribution packages above (versions not in the lock).
+packages=(lz4-devel lksctp-tools-devel valgrind-devel zlib-devel xfsprogs-devel)
+gcc -dumpfullversion
+rpm -q "${packages[@]}"
+stamp="$( (cat "$root/dependency-lock.json" "$root"/patches/* "$root/scripts/fetch_sources.py" "$0"
+  gcc -dumpfullversion; rpm -q "${packages[@]}") | sha256sum | cut -d' ' -f1)-$arch"
 if [[ "$(cat "$prefix/.stamp" 2>/dev/null)" != "$stamp" ]]; then
   rm -rf "$prefix" "$work/build"
   mkdir -p "$prefix" "$work/build"
