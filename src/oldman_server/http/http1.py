@@ -36,6 +36,9 @@ ABORT_NOT_STARTED = (
 )
 
 
+_HEX_DIGITS = b"0123456789abcdefABCDEF"
+
+
 class Http(Stream, metaclass=TouchUpMeta):
     """ "Internal helper for managing the HTTP/1.1 request/response cycle.
 
@@ -530,19 +533,17 @@ class Http(Stream, metaclass=TouchUpMeta):
 
                 await self._receive_more()
 
-            try:
-                raw = buf[2:pos].split(b";", 1)[0].decode()
-                size = self._safe_int(raw, 16)
-            except Exception:
+            # RFC 9112 7.1: the previous chunk's data ends with CRLF, and the
+            # size is hex digits only (int() would also take "0x5" or " 5"),
+            # as the native host parses it.
+            raw = buf[2:pos].split(b";", 1)[0]
+            if buf[:2] != b"\r\n" or not raw or raw.strip(_HEX_DIGITS):
                 self.keep_alive = False
                 raise BadRequest("Bad chunked encoding")
+            size = int(raw, 16)
 
-            if size <= 0:
+            if size == 0:
                 self.request_body = None
-
-                if size < 0:
-                    self.keep_alive = False
-                    raise BadRequest("Bad chunked encoding")
 
                 # Consume the leading CRLF, the terminating size line and
                 # the CRLF that follows it.

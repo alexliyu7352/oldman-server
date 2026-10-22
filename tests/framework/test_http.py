@@ -362,3 +362,19 @@ def test_header_names_and_values_through_either_server(client):
     body = stdjson.loads(response.split(b"\r\n\r\n", 1)[1])
     assert body == {"trail": "v", "items": [
         ["host", "localhost"], ["x-trail", "v"], ["x-lead", "w"], ["connection", "close"]]}
+
+
+@pytest.mark.parametrize("chunk", [
+    b"0x5\r\nhello\r\n0\r\n\r\n",    # not a hex number (int("0x5", 16) would take it)
+    b" 5\r\nhello\r\n0\r\n\r\n",     # whitespace around it
+    b"5\r\nhelloXY0\r\n\r\n",        # the data not followed by CRLF
+])
+def test_malformed_chunks_are_rejected_on_either_server(client, chunk):
+    # RFC 9112 7.1: the chunk size is hex digits and the data ends with CRLF;
+    # the native host rejects the rest, the asyncio server too.
+    client.send(
+        b"POST /upload HTTP/1.1\r\nHost: localhost\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n" + chunk
+    )
+    response = client.recv()
+    assert response.startswith(b"HTTP/1.1 400"), response
