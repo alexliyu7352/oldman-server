@@ -631,3 +631,12 @@ def test_blank_lines_before_a_request_count_towards_the_head_limit():
 
     results = run("http1_blank_lines", few, many_then_request, only_blank_lines)
     assert results == [200, (413, True), (413, b"")]
+
+
+def test_many_short_header_fields_within_the_size_limit():
+    # Only the head's size is limited, as in Sanic: 150 short fields fit.
+    async def scenario(reader, writer):
+        fields = b"".join(b"X-%d: v\r\n" % index for index in range(150))
+        writer.write(b"GET /small HTTP/1.1\r\nHost: x\r\n" + fields + b"\r\n")
+        return (await read_response(reader))[0]
+    assert run("http1_many_fields", scenario) == [200]

@@ -678,8 +678,10 @@ class Service {
         try {
             for (bool keep = true; keep && !closing;) {
                 http1::Head head;
+                // No field count of its own: the size limit bounds the head, as in Sanic.
                 const auto parsed = http1::parse_head(std::string_view(buffer).substr(consumed),
-                                                      config.max_header_bytes, 100, head);
+                                                      config.max_header_bytes,
+                                                      std::numeric_limits<size_t>::max(), head);
                 if (parsed == http1::Parse::incomplete) {
                     co_await flush_output(connection, output);
                     buffer.erase(0, consumed);
