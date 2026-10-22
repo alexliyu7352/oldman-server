@@ -4,8 +4,9 @@ name: Release
 # src/oldman_server/__version__.py (for example v0.1.0 or v0.2.0rc1). Builds and
 # tests the wheels, publishes them to PyPI through trusted publishing (OIDC, no
 # stored token; the PyPI project trusts this workflow and the environment
-# "pypi"), then attaches them to a GitHub release. Only wheels are published:
-# building from source needs Seastar and its dependencies.
+# "pypi", which accepts only deployments from v* tags), then attaches them to a
+# GitHub release. Only wheels are published: building from source needs
+# Seastar and its dependencies. Actions are pinned to commits.
 
 on:
   push:
@@ -25,7 +26,7 @@ jobs:
     outputs:
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - id: version
         run: |
           version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/oldman_server/__version__.py)"
@@ -33,8 +34,8 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match __version__ ($version)"
             exit 1
           fi
-          # A pre-release (PEP 440 a, b, rc or dev) has a letter in it.
-          if [[ "$version" =~ [a-z] ]]; then prerelease=true; else prerelease=false; fi
+          # A pre-release (PEP 440 a, b, rc or dev; not a post-release).
+          if [[ "$version" =~ [0-9](a|b|rc)[0-9]*$|\.dev[0-9]*$ ]]; then prerelease=true; else prerelease=false; fi
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
   wheels:
@@ -49,12 +50,12 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           packages-dir: dist
           print-hash: true
@@ -66,14 +67,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
       - run: cd dist && sha256sum ./*.whl > SHA256SUMS && cat SHA256SUMS
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
-          generate_release_notes: true
+      # The runner's own gh, not a third-party action, in this job that can write.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          flags=(--generate-notes --verify-tag)
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
