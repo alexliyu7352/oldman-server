@@ -57,7 +57,11 @@ from oldman_server.server.goodbye import get_goodbye
 from oldman_server.server.protocols.http_protocol import HttpProtocol
 from oldman_server.server.protocols.websocket_protocol import WebSocketProtocol
 from oldman_server.server.runners import serve
-from oldman_server.server.socket import configure_socket, remove_unix_socket
+from oldman_server.server.socket import (
+    configure_socket,
+    remove_unix_socket,
+    unix_socket_mode,
+)
 from oldman_server.worker.loader import AppLoader
 from oldman_server.worker.manager import WorkerManager
 from oldman_server.worker.multiplexer import WorkerMultiplexer
@@ -1009,6 +1013,7 @@ class StartupMixin(metaclass=AppMeta):
                     configure_socket(
                         server_info.settings,
                         reserve=native_server(app.config),
+                        mode=unix_socket_mode(app.config),
                     )
                     for app in apps
                     for server_info in app.state.server_info
@@ -1222,7 +1227,9 @@ class StartupMixin(metaclass=AppMeta):
                     primary,
                 )
             sock = configure_socket(
-                kwargs, reserve=native_server(primary.config)
+                kwargs,
+                reserve=native_server(primary.config),
+                mode=unix_socket_mode(primary.config),
             )
             if main_loop is not None:
                 trigger_events(

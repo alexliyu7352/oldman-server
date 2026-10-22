@@ -66,6 +66,10 @@ DEFAULT_CONFIG = {
     "REQUEST_TIMEOUT": 60,
     "RESPONSE_TIMEOUT": 60,
     "TOUCHUP": _default,
+    # Permission bits of the unix sockets the server binds (unix=,
+    # NATIVE_WORKER_LISTEN): who may connect. 0o666, as Sanic, lets every local
+    # user connect, whom TRUSTED_PROXIES="unix" then trusts.
+    "UNIX_SOCKET_MODE": 0o666,
     "USE_UVLOOP": _default,
     "WEBSOCKET_MAX_SIZE": 2**20,  # 1 MiB
     "WEBSOCKET_PING_INTERVAL": 20,
@@ -164,6 +168,7 @@ class Config(dict, metaclass=DescriptorMeta):
     PROXIES_COUNT: int | None
     REAL_IP_HEADER: str | None
     TRUSTED_PROXIES: str | Sequence[str] | None
+    UNIX_SOCKET_MODE: int | str
     REQUEST_BUFFER_SIZE: int
     REQUEST_MAX_HEADER_SIZE: int
     REQUEST_ID_HEADER: str

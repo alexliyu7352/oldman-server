@@ -140,6 +140,23 @@ def bind_unix_socket(
     return sock
 
 
+def unix_socket_mode(config) -> int:
+    """config.UNIX_SOCKET_MODE as permission bits: an int (0o660) or an octal
+    string ("0o660", "660"; the environment variable)."""
+    mode = config.UNIX_SOCKET_MODE
+    try:
+        if isinstance(mode, str):
+            mode = int(mode, 8)
+        if type(mode) is not int or not 0 <= mode <= 0o777:
+            raise ValueError
+    except ValueError:
+        raise ValueError(
+            f"UNIX_SOCKET_MODE must be permission bits such as 0o660, "
+            f"not {config.UNIX_SOCKET_MODE!r}"
+        ) from None
+    return mode
+
+
 def remove_unix_socket(path: Path | str | None) -> None:
     """Remove dead unix socket during server exit."""
     if not path:
@@ -158,7 +175,7 @@ def remove_unix_socket(path: Path | str | None) -> None:
 
 
 def configure_socket(
-    server_settings: dict[str, Any], *, reserve=False
+    server_settings: dict[str, Any], *, reserve=False, mode=0o666
 ) -> socket.SocketType | None:
     # Create a listening socket or use the one in settings. With reserve (the
     # native host), a TCP address is only reserved: each serving process
@@ -170,7 +187,7 @@ def configure_socket(
     backlog = server_settings["backlog"]
     if unix:
         unix = Path(unix).absolute()
-        sock = bind_unix_socket(unix, backlog=backlog)
+        sock = bind_unix_socket(unix, mode=mode, backlog=backlog)
         server_settings["unix"] = unix
         if reserve:
             sock.set_inheritable(True)

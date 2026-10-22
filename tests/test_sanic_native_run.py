@@ -473,9 +473,11 @@ def test_a_single_process_listens_on_the_worker_0_address(short_dir):
         app.config.NATIVE_SERVER = True
         app.config.NATIVE_SHARDS = 1
         app.config.NATIVE_WORKER_LISTEN = "{short_dir}/w{{n}}.sock"
+        app.config.UNIX_SOCKET_MODE = 0o600
 
         @app.after_server_start
         async def requests(app):
+            print("MODE " + oct(os.stat("{short_dir}/w0.sock").st_mode & 0o777), flush=True)
             reader, writer = await asyncio.open_unix_connection("{short_dir}/w0.sock")
             writer.write(b"GET /json HTTP/1.1\\r\\nHost: own.test\\r\\nConnection: close\\r\\n\\r\\n")
             print("RESPONSE " + (await reader.read()).decode().split("\\r\\n\\r\\n", 1)[1], flush=True)
@@ -484,6 +486,7 @@ def test_a_single_process_listens_on_the_worker_0_address(short_dir):
         app.run(host="127.0.0.1", port={free_port()}, single_process=True, motd=False)
     ''')
     assert json.loads(lines["RESPONSE"])["host"] == "own.test"
+    assert lines["MODE"] == "0o600"
     assert not list(short_dir.glob("w*.sock"))
 
 

@@ -75,7 +75,7 @@ Sanic 的设置照常生效：
 
 - 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由 shard 上的 Seastar 文件 API 完成（走页缓存；不在缓存中的读交给 Seastar 的 syscall 线程，不阻塞 reactor），不再经 aiofiles 线程池；`file_stream()` 的文件内容由 shard 直接读出并写入连接，分块与原版相同。响应头、304/206、错误类型与原版一致。
 - multipart 表单：`request.form` / `request.files` 的解析由 C++ 完成（`native/multipart.hh`），结果与 Sanic 的 `parse_multipart_form` 相同；遇到需要 Python 编解码或 Unicode 处理的表单（非 ASCII 的段头、非 UTF-8 字段、`filename*`、没有 name 的段、格式错误）则照旧由 Sanic 的解析器处理。
-- 监听 socket：由 Sanic 照原样绑定（unix socket 用临时名、权限 0o666、改名替换，退出时删除），原生主机在这个 socket 上接受连接（shard 0 接受后分给各 shard），它在服务期间保持打开、随服务器关闭，所以传入的 `sock`（TCP 或 AF_UNIX）、`app.serve_location` 与原版一致。TCP 地址由 Sanic 只做预留（绑定、不监听，并允许 SO_REUSEPORT），每个服务进程在同一地址上开自己的 SO_REUSEPORT 监听 socket，由内核按连接的四元组哈希把连接分给各进程（连接少时进程之间会不均）；地址已被占用时照样在绑定时报错。unix socket 没有 SO_REUSEPORT：多 worker 时由主进程绑定一次，各 worker 都在这一个 socket 上接受连接，退出时由主进程删除；各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket。用户传入的共用 socket 同样如此。原版是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。放在 nginx 之后的部署见下一节。
+- 监听 socket：由 Sanic 照原样绑定（unix socket 用临时名、权限默认 0o666（`UNIX_SOCKET_MODE`）、改名替换，退出时删除），原生主机在这个 socket 上接受连接（shard 0 接受后分给各 shard），它在服务期间保持打开、随服务器关闭，所以传入的 `sock`（TCP 或 AF_UNIX）、`app.serve_location` 与原版一致。TCP 地址由 Sanic 只做预留（绑定、不监听，并允许 SO_REUSEPORT），每个服务进程在同一地址上开自己的 SO_REUSEPORT 监听 socket，由内核按连接的四元组哈希把连接分给各进程（连接少时进程之间会不均）；地址已被占用时照样在绑定时报错。unix socket 没有 SO_REUSEPORT：多 worker 时由主进程绑定一次，各 worker 都在这一个 socket 上接受连接，退出时由主进程删除；各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket。用户传入的共用 socket 同样如此。原版是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。放在 nginx 之后的部署见下一节。
 - 只服务明文 HTTP/1.1：TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见「与 Sanic 的差异」）。
 - 多 worker：会启动 worker 进程的运行（`workers > 1`、`fast`、`auto_reload`、`dev`）照原版由 Sanic 的 worker manager 管理（重启、扩缩、`app.m` 都相同），每个 worker 进程各自运行原生主机：主进程把 CPU 分成每个 worker 一组，worker 的 Python 线程固定在组内第一个 CPU，shard 用其余的。`fast=True` 启动能放下的 worker 数（CPU 数 ÷ (1 + `NATIVE_SHARDS`)），而不是每个 CPU 一个。worker 数多于 CPU 组时，多出的 worker 与前面的共用 CPU 组（记一条警告）。
 - 用 `fork` 启动方式、且父进程已经运行过原生主机时（Seastar 不能在 fork 出的子进程里再次启动），子进程改用 asyncio 服务器并记一条警告；默认的 `spawn` 不受影响。
@@ -91,6 +91,7 @@ Sanic 的设置照常生效：
 app.config.NATIVE_SERVER = True
 app.config.NATIVE_WORKER_LISTEN = "/run/app/{n}.sock"   # worker 0 是 /run/app/0.sock，依次类推
 app.config.TRUSTED_PROXIES = "unix"                     # 只信任经 unix socket 来的转发头
+app.config.UNIX_SOCKET_MODE = 0o660                     # 只有服务的用户与同组（nginx）能连上
 app.config.PROXIES_COUNT = 1
 app.run(unix="/run/app/app.sock", workers=2)            # 运行本身的地址照常服务（健康检查、直接访问）
 ```
@@ -116,6 +117,7 @@ server {
 
 原因（OpenResty 1.31 实测）：新版 nginx 不写任何设置时也对上游用 HTTP/1.1 并复用连接，且优先取最近释放的空闲连接。负载不高时少数几条“热”连接承担大部分请求，所以只给 nginx 一个地址时，请求集中在这几条连接所在的 worker：约四成负载（2 万请求/秒，两个 worker 共约 5 万/秒的能力）时，较闲 worker 与较忙 worker 的请求比，TCP 地址最低 0.10，unix socket 最低 0.72，较忙 worker 的 Python 线程到 0.9 核；每个 worker 一个地址并用 `least_conn` 时为 0.97–1.0，两边各约 0.65 核。服务器只能决定连接落在哪个进程，决定不了 nginx 在已有连接上怎么分请求，所以要让 nginx 分别看待各 worker。
 
+- `TRUSTED_PROXIES = "unix"` 信任所有能连上这些 socket 的进程。socket 的权限默认与 Sanic 一样是 0o666，本机任何账号都能连上并伪造 `X-Forwarded-For`；所以同时设 `UNIX_SOCKET_MODE = 0o660`，并让 nginx 的用户属于服务进程的组（或把 socket 放在只有两者能进入的目录里）。
 - 同机部署用 unix socket，省掉 loopback TCP 的开销；`NATIVE_WORKER_LISTEN` 也可以是 `"127.0.0.1:81{n:02d}"` 这样的 TCP 地址（8100、8101……）。
 - worker 退出时删除自己的 socket 文件；重启的 worker 绑定同一地址。重启期间连接不上的那个地址被 nginx 暂时标记为失败（`max_fails`、`fail_timeout`，默认 1 次、10 秒），请求改走其他 worker。
 - worker 数改变时，nginx 的 `upstream` 要同时增减。
@@ -133,7 +135,8 @@ server {
 - 测试客户端随包提供为 `oldman_server.testing`（源自 sanic-testing 24.6.0），`app.test_client` 需要 httpx；不再需要 sanic-testing。
 - 新增 `response.abort()`：对 `request.respond()` 得到的流式响应，在已发出的数据之后关闭连接、不完成响应（没有结束块，或少于 Content-Length），请求方因此知道内容不完整；之后再 `send()` 会抛出，handler 在下一次 await 被取消（与请求方断开时相同）。还没发出任何数据时抛 `ServerError`（这时应抛异常或返回错误响应），响应已结束时什么都不做。asyncio 服务器与原生主机行为相同；oldman 代理里的 `request.transport.get_protocol().close()`（在原生主机上不起作用）可以换成它。
 - 新增 `@app.rewrite_path`：注册的函数在路由与所有中间件之前对每个请求执行，返回新路径（以 `/` 开头）或 None；按注册顺序依次执行。之后请求的 `path` 和路由都用新路径，查询串保留，`raw_url` 仍是请求方发来的。抛出的异常交给错误处理器。oldman 的 `I18nRequest`（重写私有的 `_parsed_url`）可以换成它：自定义请求类会让原生主机走一般路径，用这个钩子则保留快速路径。
-- 新增设置 `TRUSTED_PROXIES`：地址或网段（列表，或逗号分隔的字符串，如 `"127.0.0.1, 10.0.0.0/8"`），`"unix"` 表示 unix socket 连接。设置后，只有来自这些来源的连接，其 `Forwarded` / `X-Forwarded-*` 等转发头才按 `FORWARDED_SECRET`、`REAL_IP_HEADER`、`PROXIES_COUNT` 生效；其他连接的 `remote_addr` 为空，`client_ip`、`scheme`、`host` 取实际连接。双栈监听收到的 IPv4 映射地址（`::ffff:a.b.c.d`）按 IPv4 网段比较。格式错误在服务器启动时报 `ValueError`。不设置时与原版相同：转发头对所有连接都按上述设置生效。
+- 新增设置 `UNIX_SOCKET_MODE`：服务器绑定的 unix socket（`unix=`、`NATIVE_WORKER_LISTEN`）的权限位，默认 0o666（与 Sanic 相同）；可写 `0o660` 或八进制字符串（环境变量写 `OLDMAN_SERVER_UNIX_SOCKET_MODE=0o660`）。不是 0–0o777 的值在绑定时报 `ValueError`。
+- 新增设置 `TRUSTED_PROXIES`：地址或网段（列表，或逗号分隔的字符串，如 `"127.0.0.1, 10.0.0.0/8"`），`"unix"` 表示 unix socket 连接（能连上 socket 的进程都被信任，权限见 `UNIX_SOCKET_MODE`）。设置后，只有来自这些来源的连接，其 `Forwarded` / `X-Forwarded-*` 等转发头才按 `FORWARDED_SECRET`、`REAL_IP_HEADER`、`PROXIES_COUNT` 生效；其他连接的 `remote_addr` 为空，`client_ip`、`scheme`、`host` 取实际连接。双栈监听收到的 IPv4 映射地址（`::ffff:a.b.c.d`）按 IPv4 网段比较。格式错误在服务器启动时报 `ValueError`。不设置时与原版相同：转发头对所有连接都按上述设置生效。
 - 新增 `HTTPMethodView.before_dispatch(request, *args, **kwargs)`：覆写后在方法 handler 之前以同样的参数执行（可为同步或协程），返回响应则直接用它回应，返回 None 才进入 handler；抛出的异常交给错误处理器。不覆写时没有额外开销。oldman 的 `HTTPMethodView` 不必再复制整个 `dispatch_request`，把登录与权限检查放进这里即可。
 - 已移除：coffee 模式（`app.make_coffee()`、`prepare(coffee=...)`、`--coffee`，Sanic 标志的彩蛋）；REPL（`--repl`、`app.repl_ctx`）；后台运行（`--daemon` 及 `kill` / `status` / `restart` / `stop` 命令，进程管理交给 systemd 或 oldman 自己的服务命令）；inspector（`INSPECTOR*` 设置、`app.inspector`、`inspect` 命令）；TLS（`run()` / `prepare()` / `create_server()` 的 `ssl`、`auto_tls`，`--cert` / `--key` / `--tls` / `--auto-tls`，`LOCAL_CERT_CREATOR` 等设置，`certloader_class`，`conn_info.ssl` / `cert` / `server_name`）与 HTTP/3（`version` 参数、`--http` / `-1` / `-3`、`request.stream_id`、`Alt-Svc`）：TLS 由前端代理终止，`request.scheme` 照旧取 `Forwarded` / `X-Forwarded-Proto`；ASGI（应用不再是 ASGI 可调用对象，`app.asgi`、`app.asgi_client`、`request.scope` 一并移除），只由本包自己的服务器运行；Windows 支持（原生主机只能运行在 Linux 上）。
 - 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。

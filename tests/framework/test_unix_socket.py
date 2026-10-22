@@ -278,3 +278,30 @@ def test_unix_connection_multiple_workers():
 
 #     # Removing this check that seems to be flappy
 #     # assert not os.path.exists(SOCKPATH)
+
+
+@pytest.mark.parametrize("mode, expected", [(None, 0o666), (0o660, 0o660), ("0o600", 0o600)])
+def test_unix_socket_mode(mode, expected):
+    # UNIX_SOCKET_MODE: who may connect (TRUSTED_PROXIES="unix" trusts them all).
+    import stat
+
+    app = OldmanServer(name="test")
+    if mode is not None:
+        app.config.UNIX_SOCKET_MODE = mode
+    seen = []
+
+    @app.after_server_start
+    def running(app: OldmanServer):
+        seen.append(stat.S_IMODE(os.stat(SOCKPATH).st_mode))
+        app.stop()
+
+    app.run(unix=SOCKPATH, single_process=True)
+    assert seen == [expected]
+
+
+@pytest.mark.parametrize("mode", [0o1777, 660, "rw", -1])
+def test_unix_socket_mode_must_be_permission_bits(mode):
+    app = OldmanServer(name="test")
+    app.config.UNIX_SOCKET_MODE = mode
+    with pytest.raises(ValueError, match="UNIX_SOCKET_MODE"):
+        app.run(unix=SOCKPATH, single_process=True)

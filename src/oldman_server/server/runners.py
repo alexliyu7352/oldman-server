@@ -33,6 +33,7 @@ from oldman_server.server.socket import (
     remove_unix_socket,
     reserved_for_listeners,
     reuseport_listener,
+    unix_socket_mode,
     worker_listener,
 )
 
@@ -332,7 +333,8 @@ def _serve_native(
     own = worker_address(app.config)
     own_sock = None
     if own is not None:
-        own_sock = (bind_unix_socket(own[1], backlog=backlog) if own[0] == "unix"
+        own_sock = (bind_unix_socket(own[1], mode=unix_socket_mode(app.config),
+                                     backlog=backlog) if own[0] == "unix"
                     else worker_listener(own[1], own[2], backlog))
         sockets.append(own_sock)
     own_unix = own[1] if own is not None and own[0] == "unix" else None
@@ -443,7 +445,9 @@ def _serve_http_1(
                 # Bound as for the asyncio server (temporary name, mode,
                 # rename); the native host accepts on it. Worker processes
                 # get the main process's socket instead (configure_socket).
-                sock = bind_unix_socket(unix, backlog=backlog)
+                sock = bind_unix_socket(
+                    unix, mode=unix_socket_mode(app.config), backlog=backlog
+                )
                 bound_unix = unix
             return _serve_native(
                 host, port, app, sock, unix, bound_unix, backlog, loop,
@@ -465,7 +469,9 @@ def _serve_http_1(
     )
     # UNIX sockets are always bound by us (to preserve semantics between modes)
     if unix:
-        sock = bind_unix_socket(unix, backlog=backlog)
+        sock = bind_unix_socket(
+            unix, mode=unix_socket_mode(app.config), backlog=backlog
+        )
     server_coroutine = loop.create_server(
         server,
         None if sock else host,
