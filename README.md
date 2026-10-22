@@ -67,7 +67,7 @@ Sanic 的设置照常生效：
 | `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB） |
 | `NATIVE_MAX_MEMORY` | 在途请求体可占用的内存 |
 | `NATIVE_REACTOR_BACKEND` | Seastar 的 reactor 后端：`epoll`（默认）、`linux-aio`、`io_uring`；空字符串由 Seastar 选第一个可用的（io_uring、linux-aio、epoll 依次）。shard 吃满时 linux-aio 比 epoll 略快（多 worker 对照中 small/body 约 +1–2%，1024 连接的 sleep 约 +8%），但每个 shard 能挂起的连接数受 aio 配额限制（约 2 万，系统 `fs.aio-max-nr` 紧张时更少），超出时进程会中止；io_uring 在 Linux 5.15 上比 epoll 慢约 7% |
-| `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
+| `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
 
 ## 原生主机与 asyncio 服务器
 
@@ -77,7 +77,7 @@ Sanic 的设置照常生效：
 - multipart 表单：`request.form` / `request.files` 的解析由 C++ 完成（`native/multipart.hh`），结果与 Sanic 的 `parse_multipart_form` 相同；遇到需要 Python 编解码或 Unicode 处理的表单（非 ASCII 的段头、非 UTF-8 字段、`filename*`、没有 name 的段、格式错误）则照旧由 Sanic 的解析器处理。
 - 监听 socket：由 Sanic 照原样绑定（unix socket 用临时名、权限默认 0o666（`UNIX_SOCKET_MODE`）、改名替换，退出时删除），原生主机在这个 socket 上接受连接（shard 0 接受后分给各 shard），它在服务期间保持打开、随服务器关闭，所以传入的 `sock`（TCP 或 AF_UNIX）、`app.serve_location` 与原版一致。TCP 地址由 Sanic 只做预留（绑定、不监听，并允许 SO_REUSEPORT），每个服务进程在同一地址上开自己的 SO_REUSEPORT 监听 socket，由内核按连接的四元组哈希把连接分给各进程（连接少时进程之间会不均）；地址已被占用时照样在绑定时报错。unix socket 没有 SO_REUSEPORT：多 worker 时由主进程绑定一次，各 worker 都在这一个 socket 上接受连接，退出时由主进程删除；各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket。用户传入的共用 socket 同样如此。原版是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。放在 nginx 之后的部署见下一节。
 - 只服务明文 HTTP/1.1：TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见「与 Sanic 的差异」）。
-- 多 worker：会启动 worker 进程的运行（`workers > 1`、`fast`、`auto_reload`、`dev`）照原版由 Sanic 的 worker manager 管理（重启、扩缩、`app.m` 都相同），每个 worker 进程各自运行原生主机：主进程把 CPU 分成每个 worker 一组，worker 的 Python 线程固定在组内第一个 CPU，shard 用其余的。`fast=True` 启动能放下的 worker 数（CPU 数 ÷ (1 + `NATIVE_SHARDS`)），而不是每个 CPU 一个。worker 数多于 CPU 组时，多出的 worker 与前面的共用 CPU 组（记一条警告）。
+- 多 worker：会启动 worker 进程的运行（`workers > 1`、`fast`、`auto_reload`、`dev`）照原版由 Sanic 的 worker manager 管理（重启、扩缩、`app.m` 都相同），每个 worker 进程各自运行原生主机：主进程把 CPU 分成每个 worker 一组，worker 的 Python 线程固定在组内第一个 CPU，shard 用其余的（按 worker 编号取组；编号见 `NATIVE_WORKER_LISTEN`）。`fast=True` 启动能放下的 worker 数（CPU 数 ÷ (1 + `NATIVE_SHARDS`)），而不是每个 CPU 一个。worker 数多于 CPU 组时，多出的 worker 与前面的共用 CPU 组（记一条警告）。
 - 用 `fork` 启动方式、且父进程已经运行过原生主机时（Seastar 不能在 fork 出的子进程里再次启动），子进程改用 asyncio 服务器并记一条警告；默认的 `spawn` 不受影响。
 - 每个进程只有一个原生服务器：同一进程同一事件循环上的第二个服务器（如第二个应用的服务器）使用 asyncio 服务器（记一条警告），两者都正常服务。
 

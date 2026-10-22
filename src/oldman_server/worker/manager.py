@@ -95,6 +95,7 @@ class WorkerManager:
         auto_start: bool = True,
         workers: int = 1,
         ident: str = "",
+        slot: int | None = None,
     ) -> Worker:
         """Instruct Sanic to manage a custom process.
 
@@ -138,6 +139,7 @@ class WorkerManager:
             restartable,
             tracked,
             auto_start,
+            slot,
         )
         container[worker.name] = worker
         return worker
@@ -149,6 +151,11 @@ class WorkerManager:
             Worker: The Worker instance
         """
         server_number = next(self._server_count)
+        # The lowest number no current server worker has: what the native
+        # host's CPU groups, accept turns and NATIVE_WORKER_LISTEN go by, so
+        # they stay 0..n-1 through scaling (the name's count keeps growing).
+        taken = {worker.slot for worker in self.transient.values()}
+        slot = next(number for number in count() if number not in taken)
         return self.manage(
             f"{WorkerProcess.SERVER_LABEL}-{server_number}",
             self._serve,
@@ -156,6 +163,7 @@ class WorkerManager:
             transient=True,
             restartable=True,
             ident=f"{WorkerProcess.SERVER_IDENTIFIER}{server_number:2}",
+            slot=slot,
         )
 
     def shutdown_server(self, name: str | None = None) -> None:

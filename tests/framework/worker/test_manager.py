@@ -460,3 +460,31 @@ def test_remove_untracked_worker(manager: WorkerManager, caplog):
     assert len(manager.transient) == 1
     assert len(manager.durable) == 0
     assert ("oldman_server.root", 20, message) in caplog.record_tuples
+
+
+def test_a_new_server_worker_takes_the_lowest_free_number(monkeypatch):
+    # The native host maps the worker number to a CPU group, an accept turn
+    # and NATIVE_WORKER_LISTEN's {n}: after a scale down and up, the new
+    # worker takes the free number, not the next of an ever-growing count
+    # (which left a CPU group idle and moved the addresses).
+    from oldman_server.native import cpus
+
+    context = Mock()
+    context.Process.side_effect = [Mock(pid=pid) for pid in range(100, 110)]
+    manager = WorkerManager(3, fake_serve, {}, context, (Mock(), Mock()), {})
+    assert sorted(worker.slot for worker in manager.transient.values()) == [0, 1, 2]
+    with patch("os.kill"):
+        manager.shutdown_server("Server-1")
+    worker = manager.create_server()
+    assert worker.name == "Server-3" and worker.slot == 1
+    (process,) = worker.processes
+    # The process learns its number from the environment it is started with.
+    seen = {}
+    context.Process.side_effect = None
+    context.Process.return_value.start.side_effect = lambda: seen.update(
+        number=cpus.worker_number())
+    monkeypatch.setenv("OLDMAN_SERVER_WORKER_NAME", "")
+    worker2 = manager.create_server()
+    (process2,) = worker2.processes
+    process2.start()
+    assert worker2.slot == 3 and seen == {"number": 3}

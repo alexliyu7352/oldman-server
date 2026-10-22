@@ -70,11 +70,16 @@ def worker_groups(config, workers):
 
 
 def worker_number():
-    """This server worker process's number (n of Oldman-Server-n-m), or None
-    outside one."""
+    """This server worker process's number, or None outside one: the lowest
+    number free among the server workers when the manager created it
+    (OLDMAN_SERVER_WORKER_SLOT), so 0..n-1 for n workers through scaling; the
+    n of its name Oldman-Server-n-m when started without one."""
     name = os.environ.get("OLDMAN_SERVER_WORKER_NAME", "")
     if not name.startswith(_WORKER_PREFIX):
         return None
+    slot = os.environ.get("OLDMAN_SERVER_WORKER_SLOT")
+    if slot is not None:
+        return int(slot)
     return int(name[len(_WORKER_PREFIX):].split("-")[0])
 
 

@@ -36,8 +36,12 @@ class WorkerProcess:
         kwargs,
         worker_state,
         restartable: bool = False,
+        slot: int | None = None,
     ):
         self.state = ProcessState.IDLE
+        # A server worker's number among the current server workers
+        # (OLDMAN_SERVER_WORKER_SLOT; oldman_server.native.cpus.worker_number).
+        self.slot = slot
         self.factory = factory
         self.name = name
         self.ident = ident
@@ -63,6 +67,8 @@ class WorkerProcess:
     def start(self):
         os.environ["OLDMAN_SERVER_WORKER_NAME"] = self.name
         os.environ["OLDMAN_SERVER_WORKER_IDENTIFIER"] = self.ident
+        if self.slot is not None:
+            os.environ["OLDMAN_SERVER_WORKER_SLOT"] = str(self.slot)
         logger.debug(
             f"{Colors.BLUE}Starting a process: {Colors.BOLD}"
             f"{Colors.PINK}%s{Colors.END}",
@@ -80,6 +86,7 @@ class WorkerProcess:
             }
         del os.environ["OLDMAN_SERVER_WORKER_NAME"]
         del os.environ["OLDMAN_SERVER_WORKER_IDENTIFIER"]
+        os.environ.pop("OLDMAN_SERVER_WORKER_SLOT", None)
 
     def join(self):
         self.set_state(ProcessState.JOINED)
@@ -255,8 +262,10 @@ class Worker:
         restartable: bool = False,
         tracked: bool = True,
         auto_start: bool = True,
+        slot: int | None = None,
     ):
         self.ident = ident
+        self.slot = slot
         self.name = name
         self.num = num
         self.context = context
@@ -285,6 +294,7 @@ class Worker:
             kwargs={**self.server_settings},
             worker_state=self.worker_state,
             restartable=self.restartable,
+            slot=self.slot,
         )
         self.processes.add(process)
         return process
