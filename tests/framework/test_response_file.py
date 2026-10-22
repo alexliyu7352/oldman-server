@@ -66,7 +66,9 @@ async def test_file_timestamp_validation(
         # application/javascript (no charset added: not a text/ type).
         ("test.js", {"text/javascript; charset=utf-8", "application/javascript"}),
         ("test.csv", "text/csv; charset=utf-8"),
-        ("test.xml", "application/xml"),
+        # Python's table says application/xml; the system's /etc/mime.types on
+        # RHEL-family systems (the manylinux image) says text/xml.
+        ("test.xml", {"application/xml", "text/xml; charset=utf-8"}),
         # Fallback for unknown types
         ("test.file", "application/octet-stream"),
     ),

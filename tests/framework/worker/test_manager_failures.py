@@ -89,11 +89,15 @@ def finish(process: subprocess.Popen, timeout=15) -> str:
 
 
 def gone(pid: int, timeout=10) -> bool:
+    """Whether pid has exited: no such process, or a zombie (exited and not yet
+    reaped; in a container whose init does not reap orphans it stays one)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+            status = Path(f"/proc/{pid}/status").read_text().splitlines()
+        except FileNotFoundError:
+            return True
+        if any(line.split()[:2] == ["State:", "Z"] for line in status):
             return True
         time.sleep(0.1)
     return False
