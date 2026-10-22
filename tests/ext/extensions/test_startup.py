@@ -1,0 +1,63 @@
+from typing import Union
+from unittest.mock import Mock
+
+import pytest
+
+from oldman_server import OldmanServer
+
+from oldman_server.ext import Extend, Extension
+
+
+def test_multiple_extensions(bare_app: OldmanServer):
+    mock = Mock()
+
+    class FooExtension(Extension):
+        name = "foo"
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+
+        def startup(self, _) -> None:
+            mock()
+
+    class BarExtension(Extension):
+        name = "bar"
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+
+        def startup(self, _) -> None:
+            mock()
+
+    bare_app.extend(extensions=[FooExtension, BarExtension, BarExtension])
+
+    assert mock.call_count == 2
+
+
+@pytest.mark.parametrize("instance", (True, False))
+def test_multiple_extensions_pre_register(bare_app: OldmanServer, instance: bool):
+    mock = Mock()
+
+    class FooExtension(Extension):
+        name = "foo"
+
+        def startup(self, _) -> None:
+            mock()
+
+    class BarExtension(Extension):
+        name = "bar"
+
+        def startup(self, _) -> None:
+            mock()
+
+    foo: Union[type[Extension], Extension] = FooExtension
+    bar: Union[type[Extension], Extension] = BarExtension
+    if instance:
+        foo = foo()  # type: ignore
+        bar = bar()  # type: ignore
+
+    Extend.register(foo)
+    Extend.register(bar)
+    bare_app.extend()
+
+    assert mock.call_count == 2

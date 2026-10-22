@@ -1,0 +1,271 @@
+{
+  "schema": 1,
+  "platform": "Ubuntu 20.04 amd64",
+  "archive_base_url": "https://archive.ubuntu.com/ubuntu/",
+  "host_requirements": {
+    "binutils": "2.34-6ubuntu1.11",
+    "binutils-common": "2.34-6ubuntu1.11",
+    "binutils-x86-64-linux-gnu": "2.34-6ubuntu1.11",
+    "bzip2": "1.0.8-2",
+    "cpp-9": "9.4.0-1ubuntu1~20.04.2",
+    "dpkg": "1.19.7ubuntu3.2",
+    "g++-9": "9.4.0-1ubuntu1~20.04.2",
+    "gcc-9": "9.4.0-1ubuntu1~20.04.2",
+    "gcc-9-base": "9.4.0-1ubuntu1~20.04.2",
+    "libc-dev-bin": "2.31-0ubuntu9.18",
+    "libc6": "2.31-0ubuntu9.18",
+    "libc6-dev": "2.31-0ubuntu9.18",
+    "libcrypt-dev": "1:4.4.10-10ubuntu4",
+    "libcrypt1": "1:4.4.10-10ubuntu4",
+    "libgcc-9-dev": "9.4.0-1ubuntu1~20.04.2",
+    "libgmp10": "2:6.2.0+dfsg-4ubuntu0.1",
+    "libhwloc-dev": "2.1.0+dfsg-4",
+    "libhwloc15": "2.1.0+dfsg-4",
+    "libisl22": "0.22.1-1",
+    "liblz4-1": "1.9.2-2ubuntu0.20.04.1",
+    "liblz4-dev": "1.9.2-2ubuntu0.20.04.1",
+    "libmpc3": "1.1.0-1",
+    "libmpfr6": "4.0.2-1",
+    "libnuma-dev": "2.0.12-1",
+    "libnuma1": "2.0.12-1",
+    "libpciaccess0": "0.16-0ubuntu1",
+    "libprotobuf-dev": "3.6.1.3-2ubuntu5.2",
+    "libprotobuf-lite17": "3.6.1.3-2ubuntu5.2",
+    "libprotobuf17": "3.6.1.3-2ubuntu5.2",
+    "libprotoc17": "3.6.1.3-2ubuntu5.2",
+    "libsctp-dev": "1.0.18+dfsg-1",
+    "libsctp1": "1.0.18+dfsg-1",
+    "libstdc++-9-dev": "9.4.0-1ubuntu1~20.04.2",
+    "libudev1": "245.4-4ubuntu3.24",
+    "libuuid1": "2.34-0.1ubuntu9.6",
+    "libzstd1": "1.4.4+dfsg-3ubuntu0.1",
+    "linux-libc-dev": "5.4.0-216.236",
+    "make": "4.2.1-1.2",
+    "perl": "5.30.0-9ubuntu0.5",
+    "pkg-config": "0.29.1-0ubuntu4",
+    "protobuf-compiler": "3.6.1.3-2ubuntu5.2",
+    "tar": "1.30+dfsg-7ubuntu0.20.04.4",
+    "uuid-dev": "2.34-0.1ubuntu9.6",
+    "valgrind": "1:3.15.0-1ubuntu9.1",
+    "xz-utils": "5.2.4-1ubuntu1.1",
+    "zlib1g": "1:1.2.11.dfsg-2ubuntu1.5",
+    "zlib1g-dev": "1:1.2.11.dfsg-2ubuntu1.5",
+    "zstd": "1.4.4+dfsg-3ubuntu0.1"
+  },
+  "packages": [
+    {
+      "Package": "cpp-14",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/cpp-14_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "236ffa75b21605759894a6df650e0779251f362f94d5c98b133c91f3cc4aa2cb",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/cpp-14_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "cpp-14-x86-64-linux-gnu",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/cpp-14-x86-64-linux-gnu_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "81f91ab6332bc4b9a54f466e61eb1da35dc51c720dc084bab28a24716de095cc",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/cpp-14-x86-64-linux-gnu_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "g++-14",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/g++-14_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "6adda4a0846ccdcf5f78471a2d366a7ebb5ad4c090f1584cb251124fcef5eab9",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/g++-14_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "g++-14-x86-64-linux-gnu",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/g++-14-x86-64-linux-gnu_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "dd5f791c2cbd414c774f9e42e6ad77dd6e45aec6e6405057c7d3728fd2e92286",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/g++-14-x86-64-linux-gnu_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "gcc-14",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/gcc-14_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "4667f755e77932635bfe86eda9f025a511190f66f70e486187e312f87136e447",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/gcc-14_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "gcc-14-base",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/gcc-14-base_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "3d4fdc8bf11c7f31854f32891b5fb305a98b2a750ad91a087761af7d7bf2749d",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/gcc-14-base_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "gcc-14-x86-64-linux-gnu",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/gcc-14-x86-64-linux-gnu_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "e9c7bdb344229dd4380c77505c8347705cb658ca44b05dd23a83cdfeabfcca09",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/gcc-14-x86-64-linux-gnu_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "libgcc-14-dev",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/libgcc-14-dev_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "9c786d15890bc573357ad78d4f990ae2f3594dc1254a58939d238d3db583d414",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/libgcc-14-dev_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "libstdc++-14-dev",
+      "Version": "14.3.0-12ubuntu1~20~ppa1",
+      "Filename": "pool/main/g/gcc-14/libstdc++-14-dev_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "SHA256": "a3b0e951480375f1ad23fb2d66450e861b1679c767b406fb2aa2dda041bf4018",
+      "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/libstdc++-14-dev_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "ragel",
+      "Version": "6.10-1build1",
+      "Filename": "pool/universe/r/ragel/ragel_6.10-1build1_amd64.deb",
+      "SHA256": "ca4f7fa278c031de4e03567ed2559bb6b2415d9759dd92c746489484c180df08",
+      "Destination": "toolchain"
+    },
+    {
+      "Package": "xfslibs-dev",
+      "Version": "5.3.0-1ubuntu2",
+      "Filename": "pool/main/x/xfsprogs/xfslibs-dev_5.3.0-1ubuntu2_amd64.deb",
+      "SHA256": "7f661c1d6c1045421e13e4a2617b7ad1c6c2b158d7497475e508724cd77e1f35",
+      "Destination": "toolchain"
+    }
+  ],
+  "archives": [
+    {
+      "Name": "libstdcxx",
+      "Version": "14.3.0-h934c35e_20",
+      "Filename": "libstdcxx-14.3.0-h934c35e_20.conda",
+      "URL": "https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-14.3.0-h934c35e_20.conda",
+      "SHA256": "83447d514a21052674806585721fef05979dd6700ca199dbfdef713b6113cb2b",
+      "Format": "conda",
+      "Destination": "toolchain"
+    },
+    {
+      "Name": "libgcc",
+      "Version": "14.3.0-he0feb66_20",
+      "Filename": "libgcc-14.3.0-he0feb66_20.conda",
+      "URL": "https://conda.anaconda.org/conda-forge/linux-64/libgcc-14.3.0-he0feb66_20.conda",
+      "SHA256": "ee549953022da53692ae9a5da17a5d4a1829b9a173b68433e529279f0d2f9305",
+      "Format": "conda",
+      "Destination": "toolchain"
+    },
+    {
+      "Name": "boost",
+      "Version": "1.83.0",
+      "Filename": "boost-1.83.0.tar.bz2",
+      "URL": "https://archives.boost.io/release/1.83.0/source/boost_1_83_0.tar.bz2",
+      "SHA256": "6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e",
+      "Format": "tar",
+      "Destination": "sources/boost",
+      "StripComponents": 1
+    },
+    {
+      "Name": "openssl",
+      "Version": "openssl-3.5.8",
+      "Filename": "openssl-openssl-3.5.8.tar.gz",
+      "URL": "https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz",
+      "SHA256": "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2",
+      "Format": "tar",
+      "Destination": "sources/openssl",
+      "StripComponents": 1
+    },
+    {
+      "Name": "yaml-cpp",
+      "Version": "0.8.0",
+      "Filename": "yaml-cpp-0.8.0.tar.gz",
+      "URL": "https://codeload.github.com/jbeder/yaml-cpp/tar.gz/f7320141120f720aecc4c32be25586e7da9eb978",
+      "SHA256": "2fd3bf695ccc056835a70dd6d3046312cc1004e8338b8b5c91646918a27b7ef6",
+      "Format": "tar",
+      "Destination": "sources/yaml-cpp",
+      "StripComponents": 1
+    },
+    {
+      "Name": "fmt",
+      "Version": "8dc5d3f69f15417d13c60a4a21f7298ed24db41c",
+      "Filename": "fmt-8dc5d3f69f15417d13c60a4a21f7298ed24db41c.tar.gz",
+      "URL": "https://codeload.github.com/fmtlib/fmt/tar.gz/8dc5d3f69f15417d13c60a4a21f7298ed24db41c",
+      "SHA256": "1681c5f1b5b9a4e354a62fb8dba3509f38cb49321c7eabac7ab5dd98160bfb37",
+      "Format": "tar",
+      "Destination": "sources/fmt",
+      "StripComponents": 1
+    },
+    {
+      "Name": "seastar",
+      "Version": "f8ec4bd4178a5015ab7324a8cbbb3c8d65808fa8",
+      "Filename": "seastar-f8ec4bd4178a5015ab7324a8cbbb3c8d65808fa8.tar.gz",
+      "URL": "https://codeload.github.com/scylladb/seastar/tar.gz/f8ec4bd4178a5015ab7324a8cbbb3c8d65808fa8",
+      "SHA256": "e067a17c13fc3a12640059142916058a3a94446e5bc89d2cc7107e46ae46b283",
+      "Format": "tar",
+      "Destination": "sources/seastar-header-lines",
+      "StripComponents": 1,
+      "Patches": [
+        {
+          "File": "patches/seastar-header-lines.patch",
+          "SHA256": "8d9a0c96b812149060584d1038c28d329a700204b3de335bfbc56dc4b974d45a"
+        }
+      ]
+    },
+    {
+      "Name": "c-ares",
+      "Version": "1.27.0",
+      "Filename": "c-ares-1.27.0.tar.gz",
+      "URL": "https://github.com/c-ares/c-ares/releases/download/cares-1_27_0/c-ares-1.27.0.tar.gz",
+      "SHA256": "0a72be66959955c43e2af2fbd03418e82a2bd5464604ec9a62147e37aceb420b",
+      "Format": "tar",
+      "Destination": "sources/c-ares",
+      "StripComponents": 1
+    },
+    {
+      "Name": "liburing",
+      "Version": "2.15",
+      "Filename": "liburing-2.15.tar.gz",
+      "URL": "https://codeload.github.com/axboe/liburing/tar.gz/refs/tags/liburing-2.15",
+      "SHA256": "8d052f2622dcb3678cbaee5ff582a87572672a6c0a56533cdda5b65cb636120a",
+      "Format": "tar",
+      "Destination": "sources/liburing",
+      "StripComponents": 1
+    }
+  ],
+  "release_archives": [
+    {
+      "Name": "hwloc",
+      "Version": "2.11.2",
+      "Filename": "hwloc-2.11.2.tar.bz2",
+      "URL": "https://download.open-mpi.org/release/hwloc/v2.11/hwloc-2.11.2.tar.bz2",
+      "SHA256": "f7f88fecae067100f1a1a915b658add0f4f71561259482910a69baea22fe8409",
+      "Format": "tar",
+      "Destination": "sources/hwloc",
+      "StripComponents": 1
+    },
+    {
+      "Name": "protobuf",
+      "Version": "3.21.12",
+      "Filename": "protobuf-cpp-3.21.12.tar.gz",
+      "URL": "https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protobuf-cpp-3.21.12.tar.gz",
+      "SHA256": "4eab9b524aa5913c6fffb20b2a8abf5ef7f95a80bc0701f3a6dbb4c607f73460",
+      "Format": "tar",
+      "Destination": "sources/protobuf",
+      "StripComponents": 1
+    },
+    {
+      "Name": "ragel",
+      "Version": "6.10",
+      "Filename": "ragel-6.10.tar.gz",
+      "URL": "https://www.colm.net/files/ragel/ragel-6.10.tar.gz",
+      "SHA256": "5f156edb65d20b856d638dd9ee2dfb43285914d9aa2b6ec779dac0270cd56c3f",
+      "Format": "tar",
+      "Destination": "sources/ragel",
+      "StripComponents": 1
+    }
+  ]
+}

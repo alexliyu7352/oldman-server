@@ -1,0 +1,2 @@
+# Additional dependency for the single-process native-server comparison.
+granian==2.8.1

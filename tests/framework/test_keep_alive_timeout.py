@@ -1,0 +1,257 @@
+import asyncio
+import platform
+
+from asyncio import sleep as aio_sleep
+from itertools import count
+from os import environ
+
+import pytest
+
+from oldman_server.testing.reusable import ReusableClient
+
+from oldman_server import OldmanServer
+from oldman_server.response import text
+
+
+pytestmark = pytest.mark.xdist_group(name="keep_alive_timeout")
+
+CONFIG_FOR_TESTS = {"KEEP_ALIVE_TIMEOUT": 2, "KEEP_ALIVE": True}
+CONFIG_KEEP_ALIVE_FALSE = {"KEEP_ALIVE_TIMEOUT": 2, "KEEP_ALIVE": False}
+
+MAX_LOOPS = 15
+port_counter = count()
+
+
+keep_alive_timeout_app_reuse = OldmanServer("test_ka_timeout_reuse")
+keep_alive_app_client_timeout = OldmanServer("test_ka_client_timeout")
+keep_alive_app_server_timeout = OldmanServer("test_ka_server_timeout")
+keep_alive_app_context = OldmanServer("keep_alive_app_context")
+keep_alive_app_disabled = OldmanServer("test_ka_disabled")
+
+keep_alive_timeout_app_reuse.config.update(CONFIG_FOR_TESTS)
+keep_alive_app_client_timeout.config.update(CONFIG_FOR_TESTS)
+keep_alive_app_server_timeout.config.update(CONFIG_FOR_TESTS)
+keep_alive_app_context.config.update(CONFIG_FOR_TESTS)
+keep_alive_app_disabled.config.update(CONFIG_KEEP_ALIVE_FALSE)
+
+
+@keep_alive_timeout_app_reuse.route("/1")
+async def handler1(request):
+    return text("OK")
+
+
+@keep_alive_app_client_timeout.route("/1")
+async def handler2(request):
+    return text("OK")
+
+
+@keep_alive_app_server_timeout.route("/1")
+async def handler3(request):
+    return text("OK")
+
+
+@keep_alive_app_context.post("/ctx")
+def set_ctx(request):
+    request.conn_info.ctx.foo = "hello"
+    return text("OK")
+
+
+@keep_alive_app_context.get("/ctx")
+def get_ctx(request):
+    return text(request.conn_info.ctx.foo)
+
+
+@keep_alive_app_disabled.route("/1")
+async def handler_disabled(request):
+    return text("OK")
+
+
+@pytest.mark.skipif(
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    reason="Not testable with current client",
+)
+def test_keep_alive_timeout_reuse(port):
+    """If the server keep-alive timeout and client keep-alive timeout are
+    both longer than the delay, the client _and_ server will successfully
+    reuse the existing connection."""
+    loops = 0
+    while True:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        client = ReusableClient(
+            keep_alive_timeout_app_reuse, loop=loop, port=port
+        )
+        try:
+            with client:
+                headers = {"Connection": "keep-alive"}
+                request, response = client.get("/1", headers=headers)
+                assert response.status == 200
+                assert response.text == "OK"
+                assert request.protocol.state["requests_count"] == 1
+
+                loop.run_until_complete(aio_sleep(1))
+
+                request, response = client.get("/1")
+                assert response.status == 200
+                assert response.text == "OK"
+                assert request.protocol.state["requests_count"] == 2
+        except OSError:
+            loops += 1
+            if loops > MAX_LOOPS:
+                raise
+            continue
+        else:
+            break
+
+
+@pytest.mark.skipif(
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP"))
+    or platform.system() != "Linux",
+    reason="Not testable with current client",
+)
+def test_keep_alive_client_timeout(port):
+    """If the server keep-alive timeout is longer than the client
+    keep-alive timeout, client will try to create a new connection here."""
+    loops = 0
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            client = ReusableClient(
+                keep_alive_app_client_timeout, loop=loop, port=port
+            )
+            with client:
+                headers = {"Connection": "keep-alive"}
+                request, response = client.get(
+                    "/1", headers=headers, timeout=1
+                )
+
+                assert response.status == 200
+                assert response.text == "OK"
+                assert request.protocol.state["requests_count"] == 1
+
+                loop.run_until_complete(aio_sleep(2))
+                request, response = client.get("/1", timeout=1)
+                assert request.protocol.state["requests_count"] == 1
+        except OSError:
+            loops += 1
+            if loops > MAX_LOOPS:
+                raise
+            continue
+        else:
+            break
+
+
+@pytest.mark.skipif(
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    reason="Not testable with current client",
+)
+def test_keep_alive_server_timeout(port):
+    """If the client keep-alive timeout is longer than the server
+    keep-alive timeout, the client will either a 'Connection reset' error
+    _or_ a new connection. Depending on how the event-loop handles the
+    broken server connection."""
+    loops = 0
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            client = ReusableClient(
+                keep_alive_app_server_timeout, loop=loop, port=port
+            )
+            with client:
+                headers = {"Connection": "keep-alive"}
+                request, response = client.get(
+                    "/1", headers=headers, timeout=60
+                )
+
+                assert response.status == 200
+                assert response.text == "OK"
+                assert request.protocol.state["requests_count"] == 1
+
+                loop.run_until_complete(aio_sleep(3))
+                request, response = client.get("/1", timeout=60)
+
+                assert request.protocol.state["requests_count"] == 1
+        except OSError:
+            loops += 1
+            if loops > MAX_LOOPS:
+                raise
+            continue
+        else:
+            break
+
+
+@pytest.mark.skipif(
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    reason="Not testable with current client",
+)
+def test_keep_alive_connection_context(port):
+    loops = 0
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            client = ReusableClient(
+                keep_alive_app_context, loop=loop, port=port
+            )
+            with client:
+                headers = {"Connection": "keep-alive"}
+                request1, _ = client.post("/ctx", headers=headers)
+
+                loop.run_until_complete(aio_sleep(1))
+                request2, response = client.get("/ctx")
+
+                assert response.text == "hello"
+                assert id(request1.conn_info.ctx) == id(request2.conn_info.ctx)
+                assert (
+                    request1.conn_info.ctx.foo
+                    == request2.conn_info.ctx.foo
+                    == "hello"
+                )
+                assert request2.protocol.state["requests_count"] == 2
+        except OSError:
+            loops += 1
+            if loops > MAX_LOOPS:
+                raise
+            continue
+        else:
+            break
+
+
+@pytest.mark.skipif(
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    reason="Not testable with current client",
+)
+def test_keep_alive_config_false(port):
+    """When KEEP_ALIVE=False, server should respond with Connection: close
+    and not reuse the connection, even if client requests keep-alive.
+
+    See: https://github.com/sanic-org/sanic/issues/2984
+    """
+    loops = 0
+    while True:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        client = ReusableClient(keep_alive_app_disabled, loop=loop, port=port)
+        try:
+            with client:
+                headers = {"Connection": "keep-alive"}
+                request1, response1 = client.get("/1", headers=headers)
+                assert response1.status == 200
+                assert response1.text == "OK"
+                assert response1.headers.get("connection") == "close"
+                assert request1.protocol is None
+
+                loop.run_until_complete(aio_sleep(1))
+
+                request2, response2 = client.get("/1")
+                assert response2.status == 200
+                assert request1.conn_info is not request2.conn_info
+        except OSError:
+            loops += 1
+            if loops > MAX_LOOPS:
+                raise
+            continue
+        else:
+            break

@@ -1,0 +1,8 @@
+{
+  "url": "https://codeload.github.com/sanic-org/sanic-ext/tar.gz/refs/tags/v25.12.0",
+  "tag": "v25.12.0",
+  "sha256": "f78f17d0e98148bc3610c0a3a34e946723436e96648ea93f4b89a5df0d80c584",
+  "directory": "sanic-ext-25.12.0",
+  "pypi_sdist_sha256": "db6f5c8b880bb6b4cb73717b655b63aea4e77cf57825678ec74310fd69581ce1",
+  "scope": "src/oldman_server/ext derives from sanic_ext/ of this release (identical in the tag archive and the PyPI sdist); the upstream tests run from the archive"
+}

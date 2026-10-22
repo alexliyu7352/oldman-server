@@ -1,0 +1,62 @@
+name: Wheels
+
+# Builds the manylinux_2_28 wheels (CPython 3.12-3.14, x86_64 and aarch64) and
+# tests each installed in a fresh environment. Called by ci.yml and release.yml;
+# the wheels are uploaded as the artifacts wheels-<arch>.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheels (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
+    # Building the dependencies and Seastar takes most of an hour on a fresh
+    # cache; the cached prefix leaves the extension, wheels and tests.
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the built dependencies
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/oldman-server-wheels/prefix
+          key: native-prefix-${{ matrix.arch }}-${{ hashFiles('dependency-lock.json', 'patches/**', 'scripts/fetch_sources.py', 'scripts/build_wheels.sh') }}
+
+      - name: Build the dependencies and Seastar
+        id: prepare
+        run: scripts/build_wheels.sh --prepare
+
+      # Saved as soon as they are built, so that a failure in a later step does
+      # not rebuild them on the next run.
+      - name: Save the built dependencies
+        if: always() && steps.prepare.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/oldman-server-wheels/prefix
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Build the wheels
+        run: scripts/build_wheels.sh dist
+
+      - name: Test the wheels
+        run: scripts/test_wheels.sh dist/*.whl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error

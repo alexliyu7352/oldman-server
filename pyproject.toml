@@ -1,0 +1,102 @@
+[project]
+name = "oldman-server"
+dynamic = ["version"]
+description = "Python web framework (forked from Sanic) on a C++/Seastar native HTTP host"
+readme = "README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
+requires-python = ">=3.12,<3.15"
+license = "MIT"
+# This project's license, and those of the libraries the release wheels carry
+# (LICENSES/); the framework layer's own (Sanic, Sanic Extensions,
+# sanic-testing) are in the package.
+license-files = ["LICENSE", "LICENSES/*"]
+# The framework is a fork of Sanic 25.12.1 (MIT, src/oldman_server/LICENSE.sanic);
+# these are its runtime requirements.
+dependencies = [
+    "uvloop==0.22.1",
+    "sanic-routing>=23.12.0",
+    "httptools>=0.0.10",
+    # json() and request.json (the default dumps/loads).
+    "orjson>=3.10.0",
+    "aiofiles>=0.6.0",
+    "websockets>=10.0",
+    "multidict>=5.0,<7.0",
+    "html5tagger>=1.2.1",
+    "tracerite>=2.2.0",
+    "typing-extensions>=4.4.0",
+    "setuptools>=70.1.0",
+    # oldman_server.ext (Sanic Extensions 25.12.0); Jinja2 is optional (templating).
+    "pyyaml>=3.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/alexliyu7352/oldmanserver"
+
+[project.scripts]
+oldman-server = "oldman_server.__main__:main"
+
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/oldman_server/__version__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oldman_server"]
+
+# hatch_build.py: a wheel built with the native extension in the tree carries it.
+[tool.hatch.build.targets.wheel.hooks.custom]
+
+[dependency-groups]
+build = ["cmake==4.4.3", "ninja==1.13.2", "pybind11==3.1.0"]
+http = ["aiohttp==3.13.5"]
+# tests/framework and tests/ext (from Sanic's and Sanic Extensions' suites)
+# also need httpx (the test client) and the extensions' optional libraries.
+test = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-timeout==2.4.0", "pytest-benchmark==5.3.0",
+        "httpx==0.28.1", "beautifulsoup4==4.15.0",
+        "jinja2==3.1.6", "pydantic==2.12.5", "msgspec==0.20.0", "attrs==26.1.0", {include-group = "http"}]
+# ujson: stock Sanic's json() encoder in the comparison with stock Sanic.
+benchmark = ["granian==2.8.1", "ujson==6.0.0", {include-group = "http"}]
+
+[tool.uv]
+default-groups = ["build", "test", "benchmark"]
+# Preserve the existing dependency versions during the interpreter migration.
+constraint-dependencies = [
+    "aiohappyeyeballs==2.7.1",
+    "aiosignal==1.4.0",
+    "attrs==26.1.0",
+    "frozenlist==1.8.0",
+    "idna==3.20",
+    "iniconfig==2.3.0",
+    "multidict==6.9.1",
+    "packaging==26.3",
+    "pluggy==1.6.0",
+    "propcache==0.5.4",
+    "pygments==2.21.0",
+    "typing-extensions==4.16.0",
+    "yarl==1.25.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["python", "build", "."]
+addopts = "--strict-markers"
+# Async tests and fixtures need no marker, as the suites from Sanic and Sanic Extensions expect.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# A test that never stops its server must not stall the run.
+timeout = 60
+markers = ["xdist_group(name): run on the same worker as others with the same group name"]
+filterwarnings = [
+    "ignore:.*async with lock.* instead:DeprecationWarning",
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]

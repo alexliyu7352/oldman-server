@@ -1,0 +1,6 @@
+{
+  "url": "https://files.pythonhosted.org/packages/0c/93/1d588f1cb9b710b9f22fa78b53d699a8062edc94204d50dd0d78c5f5b495/sanic_testing-24.6.0-py3-none-any.whl",
+  "version": "24.6.0",
+  "sha256": "b1027184735e88230891aa0461fff84093abfa3bff0f4d29c0f78f42e59efada",
+  "scope": "src/oldman_server/testing derives from sanic_testing/ of this wheel (imports renamed); LICENSE.sanic-testing is its LICENSE"
+}

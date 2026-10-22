@@ -1,0 +1,56 @@
+import inspect
+
+import pytest
+
+from oldman_server import helpers
+from oldman_server.config import Config
+
+
+def test_has_message_body():
+    tests = (
+        (100, False),
+        (102, False),
+        (204, False),
+        (200, True),
+        (304, False),
+        (400, True),
+    )
+    for status_code, expected in tests:
+        assert helpers.has_message_body(status_code) is expected
+
+
+def test_is_entity_header():
+    tests = (
+        ("allow", True),
+        ("extension-header", True),
+        ("", False),
+        ("test", False),
+    )
+    for header, expected in tests:
+        assert helpers.is_entity_header(header) is expected
+
+
+def test_is_hop_by_hop_header():
+    tests = (
+        ("connection", True),
+        ("upgrade", True),
+        ("", False),
+        ("test", False),
+    )
+    for header, expected in tests:
+        assert helpers.is_hop_by_hop_header(header) is expected
+
+
+def test_import_string_class():
+    obj = helpers.import_string("oldman_server.config.Config")
+    assert isinstance(obj, Config)
+
+
+def test_import_string_module():
+    module = helpers.import_string("oldman_server.config")
+    assert inspect.ismodule(module)
+
+
+def test_import_string_exception():
+    with pytest.raises(ImportError):
+        helpers.import_string("test.test.test")

@@ -1,0 +1,70 @@
+from oldman_server import text
+from oldman_server.response import json
+
+from oldman_server.ext import serializer
+
+
+def test_serializer_with_builtin(app):
+    @app.get("/")
+    @serializer(text)
+    async def handler(request):
+        return "hello"
+
+    @app.get("/201")
+    @serializer(text, status=201)
+    async def handler_201(request):
+        return "hello"
+
+    _, response = app.test_client.get("/")
+    assert response.status_code == 200
+    assert response.text == "hello"
+    assert response.content_type == "text/plain; charset=utf-8"
+
+    _, response = app.test_client.get("/201")
+    assert response.status_code == 201
+    assert response.content_type == "text/plain; charset=utf-8"
+
+
+def test_serializer_with_custom(app):
+    def custom(message, status):
+        return json({"message": message}, status=status)
+
+    @app.get("/")
+    @serializer(custom)
+    async def handler(request):
+        return "hello"
+
+    @app.get("/201")
+    @serializer(custom, status=201)
+    async def handler_201(request):
+        return "hello"
+
+    _, response = app.test_client.get("/")
+    assert response.status_code == 200
+    assert response.content_type == "application/json"
+    assert response.json["message"] == "hello"
+
+    _, response = app.test_client.get("/201")
+    assert response.status_code == 201
+    assert response.content_type == "application/json"
+
+
+def test_serializer_with_params(app):
+    def message(retval, request, action, status):
+        return json(
+            {
+                "request_id": str(request.id),
+                "action": action,
+                "message": retval,
+            },
+            status=status,
+        )
+
+    @app.get("/<action>")
+    @serializer(message)
+    async def do_action(request, action: str):
+        return "This is a message"
+
+    _, response = app.test_client.get("/this")
+    assert response.status_code == 200
+    assert response.json["action"] == "this"

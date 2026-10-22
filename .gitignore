@@ -1,0 +1,7 @@
+build/
+__pycache__/
+.pytest_cache/
+*.so
+.superpowers/
+.venv/
+dist/

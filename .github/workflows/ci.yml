@@ -1,0 +1,21 @@
+name: CI
+
+# Builds and tests the wheels on every push, pull request and manual run.
+# Nothing is published: release.yml does that for version tags.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    uses: ./.github/workflows/wheels.yml
