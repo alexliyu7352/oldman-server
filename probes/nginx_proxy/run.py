@@ -7,7 +7,7 @@ thread and other thread CPU. Placement of connections is random per start, so ea
 two-worker cell is repeated with fresh processes.
 
 Run after `source scripts/env.sh`:
-    python probes/nginx_proxy/run.py --out results/nginx-proxy-<date>-NN [--smoke]
+    python probes/nginx_proxy/run.py --out <directory> [--smoke]
 """
 import argparse
 import itertools

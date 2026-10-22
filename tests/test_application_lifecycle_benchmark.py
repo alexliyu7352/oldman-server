@@ -73,7 +73,8 @@ def test_existing_output_is_refused_before_starting_work(tmp_path):
     marker = tmp_path / "marker"
     marker.write_text("preserve")
     with pytest.raises(FileExistsError):
-        run.main(["--snapshot", "/not-needed", "--role", "baseline", "--round", "0", "--out", str(tmp_path)])
+        run.main(["--snapshot", "/not-needed", "--role", "baseline", "--round", "0", "--out", str(tmp_path),
+                  "--baseline-index", "/not-needed"])
     assert marker.read_text() == "preserve"
 
 

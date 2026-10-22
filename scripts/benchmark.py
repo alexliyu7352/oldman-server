@@ -99,7 +99,8 @@ async def main():
         await engine.aclose()
     result["final_stats"] = engine.stats()
     result["threads_after_close"] = threads()
-    Path("results/bridge.json").write_text(json.dumps(result, indent=2) + "\n")
+    Path("build").mkdir(exist_ok=True)
+    Path("build/bridge.json").write_text(json.dumps(result, indent=2) + "\n")
 
 
 asyncio.run(main())

@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--legacy", action="store_true")
     parser.add_argument("--sanic", action="store_true", help="include Sanic integration (requires the sanic uv group)")
-    parser.add_argument("--out", type=Path, default=ROOT / "results/framework-correctness")
+    parser.add_argument("--out", type=Path, default=ROOT / "build/framework-correctness")
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -51,8 +51,7 @@ def main():
             if code:
                 print(output[-6000:], flush=True)
     if args.legacy:
-        paths = [ROOT / "results/phase3-tcp.json", ROOT / "results/phase3-udp.json"]
-        before = {path: path.read_bytes() for path in paths if path.exists()}
+        paths = [ROOT / "build/evidence/tcp-frames.json", ROOT / "build/evidence/udp-flows.json"]
         legacy = out / "legacy"
         legacy.mkdir(exist_ok=True)
         try:
@@ -70,10 +69,6 @@ def main():
             for path in paths:
                 if path.exists():
                     (legacy / path.name).write_bytes(path.read_bytes())
-                if path in before:
-                    path.write_bytes(before[path])
-                elif path.exists():
-                    path.unlink()
     (out / "correctness.json").write_text(json.dumps(rows, indent=2) + "\n")
     return int(any(row["returncode"] for row in rows))
 

@@ -50,9 +50,9 @@ def summarize(rows):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", required=True, help="directory under results/")
+    parser.add_argument("--out", required=True, help="output directory (relative to the project root)")
     args = parser.parse_args(argv)
-    root = Path(__file__).resolve().parents[2] / "results" / args.out
+    root = Path(__file__).resolve().parents[2] / args.out
     rows = [json.loads(p.read_text()) for p in sorted(root.glob("json-*-r*.json"))]
     summary = summarize(rows)
     atomic_json(root / "summary.json", summary)

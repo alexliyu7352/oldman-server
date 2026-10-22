@@ -143,7 +143,7 @@ if __name__ == "__main__":
     assert len(available) >= args.server_cores + args.client_cores + 1
     assert 0 < args.size <= 1048576
     os.sched_setaffinity(0, {available[-1]})
-    out = ROOT/"results"/args.out; out.mkdir(parents=True, exist_ok=True)
+    out = ROOT/args.out; out.mkdir(parents=True, exist_ok=True)
     rng = random.Random(61)
     text = (b'{"id":12345,"kind":"reading","value":27.5,"unit":"C"}\n'*400)[:16384]
     payload = b"".join(rng.randbytes(16384) + text for _ in range((args.size+32767)//32768))[:args.size]

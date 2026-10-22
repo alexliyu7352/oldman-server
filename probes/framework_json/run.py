@@ -214,7 +214,7 @@ def fingerprints():
              *sorted((ROOT / "probes/framework_json").glob("*.py")),
              ROOT / "probes/framework_json/native_main.cc",
              *sorted((ROOT / "native").glob("*.cc")), *sorted((ROOT / "native").glob("*.hh")),
-             ROOT / "python/seastar_http.py", ROOT / "python/probe_engine.py",
+             ROOT / "python/seastar_http.py", ROOT / "src/oldman_server/native/engine.py",
              ROOT / "scripts/comparison_server.py", ROOT / "scripts/comparison_metrics.py",
              ROOT / "scripts/cpu_budget.py",
              ROOT / "probes/final/run.py",
@@ -404,7 +404,7 @@ def main(argv=None):
     topology = cpu_topology(budget["effective_cpus"])
     layout = cpu_layout(budget["effective_cpus"], topology)
     os.sched_setaffinity(0, {layout["controller"]})
-    out = ROOT / "results" / args.out
+    out = ROOT / args.out
     out.mkdir(parents=True, exist_ok=True)
     expected = out / "expected.bin"
     if expected.exists():

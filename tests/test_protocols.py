@@ -49,7 +49,9 @@ async def test_tcp_split_coalesced_binary_frames_and_shards():
         assert stats["tcp_frames"] == 48
         assert all(s["tcp_frames"] > 0 for s in stats["shards"])
         assert stats["reserved_bytes"] == 0
-        Path("results/phase3-tcp.json").write_text(json.dumps(stats, indent=2))
+        evidence = Path("build/evidence")
+        evidence.mkdir(parents=True, exist_ok=True)
+        (evidence / "tcp-frames.json").write_text(json.dumps(stats, indent=2))
     finally:
         await engine.aclose()
 
@@ -134,7 +136,9 @@ async def test_udp_many_flows_exact_datagrams_and_distribution():
         assert stats["udp_received"] == stats["udp_sent"] == sum(counts) == 2048
         assert stats["udp_dropped"] == 0
         assert all(s["udp_received"] > 0 for s in stats["shards"])
-        Path("results/phase3-udp.json").write_text(json.dumps({"flows": 32, "sent": 2048,
+        evidence = Path("build/evidence")
+        evidence.mkdir(parents=True, exist_ok=True)
+        (evidence / "udp-flows.json").write_text(json.dumps({"flows": 32, "sent": 2048,
             "received": sum(counts), "duplicates": 0, "reordered": 0, "loss": 0, "stats": stats}, indent=2))
     finally:
         await asyncio.wait_for(engine.aclose(), 5)

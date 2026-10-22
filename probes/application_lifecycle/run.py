@@ -18,7 +18,6 @@ from probes.application_lifecycle.inputs import (check_identity, fingerprint, ha
     verify_seastar_libraries, verify_snapshot)
 from scripts.cpu_budget import describe_cpu, cpu_topology, require_budget
 
-BASELINE_INDEX = ROOT / "results/application-lifecycle/python314-baseline-63b8050-02/snapshot.json"
 LIFECYCLE_ROLES = ("baseline", "predecessor", "candidate")
 ROLE_MODES = {**dict.fromkeys(LIFECYCLE_ROLES, "candidate3"),
               "uvloop-stdlib": "multiprocess", "uvloop-codec": "multiprocess", "native": "native3"}
@@ -91,7 +90,7 @@ def _cpu_set(text):
     return result
 
 
-def execute(snapshot, role, round_number, out, *, profiler=None, observe_host=False):
+def execute(snapshot, role, round_number, out, *, baseline_index, profiler=None, observe_host=False):
     """Run a single fixed workload; diagnostic callers cannot create formal rows."""
     out, snapshot = Path(out).resolve(), Path(snapshot).resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -104,9 +103,9 @@ def execute(snapshot, role, round_number, out, *, profiler=None, observe_host=Fa
         if profiler in ("switches", "switches-shards", "cpu-shards") and not observe_host:
             raise ValueError("switch attribution requires host window anchors")
         record = verify_snapshot(snapshot)
-        baseline_path = Path(json.loads(BASELINE_INDEX.read_text())["snapshot"])
+        baseline_path = Path(json.loads(Path(baseline_index).read_text())["snapshot"])
         baseline = verify_snapshot(baseline_path)
-        if json.loads(BASELINE_INDEX.read_text()) != baseline:
+        if json.loads(Path(baseline_index).read_text()) != baseline:
             raise ValueError("baseline manifest changed since freeze")
         if role == "baseline" and record != baseline:
             raise ValueError("baseline role requires the frozen migration snapshot")
@@ -278,11 +277,14 @@ def main(argv=None):
     parser.add_argument("--role", choices=ROLE_MODES, required=True)
     parser.add_argument("--round", type=int, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--baseline-index", type=Path, required=True,
+                        help="snapshot.json of the frozen baseline snapshot")
     parser.add_argument("--observe-host", action="store_true", help="record external controller observations")
     args = parser.parse_args(argv)
     if args.round < 0:
         parser.error("round must be nonnegative")
-    execute(args.snapshot, args.role, args.round, args.out, observe_host=args.observe_host)
+    execute(args.snapshot, args.role, args.round, args.out, observe_host=args.observe_host,
+            baseline_index=args.baseline_index)
 
 
 if __name__ == "__main__":

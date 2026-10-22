@@ -172,7 +172,7 @@ python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>
 .venv/bin/python -m pytest tests/framework tests/ext                              # 框架测试：asyncio 服务器
 OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 .venv/bin/python -m pytest tests/framework tests/ext   # 框架测试：经原生主机
 python scripts/calibrate.py build/calib-<目录> candidate:small candidate:body      # 服务端吞吐与主线程 µs
-python probes/sanic_comparison/run.py --python-only --out results/<新目录>          # 阶段验收：与原版 Sanic 配对对照
+python probes/sanic_comparison/run.py --python-only --out build/compare-<新目录>     # 阶段验收：与原版 Sanic 配对对照
 ```
 
 ## 发布

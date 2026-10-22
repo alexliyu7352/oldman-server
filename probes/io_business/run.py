@@ -156,7 +156,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     cpus = sorted(os.sched_getaffinity(0)); assert len(cpus) >= 8
     os.sched_setaffinity(0, {cpus[-1]})
-    out = ROOT/"results"/args.out; out.mkdir(parents=True, exist_ok=True)
+    out = ROOT/args.out; out.mkdir(parents=True, exist_ok=True)
     expected = out/"expected.bin"
     if expected.exists(): assert expected.read_bytes() == b"x"*8192
     else: expected.write_bytes(b"x"*8192)

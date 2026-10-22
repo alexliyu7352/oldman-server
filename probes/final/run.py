@@ -147,14 +147,14 @@ if __name__ == "__main__":
     available = sorted(os.sched_getaffinity(0))
     assert len(available) >= 3 + args.client_cores + 1, "need a separate controller CPU"
     os.sched_setaffinity(0, {available[3 + args.client_cores]})
-    out = ROOT/"results"/args.out; out.mkdir(parents=True, exist_ok=True)
+    out = ROOT/args.out; out.mkdir(parents=True, exist_ok=True)
     (out/"expected.bin").write_bytes(b"x"*1024 if args.workload == "fixed" else bytes(range(256))*256)
     manifest = out/"manifest.json"
     if not manifest.exists():
         paths = [ROOT/"build/http_load", ROOT/"build/fixed_native", *list((ROOT/"build").glob("_seastar_probe*.so")),
                  *list((ROOT/"probes/fixed").glob("*.py")), *list((ROOT/"probes/final").glob("*.py")), ROOT/"probes/fixed/native_main.cc",
                  *list((ROOT/"native").glob("*.cc")), *list((ROOT/"native").glob("*.hh")),
-                 ROOT/"tests/test_batch_decisions.py", ROOT/"scripts/comparison_server.py", ROOT/"python/probe_engine.py"]
+                 ROOT/"tests/test_batch_decisions.py", ROOT/"scripts/comparison_server.py", ROOT/"src/oldman_server/native/engine.py"]
         atomic_json(manifest, dict(created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             python=sys.version, kernel=platform.release(), cpu_max=Path("/sys/fs/cgroup/cpu.max").read_text().strip(),
             parent_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),

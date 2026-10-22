@@ -68,11 +68,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--round", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=300000)
+    parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     available = sorted(os.sched_getaffinity(0))
     os.sched_setaffinity(0, {available[0]})
-    out = ROOT / "results/binding-cost"
-    out.mkdir(exist_ok=True)
+    out = args.out
+    out.mkdir(parents=True, exist_ok=True)
     destination = out / f"round-{args.round}.json"
     assert not destination.exists(), "refuse to overwrite measurement"
     paths = [Path(__file__), ROOT/"probes/bindings/probe.cc", ROOT/"probes/bindings/test_bindings.py",

@@ -9,7 +9,7 @@ import time
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
-parser.add_argument("--out", type=Path, default=root / "results")
+parser.add_argument("--out", type=Path, default=root / "build/tests")
 output_dir = parser.parse_args().out
 output_dir.mkdir(parents=True, exist_ok=True)
 tests = []

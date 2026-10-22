@@ -123,7 +123,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     available = sorted(os.sched_getaffinity(0)); assert len(available) >= 8
     os.sched_setaffinity(0, {available[8] if len(available)>8 else available[0]})
-    out = ROOT/"results"/args.out; out.mkdir(parents=True, exist_ok=True)
+    out = ROOT/args.out; out.mkdir(parents=True, exist_ok=True)
     (out/"expected.bin").write_bytes(b"x"*1024)
     manifest = out/"manifest.json"
     if not manifest.exists():

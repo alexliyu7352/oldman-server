@@ -359,7 +359,7 @@ struct Runtime::Impl {
                 pool = std::move(workers);
             }
             ss::app_template::seastar_options opts;
-            opts.name = "python-seastar-phase1";
+            opts.name = "oldman-server";
             opts.auto_handle_sigint_sigterm = false;
             opts.smp_opts.memory_allocator = ss::memory_allocator::standard;
             ss::app_template app(std::move(opts));
@@ -373,7 +373,7 @@ struct Runtime::Impl {
             // O_DIRECT), as Python would; reads not in the cache go to Seastar's
             // syscall thread instead of blocking the reactor.
             std::vector<std::string> args{
-                "python-seastar-phase1", "--smp", std::to_string(cpus.size()),
+                "oldman-server", "--smp", std::to_string(cpus.size()),
                 "--cpuset", cpu_text,
                 "--overprovisioned", "--thread-affinity", "1",
                 "--enable-glibc-exception-scaling-workaround", "0",

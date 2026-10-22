@@ -1,4 +1,9 @@
-"""Input and identity gates for matched lifecycle experiments."""
+"""Input and identity gates for matched lifecycle experiments.
+
+The experiments compare frozen snapshots of earlier source trees, whose
+layout this module checks: there the engine was python/probe_engine.py and
+the extension build/_seastar_probe*.so (now src/oldman_server/native).
+"""
 import hashlib
 import importlib.metadata
 import json

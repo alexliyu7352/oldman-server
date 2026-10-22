@@ -27,6 +27,8 @@ original_command = lifecycle.server_command
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True, help="directory containing the committed sequence.json")
+    parser.add_argument("--baseline-index", type=Path, required=True,
+                        help="snapshot.json of the frozen baseline snapshot")
     args = parser.parse_args(argv)
     out = args.out.resolve()
     sequence = json.loads((out / "sequence.json").read_text())
@@ -53,7 +55,8 @@ def main(argv=None):
         lifecycle.server_command = command
         print(f"START {number} {role}", flush=True)
         try:
-            row = lifecycle.execute(sequence["snapshots"][role]["path"], role, number, folder, profiler="allocation")
+            row = lifecycle.execute(sequence["snapshots"][role]["path"], role, number, folder,
+                                    profiler="allocation", baseline_index=args.baseline_index)
             observed = json.loads(trace.read_text())
             records = validate(observed, role=role)
             if row["diagnostic_only"] is not True or sequence["declared_unix_ns"] >= row["started_unix_ns"]:

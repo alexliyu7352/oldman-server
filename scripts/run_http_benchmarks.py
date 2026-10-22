@@ -66,7 +66,7 @@ def main(args):
     server_cpus, client_cpus = available[:6], available[6:8]
     # Controller does negligible work during a run; share the Python CPU.
     os.sched_setaffinity(0, {available[0]})
-    out = ROOT / "results" / ("http-smoke" if args.smoke else "http")
+    out = ROOT / "build" / ("http-smoke" if args.smoke else "http")
     out.mkdir(exist_ok=True)
     data = ROOT / "build/http-data"
     data.mkdir(exist_ok=True)

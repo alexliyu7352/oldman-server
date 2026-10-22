@@ -185,7 +185,7 @@ def one(out, mode, rate, repeat, manifest, resume=False, label=""):
 def fingerprint():
     paths = [ROOT/"build/http_load", *list((ROOT/"src/oldman_server/native").glob("_native*.so")),
              *list((ROOT/"native").glob("*.*")), *list((ROOT/"python").glob("*.py")),
-             *list((ROOT/"scripts").glob("*.py")), ROOT/"requirements-phase4.txt"]
+             *list((ROOT/"scripts").glob("*.py")), ROOT/"requirements-comparison.txt"]
     return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
@@ -216,17 +216,17 @@ def main(args):
     assert len(available) >= 8
     server_cpus, client_cpus = available[:6], available[6:8]
     os.sched_setaffinity(0, {server_cpus[0]})
-    out = ROOT/"results"/("comparison-"+args.phase+args.suffix)
+    out = ROOT/"build"/("comparison-"+args.phase+args.suffix)
     out.mkdir(exist_ok=True)
     data = ROOT/"build/comparison-data"
     data.mkdir(exist_ok=True)
     body = payload_for(1048576); expected = zlib.compress(body, 6)
     (data/"input.bin").write_bytes(body); (data/"expected.bin").write_bytes(expected)
     deps = {line.split("==")[0]: importlib.metadata.version(line.split("==")[0])
-            for line in (ROOT/"requirements-phase4.txt").read_text().splitlines()}
+            for line in (ROOT/"requirements-comparison.txt").read_text().splitlines()}
     cases = [(mode, rate, label) for rate, label in ((0, "closed"), (50, "fixed")) for mode in MODES]
     if args.phase == "formal":
-        brackets = json.loads((ROOT/"results/comparison-calibration/brackets.json").read_text())
+        brackets = json.loads((ROOT/"build/comparison-calibration/brackets.json").read_text())
         cases += [(mode, brackets[mode][bound], "slo-"+bound) for bound in ("low", "high") for mode in MODES]
     manifest = {"protocol": 2, "warmup": 10 if args.phase == "formal" else (.05 if args.phase == "smoke" else 1),
         "seconds": 30 if args.phase == "formal" else (.2 if args.phase == "smoke" else 3),

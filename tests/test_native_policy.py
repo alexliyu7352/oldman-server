@@ -121,7 +121,8 @@ async def test_native_http_completes_while_python_holds_the_gil(tmp_path):
         assert engine.server_stats()["python_decisions"] == 0
         evidence = dict(gil_hold_seconds=held_seconds, completed_while_gil_held=during,
                         python_decisions=0, server_pid=os.getpid(), client=result, shards=engine.shards())
-        Path("results/final-gil-independent.json").write_text(json.dumps(evidence, indent=2)+"\n")
+        Path("build/evidence").mkdir(parents=True, exist_ok=True)
+        Path("build/evidence/gil-independent.json").write_text(json.dumps(evidence, indent=2)+"\n")
     finally:
         sys.setswitchinterval(old_interval)
         os.sched_setaffinity(0, available)
