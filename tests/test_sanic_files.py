@@ -29,6 +29,14 @@ def make_app(name, directory):
     async def stream(request, name):
         return await file_stream(directory / name, chunk_size=int(request.args.get("chunk", 4096)))
 
+    @app.get("/byname")
+    async def byname(request):
+        # The file name from the request: a NUL in it must not cut the path short.
+        name = request.args.get("name")
+        if request.args.get("stream"):
+            return await file_stream(directory / name)
+        return await file(directory / name)
+
     @app.get("/mixed")
     async def mixed(request):
         # Data before and after a file in one stream, in order.
@@ -217,3 +225,31 @@ def test_file_streams(tmp_path):
     assert vanished[0] == 200 and vanished[2] == b""
     assert next_one[2] == contents["small.txt"]
     assert operations[0] > 0 and operations[1:] == (0, 0)
+
+
+def test_paths_with_a_nul_byte_are_refused(tmp_path):
+    # Python refuses them (os.stat, open: ValueError); a C path ends at the NUL,
+    # which would read secret.key for secret.key\0.txt.
+    (tmp_path / "secret.key").write_bytes(b"SECRET")
+
+    async def requests(reader, writer):
+        results = []
+        for query in ("name=secret.key%00.txt", "name=secret.key%00.txt&stream=1"):
+            writer.write(get(f"/byname?{query}"))
+            results.append(await read_response(reader))
+        return results
+
+    async def direct(reader, writer):
+        from oldman_server.native.host import _engine
+        errors = []
+        for operation in (stat_async, read_file_async, _engine.file_open_stat):
+            try:
+                await operation(tmp_path / "secret.key\0.txt")
+            except ValueError as error:
+                errors.append(str(error))
+        return errors
+
+    _, (responses, errors, _) = run(tmp_path, requests, direct)
+    assert [status for status, _, _ in responses] == [500, 500]
+    assert all(b"SECRET" not in body for _, _, body in responses)
+    assert errors == ["embedded null byte"] * 3

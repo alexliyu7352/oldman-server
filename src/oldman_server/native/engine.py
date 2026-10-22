@@ -317,6 +317,15 @@ STREAM_FILE = 7
 FILE_STAT, FILE_READ, FILE_OPEN = 0, 1, 2  # native file operations
 
 
+def _file_path(path):
+    """The bytes of a path a shard opens. Its C string would end at a NUL byte
+    (secret.key\\0.txt reading secret.key): refused, as os.stat and open do."""
+    encoded = os.fsencode(path)
+    if b"\0" in encoded:
+        raise ValueError("embedded null byte")
+    return encoded
+
+
 def _stat_result(values):
     """os.stat_result as os.stat builds it, from a native file_stat's numbers."""
     mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime, blksize, blocks, rdev = values
@@ -762,10 +771,11 @@ class Engine:
         stream = self._application_streams.get(request_id)
         if stream is None or stream.file is not None:
             raise RuntimeError("the stream is not open for a file")
-        future = self._loop.create_future()
         path = os.fspath(path)
+        encoded = _file_path(path)
+        future = self._loop.create_future()
         stream.file = future, path
-        body = b"%d %d %d %s" % (offset, length, chunk_size, os.fsencode(path))
+        body = b"%d %d %d %s" % (offset, length, chunk_size, encoded)
         self._queue_stream_item((request_id, shard, 0, body, (), STREAM_FILE))
         return future
 
@@ -790,9 +800,10 @@ class Engine:
         if self._closed:
             raise RuntimeError("Engine is closing or closed")
         path = os.fspath(path)
+        encoded = _file_path(path)
         self._file_id += 1
         future = self._loop.create_future()
-        self._native.submit_file(self._file_id, operation, os.fsencode(path), offset, length)
+        self._native.submit_file(self._file_id, operation, encoded, offset, length)
         self._files[self._file_id] = future, operation, path
         return future
 

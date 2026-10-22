@@ -785,6 +785,9 @@ PYBIND11_MODULE(_native, m) {
         })
         .def("submit_file", [](probe::Runtime& r, uint64_t id, int operation, std::string path,
                                uint64_t offset, int64_t length) {
+            // The shard opens it as a C string, which would end at a NUL: refused
+            // as Python's own file functions do.
+            if (path.find('\0') != std::string::npos) throw py::value_error("embedded null byte");
             py::gil_scoped_release release;
             r.submit_file(id, operation, std::move(path), offset, length);
         })

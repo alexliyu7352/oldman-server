@@ -1076,6 +1076,9 @@ class Service {
             std::string error;
             bool connected = true;
             try {
+                // As a C string the path would end at a NUL (Engine.stream_file refuses one).
+                if (path.find('\0') != std::string::npos)
+                    throw std::system_error(EINVAL, std::system_category(), "embedded null byte");
                 auto file = co_await ss::open_file_dma(path, ss::open_flags::ro);
                 ss::file_input_stream_options options;
                 options.buffer_size = std::max<uint64_t>(65536, std::min<uint64_t>(chunk, 1 << 20));
