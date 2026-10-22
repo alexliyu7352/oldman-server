@@ -166,3 +166,18 @@ def test_shard_cpus_from_the_environment(monkeypatch, value, expected):
     assert _shard_cpus(Config()) == expected
     with pytest.raises(ValueError, match="NATIVE_SHARD_CPUS"):
         cpus.worker_groups(Config(), 2)
+
+
+def test_worker_listen_templates_fail_in_the_main_process():
+    # Every worker's address is checked before the workers start: a port
+    # that only overflows for worker 6, a unix path too long once bound
+    # under its temporary name, an unknown field.
+    from oldman_server import OldmanServer
+    for template, workers in (("127.0.0.1:6553{n}", 8), ("/" + "x" * 64 + "/{n}.sock", 2),
+                              ("/run/{n}/{other}.sock", 2)):
+        app = OldmanServer(f"listen_{workers}_{len(template)}", configure_logging=False)
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_WORKER_LISTEN = template
+        app.state.workers = workers
+        with pytest.raises(ValueError, match="NATIVE_WORKER_LISTEN"):
+            OldmanServer._native_worker_config(app)

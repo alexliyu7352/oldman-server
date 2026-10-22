@@ -852,8 +852,11 @@ class StartupMixin(metaclass=AppMeta):
         """NATIVE_WORKER_CPUS for the worker processes: a CPU group each."""
         if not native_server(app.config):
             return {}
-        if app.config.NATIVE_WORKER_LISTEN:  # a malformed one fails here
-            listen_address(app.config.NATIVE_WORKER_LISTEN, 0)
+        if app.config.NATIVE_WORKER_LISTEN:
+            # Every worker's address: a malformed one fails here, not in the
+            # worker it would be bound by.
+            for number in range(max(1, app.state.workers)):
+                listen_address(app.config.NATIVE_WORKER_LISTEN, number)
         groups = worker_groups(app.config, app.state.workers)
         if app.state.workers > len(groups):
             logger.warning(

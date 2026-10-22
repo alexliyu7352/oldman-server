@@ -16,9 +16,14 @@ a "unix:" prefix) or host:port ("127.0.0.1:81{n:02d}" for ports 8100, 8101,
 
 Plain Python: the main process checks the setting without the extension.
 """
+import os
 from string import Formatter
 
 from oldman_server.native.cpus import worker_number
+
+# sockaddr_un holds 107 path bytes; Sanic binds the path with a suffix of 44
+# (".", then a temporary name) before renaming it into place.
+_UNIX_PATH_MAX = 107 - 44
 
 
 def address(template, number):
@@ -29,10 +34,20 @@ def address(template, number):
         raise ValueError(
             f"NATIVE_WORKER_LISTEN must contain {{n}} (the worker number): {template!r}"
         )
-    formatted = template.format(n=number)
+    try:
+        formatted = template.format(n=number)
+    except (KeyError, IndexError, ValueError) as error:
+        raise ValueError(
+            f"NATIVE_WORKER_LISTEN has a field other than {{n}}: {template!r} ({error!r})"
+        ) from None
     if formatted.startswith("unix:"):
         formatted = formatted[len("unix:"):]
     if formatted.startswith("/"):
+        if len(os.fsencode(formatted)) > _UNIX_PATH_MAX:
+            raise ValueError(
+                f"NATIVE_WORKER_LISTEN gives a unix socket path longer than "
+                f"{_UNIX_PATH_MAX} bytes: {formatted!r}"
+            )
         return ("unix", formatted)
     host, separator, port = formatted.rpartition(":")
     if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
