@@ -18,6 +18,7 @@ from oldman_server.models.server_types import Signal
 from oldman_server.server.protocols.http_protocol import HttpProtocol
 from oldman_server.server.runners import _serve_http_1
 from oldman_server.worker.loader import AppLoader
+from oldman_server.worker.constants import ProcessState
 from oldman_server.worker.multiplexer import WorkerMultiplexer
 from oldman_server.worker.process import Worker, WorkerProcess
 
@@ -46,6 +47,7 @@ def worker_serve(
     config: bytes | str | dict[str, Any] | Any | None = None,
     passthru: dict[str, Any] | None = None,
 ):
+    app = None
     try:
         from oldman_server import OldmanServer
 
@@ -127,7 +129,16 @@ def worker_serve(
         warnings.simplefilter("ignore", category=RuntimeWarning)
         if monitor_publisher:
             error_logger.exception(e)
+            if app is not None and app.state.is_stopping is True:
+                # The stop of a server that served (a restart, a scale down,
+                # the shutdown): logged, it ends no other worker.
+                return
             multiplexer = WorkerMultiplexer(monitor_publisher, {})
-            multiplexer.terminate(True)
+            name = os.environ.get("OLDMAN_SERVER_WORKER_NAME", "")
+            state = (worker_state or {}).get(name, {}).get("state")
+            if state == ProcessState.ACKED.name:
+                multiplexer.startup_failed()
+            else:
+                multiplexer.terminate(True)
         else:
             raise e

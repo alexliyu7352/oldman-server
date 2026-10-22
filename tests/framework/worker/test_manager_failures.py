@@ -180,3 +180,111 @@ def test_workers_end_when_the_main_process_is_killed(tmp_path):
         except ProcessLookupError:
             pass
         process.stdout.close()
+
+
+def get(port: int) -> str:
+    import urllib.request
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as response:
+        return response.read().decode()
+
+
+def test_a_worker_failing_while_it_stops_does_not_end_the_service(tmp_path):
+    # Worker 0 restarts itself; its after_server_stop fails. That is the end
+    # of an old process, not a failed start: the service goes on.
+    marker = tmp_path / "restarted"
+    process = start(
+        tmp_path,
+        f"""
+        @app.after_server_start
+        async def restart_once(app):
+            if app.m.name.startswith("Oldman-Server-0") and not os.path.exists({str(marker)!r}):
+                open({str(marker)!r}, "w").close()
+                app.m.restart()
+            print("worker ready", flush=True)
+
+        @app.after_server_stop
+        async def fail_on_stop(app):
+            if app.m.name.startswith("Oldman-Server-0"):
+                raise ValueError("expected stop failure")
+        """,
+    )
+    try:
+        output = read_until(process, b"worker ready", count=3)
+        time.sleep(1)
+        assert process.poll() is None, output.decode(errors="replace")
+        os.kill(process.pid, signal.SIGTERM)
+        text = output.decode(errors="replace") + finish(process)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    assert "expected stop failure" in text
+    assert "failed after acknowledging" not in text
+    assert "main process stopped" in text
+    assert process.returncode == 0
+
+
+def test_a_restarted_worker_that_fails_to_start_leaves_the_others(tmp_path):
+    # As with auto-reload picking up a broken file: the restarted worker
+    # fails before acknowledging; the others go on serving.
+    marker = tmp_path / "restarted"
+    (tmp_path / "broken_app.py").write_text(
+        APP
+        + textwrap.dedent(
+            f"""
+            if os.environ.get("OLDMAN_SERVER_WORKER_NAME", "").startswith(
+                    "Oldman-Server-0") and os.path.exists({str(marker)!r}):
+                raise SyntaxError("expected import failure")
+
+            @app.after_server_start
+            async def restart_once(app):
+                if app.m.name.startswith("Oldman-Server-0") and not os.path.exists({str(marker)!r}):
+                    open({str(marker)!r}, "w").close()
+                    app.m.restart()
+                print("worker ready", flush=True)
+            """
+        )
+    )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    process = subprocess.Popen(
+        [sys.executable, "-m", "oldman_server", "broken_app:app", "--workers", "2",
+         "--host", "127.0.0.1", "--port", str(port), "--no-motd"],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    try:
+        output = read_until(process, b"expected import failure")
+        time.sleep(1)
+        assert process.poll() is None, output.decode(errors="replace")
+        assert get(port) == "ok"
+        os.kill(process.pid, signal.SIGTERM)
+        text = output.decode(errors="replace") + finish(process)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    assert "failed after acknowledging" not in text
+    assert "failed to start" in text
+
+
+def test_a_native_worker_whose_engine_cannot_start_ends_the_service(tmp_path):
+    # The worker acknowledges, then its native host fails to start (CPUs
+    # that do not exist): the service ends instead of running without it.
+    process = start(
+        tmp_path,
+        """
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_WORKER_CPUS = "0,4000;1,4001"
+        """,
+    )
+    try:
+        text = finish(process, timeout=30)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    assert "shard_cpus must be distinct" in text
+    # Reported as a failed start: by the startup wait, or after it.
+    assert ("terminated before startup was completed" in text
+            or "failed after acknowledging" in text), text
+    assert process.returncode == 1

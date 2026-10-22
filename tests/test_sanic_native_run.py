@@ -787,3 +787,16 @@ def test_sigterm_right_after_the_first_response_stops_gracefully(short_dir, nati
                 process.wait()
             process.stdout.close()
     assert outcomes == [(0, True)] * 3
+
+
+def test_a_native_host_that_cannot_start_fails_the_run():
+    # A single process: app.run() raises (it returned normally, exit status 0).
+    result = subprocess.run([sys.executable, "-c", APP + textwrap.dedent(f'''
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SHARD_CPUS = "4000,4001"
+        app.run(host="127.0.0.1", port={free_port()}, motd=False)
+        print("RUN RETURNED", flush=True)
+    ''')], capture_output=True, text=True, timeout=60, cwd=ROOT)
+    assert result.returncode != 0
+    assert "RUN RETURNED" not in result.stdout
+    assert "shard_cpus must be distinct" in result.stderr

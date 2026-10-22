@@ -148,6 +148,12 @@ class WorkerMultiplexer:
         message = "__TERMINATE_EARLY__" if early else "__TERMINATE__"
         self._monitor_publisher.send(message)
 
+    def startup_failed(self):
+        """Report a start that failed after this worker acknowledged it
+        (after_server_start, or the native host): the manager ends the
+        service, as when a worker fails before acknowledging."""
+        self._monitor_publisher.send("__STARTUP_FAILED__")
+
     @property
     def pid(self) -> int:
         """The process ID of the worker."""

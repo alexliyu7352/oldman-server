@@ -314,7 +314,7 @@ class WorkerManager:
                     # would put it back and read it again forever.
                     self.monitor_publisher.send(monitor_msg)
                     return
-                if monitor_msg != "__TERMINATE_EARLY__":
+                if monitor_msg not in ("__TERMINATE_EARLY__", "__STARTUP_FAILED__"):
                     self.monitor_publisher.send(monitor_msg)
                     continue
                 misses = self.THRESHOLD
@@ -471,16 +471,25 @@ class WorkerManager:
             elif message == "__TERMINATE__":
                 self._handle_terminate()
                 return MonitorCycle.BREAK
-            elif message == "__TERMINATE_EARLY__":
-                # A worker whose after_server_start failed: it had already
-                # acknowledged, so wait_for_ack did not see this. Not the name
-                # of a process to restart.
+            elif message == "__STARTUP_FAILED__":
+                # A worker whose start failed after it acknowledged it
+                # (after_server_start, or its native host): wait_for_ack did
+                # not see this.
                 error_logger.error(
                     "A worker process failed after acknowledging its startup "
-                    "(in after_server_start). Shutting down. Please solve any "
-                    "errors experienced during startup."
+                    "(in after_server_start or starting its server). Shutting "
+                    "down. Please solve any errors experienced during startup."
                 )
                 self.kill()
+            elif message == "__TERMINATE_EARLY__":
+                # Past wait_for_ack this is a restarted worker that failed
+                # before acknowledging (auto-reload picking up a broken file,
+                # say). Not the name of a process to restart; the others go on.
+                error_logger.error(
+                    "A restarted worker process failed to start; the other "
+                    "workers go on serving. Please solve the error above."
+                )
+                return MonitorCycle.CONTINUE
             elif isinstance(message, tuple) and (
                 len(message) == 7 or len(message) == 8
             ):

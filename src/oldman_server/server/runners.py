@@ -231,6 +231,20 @@ def _run_shutdown_coro(loop, coro):
     # The loop is unusable: leave the task.
 
 
+def _run_starting(loop, coro, stop):
+    """Run a startup step to its end. app.stop() meanwhile (from a listener;
+    the loop stops after its current iteration) does not abort the step,
+    which would look like a failed start: the server stops once started."""
+    task = loop.create_task(coro)
+    while True:
+        try:
+            return loop.run_until_complete(task)
+        except RuntimeError:
+            if task.done():
+                raise
+            stop.requested = True
+
+
 def _release_after_failed_start(loop, app):
     """after_server_stop for a server that did not start: it releases what
     before_server_start set up. Its own failure is logged; the start failure
@@ -265,6 +279,8 @@ def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid
     propagates.
     """
     errors = []
+    if stop is not None:
+        stop.app.state.is_stopping = False
     try:
         start()
         server_logger.info("Worker ready [%s]", pid)
@@ -280,6 +296,10 @@ def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid
         # The stop phases run once; further signals are ignored meanwhile.
         for _signal in [SIGINT, SIGTERM]:
             signal_func(_signal, SIG_IGN)
+        if stop.serving:
+            # What fails from here is the stop of a server that ran, not a
+            # failed start (worker_serve tells the manager accordingly).
+            stop.app.state.is_stopping = True
 
     for step in (
         partial(_run_shutdown_coro, loop, before_stop),
@@ -398,14 +418,14 @@ def _serve_native(
     # shards and the other workers.
     group = worker_group(app.config)
     try:
-        engine = loop.run_until_complete(
-            open_engine(app, config, python_cpu=group[0] if group else None)
+        engine = _run_starting(
+            loop, open_engine(app, config, python_cpu=group[0] if group else None), stop
         )
     except BaseException:
         close_sockets()
         error_logger.exception("Unable to start server", exc_info=True)
         _release_after_failed_start(loop, app)
-        return
+        raise  # a failed start: app.run() raises, a worker reports it
 
     def _cleanup():
         graceful = app.config.GRACEFUL_SHUTDOWN_TIMEOUT
@@ -525,12 +545,15 @@ def _serve_http_1(
     _run_before_start(loop, app)
     app.ack()
 
+    # Before the server listens: a stop signal from then on stops it once
+    # it has started.
+    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     try:
-        http_server = loop.run_until_complete(server_coroutine)
+        http_server = _run_starting(loop, server_coroutine, stop)
     except BaseException:
         error_logger.exception("Unable to start server", exc_info=True)
         _release_after_failed_start(loop, app)
-        return
+        raise  # a failed start: app.run() raises, a worker reports it
 
     def _cleanup():
         # Wait for event loop to finish and all connections to drain
@@ -567,7 +590,6 @@ def _serve_http_1(
         except (BrokenPipeError, ConnectionResetError, EOFError):
             pass
 
-    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     _run_server_forever(
         loop,
         partial(_after_start, loop, app),
