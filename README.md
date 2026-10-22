@@ -18,9 +18,10 @@ PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 
 
 ## 快速开始
 
-开发环境：Ubuntu 20.04 宿主；CPython 3.14.7（普通 GIL 构建；支持 3.12–3.14），由 uv 管理；Seastar 等原生依赖位于 `../seastar_deps`。
+开发环境：Ubuntu 20.04 宿主；CPython 3.14.7（普通 GIL 构建；支持 3.12–3.14），由 uv 管理；Seastar 等原生依赖位于 `../seastar_deps`。第一次先运行 `bash scripts/bootstrap.sh`：它按 `dependency-lock.json` 下载编译器与依赖到 `../seastar_deps` 并构建 Seastar，要求宿主的系统包与锁文件 `host_requirements` 的版本逐个相同（不同即拒绝，不会换用别的版本）。其他环境请用发布构建的容器流程（见「发布」，`scripts/build_wheels.sh` 在 manylinux_2_28 容器里从源码构建全部依赖）。
 
 ```sh
+bash scripts/bootstrap.sh               # 第一次：锁定的工具链与原生依赖、Seastar、扩展
 uv sync --locked                        # Python 依赖（官方 PyPI），本包以可编辑方式安装
 source scripts/env.sh                   # 原生库路径
 bash scripts/build.sh                   # 构建原生扩展 oldman_server.native._native（增量约 10 秒）
@@ -136,7 +137,7 @@ server {
 - 新增 `HTTPMethodView.before_dispatch(request, *args, **kwargs)`：覆写后在方法 handler 之前以同样的参数执行（可为同步或协程），返回响应则直接用它回应，返回 None 才进入 handler；抛出的异常交给错误处理器。不覆写时没有额外开销。oldman 的 `HTTPMethodView` 不必再复制整个 `dispatch_request`，把登录与权限检查放进这里即可。
 - 已移除：coffee 模式（`app.make_coffee()`、`prepare(coffee=...)`、`--coffee`，Sanic 标志的彩蛋）；REPL（`--repl`、`app.repl_ctx`）；后台运行（`--daemon` 及 `kill` / `status` / `restart` / `stop` 命令，进程管理交给 systemd 或 oldman 自己的服务命令）；inspector（`INSPECTOR*` 设置、`app.inspector`、`inspect` 命令）；TLS（`run()` / `prepare()` / `create_server()` 的 `ssl`、`auto_tls`，`--cert` / `--key` / `--tls` / `--auto-tls`，`LOCAL_CERT_CREATOR` 等设置，`certloader_class`，`conn_info.ssl` / `cert` / `server_name`）与 HTTP/3（`version` 参数、`--http` / `-1` / `-3`、`request.stream_id`、`Alt-Svc`）：TLS 由前端代理终止，`request.scheme` 照旧取 `Forwarded` / `X-Forwarded-Proto`；ASGI（应用不再是 ASGI 可调用对象，`app.asgi`、`app.asgi_client`、`request.scope` 一并移除），只由本包自己的服务器运行；Windows 支持（原生主机只能运行在 Linux 上）。
 - 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。
-- JSON 默认用 orjson（`json()`、`request.json`、JSON 错误页与 JSON 日志），不再用 ujson：输出为紧凑的 UTF-8（非 ASCII 字符不再转成 `\uXXXX`）；datetime、UUID、dataclass、enum 可直接编码；非 str 的键照旧转成字符串；超过 64 位的整数会抛 `TypeError`；不认识的对象不再调用 `__json__`，改用 `json(..., default=...)`。`json()` 的额外关键字参数交给 orjson（`default`、`option`，如 `option=orjson.OPT_SORT_KEYS`）；`json_dumps` 返回 bytes。要换编码器仍可用 `json(..., dumps=...)` 或 `Sanic(dumps=..., loads=...)`。
+- JSON 默认用 orjson（`json()`、`request.json`、JSON 错误页与 JSON 日志），不再用 ujson：输出为紧凑的 UTF-8（非 ASCII 字符不再转成 `\uXXXX`）；datetime、UUID、dataclass、enum 可直接编码；非 str 的键照旧转成字符串；超过 64 位的整数会抛 `TypeError`；不认识的对象不再调用 `__json__`，改用 `json(..., default=...)`。`json()` 的额外关键字参数交给 orjson（`default`、`option`，如 `option=orjson.OPT_SORT_KEYS`）；`json_dumps` 返回 bytes。要换编码器仍可用 `json(..., dumps=...)` 或 `OldmanServer(dumps=..., loads=...)`。
 
 行为修正（oldman 原先为此打的补丁，切换后可以删除）：
 
@@ -180,7 +181,7 @@ python probes/sanic_comparison/run.py --python-only --out build/compare-<新目�
 推送 tag `v<版本>`（与 `src/oldman_server/__version__.py` 一致，如 `v0.1.0`）后，`.github/workflows/release.yml`：
 
 1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载依赖源码并校验 SHA-256（`scripts/fetch_sources.py`，Seastar 打上 `patches/` 里的补丁），构建 Boost、OpenSSL、fmt、yaml-cpp、c-ares、protobuf、liburing、hwloc（不带插件）与 Seastar，再为 CPython 3.12–3.14 各构建扩展、打包（`hatch_build.py` 把扩展放进 wheel 并标上解释器与平台；树里没有扩展时拒绝构建 wheel，`OLDMAN_SERVER_PURE_WHEEL=1` 才构建只能用 asyncio 服务器的纯 Python wheel），由 auditwheel 把依赖库复制进 wheel、标为 manylinux_2_28。容器镜像按标签与摘要固定（`wheels.yml`）；lz4 与构建所需的头文件取自镜像的发行版仓库（签名的 RPM，版本不在锁文件里，记入构建日志与缓存键）。依赖与 Seastar 的构建结果按锁文件、补丁、脚本、镜像、编译器与这些 RPM 的版本缓存。
-2. 核对每个 wheel 所带的库都附有许可证（`scripts/check_wheel_licenses.py`），再把每个 wheel 装进全新环境，跑经原生主机的框架测试与原生主机的运行测试（`scripts/test_wheels.sh`）。
+2. 核对每个 wheel 所带的库都附有许可证（`scripts/check_wheel_licenses.py`），再把每个 wheel 装进全新环境：只装声明的依赖时能导入，再装上测试依赖，跑经 asyncio 服务器与经原生主机的框架测试、原生主机的运行测试（`scripts/test_wheels.sh`）。auditwheel 只标 manylinux_2_28（`--only-plat`：测试只在 glibc 2.28 的镜像里做，不标更早的 glibc）。
 3. 经 PyPI trusted publishing 发布（环境 `pypi`，只接受 `v*` tag 的部署），再用 runner 自带的 `gh` 建 GitHub release，附上 wheel 与 SHA256SUMS。工作流里的 action 都固定到提交。
 
 每次推送与 PR 由 `.github/workflows/ci.yml` 构建并测试同样的 wheel，不发布。wheel 带上所含第三方库的许可证（`LICENSES/`，作为包的 license files）：auditwheel 复制进 wheel 的每个库、编进扩展的 pybind11，都要在上述脚本的清单里并有许可证文件，否则测试失败。Seastar 以 `--as-needed` 链接：它只用到 SCTP 头文件里的常量，所以 wheel 不带 libsctp（LGPL）。
@@ -193,7 +194,7 @@ python probes/sanic_comparison/run.py --python-only --out build/compare-<新目�
 - `native/`：Seastar 服务（`server.cc`）、HTTP/1.1 解析与写出（`http1.cc`）、multipart 解析（`multipart.hh`）、Python 绑定（`bridge.cc`，构建为 `oldman_server.native._native`）。
 - `src/oldman_server/ext/`：Sanic Extensions（源自 sanic-ext 25.12.0，许可见 `LICENSE.sanic-ext`）。
 - `src/oldman_server/testing/`：测试客户端（源自 sanic-testing 24.6.0，许可见 `LICENSE.sanic-testing`）。
-- `upstream/`：所依据的上游版本与校验；原版 Sanic 的源码供性能对照使用。
+- `upstream/`：所依据的上游版本（归档地址、提交）与各文件的 SHA-256。与原版 Sanic 的性能对照要先把 `upstream/sanic.json` 的归档解压到 `build/sanic-upstream/`（得到 `sanic-<提交>/`），对照前逐个文件核对。
 - `tests/`：本项目测试，其中 `tests/framework`、`tests/ext` 源自 Sanic 与 sanic-ext 的测试集；`scripts/`：构建、测试与测量工具；`probes/`：对照与诊断用的服务端和驱动；`python/seastar_http.py`：不经框架的轻量 App（研究用）。
 
 ## 许可证

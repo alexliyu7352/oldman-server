@@ -2,7 +2,7 @@
 # Tests built wheels the way users get them: each installed into a fresh
 # virtual environment of its CPython, first alone (it must import with only its
 # declared requirements), then with the test dependencies for the
-# framework suites served by the native host, and the native host's runs
+# framework suites served by the asyncio server and by the native host, and the native host's runs
 # (workers, unix sockets, reactor backends). Runs from the source tree, whose
 # src/ is not on the path, so the installed package is what is tested.
 #
@@ -33,9 +33,11 @@ for wheel in "$@"; do
   # Not the tree's package: the installed one.
   "$venv/bin/python" -I -c "import oldman_server.native._native as n; assert '/site-packages/' in n.__file__, n.__file__" \
     || failed+=("$tag: import")
+  "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \
+    || failed+=("$tag: framework suites (asyncio server)")
   OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 \
     "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \
-    || failed+=("$tag: framework suites")
+    || failed+=("$tag: framework suites (native host)")
   "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/test_sanic_native_run.py tests/test_sanic_native_workers.py \
     || failed+=("$tag: native host runs")
 done

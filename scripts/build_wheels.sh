@@ -145,6 +145,8 @@ for tag in "${pythons[@]}"; do
   cmake --build "$work/build/extension-$tag" --target _native -j "$jobs"
   rm -f "$work/dist"/*.whl
   uv build --wheel --python "$python" --out-dir "$work/dist" "$root"
-  auditwheel repair --plat "manylinux_2_28_$arch" -w "$out" "$work/dist"/*.whl
+  # Only the tested platform: auditwheel would otherwise add the earlier glibc
+  # tags the binaries happen to satisfy (2.27, 2.26), where nothing is tested.
+  auditwheel repair --plat "manylinux_2_28_$arch" --only-plat -w "$out" "$work/dist"/*.whl
 done
 ls -l "$out"
