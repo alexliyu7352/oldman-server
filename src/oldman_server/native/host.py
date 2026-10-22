@@ -195,6 +195,10 @@ class _NativeTunnel:
 
     def __init__(self, exchange, request, loop):
         self.exchange, self.request, self.loop = exchange, request, loop
+        # Its own Engine, not the module's current one: a late call (the
+        # WebSocket's close timeout aborts 10 s later) must not reach the
+        # server of a later serve in this process, whose request ids repeat.
+        self.engine = _engine
         native = exchange.native
         self.request_id, self.shard = native.request_id, native.shard
         self.app = request.app
@@ -230,31 +234,32 @@ class _NativeTunnel:
         # (up to WEBSOCKET_MAX_SIZE) may be larger.
         step = self.exchange.max_body
         for start in range(0, len(data), step):
-            await _engine.stream_send(self.request_id, self.shard, STREAM_DATA,
+            await self.engine.stream_send(self.request_id, self.shard, STREAM_DATA,
                                       bytes(data[start:start + step]))
 
     def write(self, data):
         if not self.closing:
             step = self.exchange.max_body
             for start in range(0, len(data), step):
-                _engine.stream_write(self.request_id, self.shard, bytes(data[start:start + step]))
+                self.engine.stream_write(self.request_id, self.shard, bytes(data[start:start + step]))
 
     def end(self):
         """transport.close(): written data goes out, then the connection closes."""
         if not self.closing:
             self.closing = True
             self.exchange.streaming, self.exchange.stage = "ended", Stage.IDLE
-            _engine.stream_end(self.request_id, self.shard)
+            self.engine.stream_end(self.request_id, self.shard)
 
     def abort(self):
         self.closing = True
         self.exchange.streaming, self.exchange.stage = "ended", Stage.IDLE
-        _engine.stream_abort(self.request_id, self.shard)
+        if not self.engine.closed:  # a closed one stopped the connection already
+            self.engine.stream_abort(self.request_id, self.shard)
 
     def pause(self, paused):
         if paused != self.paused and not self.closing:
             self.paused = paused
-            _engine.pause_tunnel(self.request_id, self.shard, paused)
+            self.engine.pause_tunnel(self.request_id, self.shard, paused)
 
     # From the Engine: the peer's bytes, its EOF, the end of the connection.
     def data_received(self, data):

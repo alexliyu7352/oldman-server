@@ -150,3 +150,30 @@ def test_websocket_backpressure_pauses_reading_the_peer(monkeypatch):
     results = run("ws_pause", flood)
     assert results[0] == str(200 * 65536)
     assert True in pauses and pauses[-1] is False
+
+
+def test_a_late_tunnel_call_reaches_only_its_own_engine():
+    # The WebSocket's close timeout aborts the transport 10 s later; by then
+    # the process may serve again with another Engine whose request ids
+    # repeat. The tunnel keeps acting on the Engine it was opened on.
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from oldman_server.native import host
+
+    first, second = Mock(closed=False), Mock(closed=False)
+    exchange = SimpleNamespace(native=SimpleNamespace(request_id=7, shard=0), max_body=64,
+                               streaming="open", stage=None)
+    request = SimpleNamespace(app=SimpleNamespace(config=SimpleNamespace(ACCESS_LOG=False)),
+                              conn_info=None)
+    previous, host._engine = host._engine, first
+    try:
+        tunnel = host._NativeTunnel(exchange, request, None)
+        host._engine = second
+        tunnel.abort()
+    finally:
+        host._engine = previous
+    first.stream_abort.assert_called_once_with(7, 0)
+    second.stream_abort.assert_not_called()
+    first.closed = True
+    tunnel.abort()  # a closed Engine is left alone
+    first.stream_abort.assert_called_once()
