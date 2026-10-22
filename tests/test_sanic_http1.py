@@ -762,9 +762,12 @@ def reset(writer):
 def on_backend(backend):
     """For a test of each reactor backend (one per function: a process runs
     one Seastar, with one backend)."""
+    from oldman_server.native import engine
     from test_sanic_native_run import io_uring_available
     if backend == "io_uring" and not io_uring_available():
         pytest.skip("io_uring_setup is not permitted here")
+    if engine._persistent is not None and engine._persistent[3] != backend:
+        pytest.skip(f"this process runs Seastar with {engine._persistent[3]}")
     return backend
 
 

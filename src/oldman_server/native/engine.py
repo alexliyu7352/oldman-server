@@ -910,6 +910,13 @@ class Engine:
                 self._application_terminal.discard(request_id)
                 self._decision_stats["python_application_finished"] += 1
 
+    def _lose_application(self, request_id):
+        entry = self._application_tasks.get(request_id)
+        if entry is not None:
+            self._application_lost.add(request_id)
+            entry[0].cancel()
+            self._reap_unstarted_application(request_id)
+
     def _reap_unstarted_application(self, request_id):
         """Finish a registered Task whose coroutine body never ran (its finally won't)."""
         entry = self._application_tasks.get(request_id)
@@ -994,11 +1001,12 @@ class Engine:
                     state.connection_lost()
                 elif size in connections:
                     connections[size] = False
-                entry = self._application_tasks.get(parent)
-                if entry is not None:
-                    self._application_lost.add(parent)
-                    entry[0].cancel()
-                    self._reap_unstarted_application(parent)
+                if parent in self._application_tasks:
+                    # Cancelled after the handler's first step, as Sanic's
+                    # connection_lost lands on a running handler: a request that
+                    # arrived with the peer's FIN (both in one drain) is still
+                    # started, and answered with RequestCancelled.
+                    self._loop.call_soon(self._lose_application, parent)
                 return
             if route == "application_timeout":
                 entry = self._application_tasks.get(parent)
