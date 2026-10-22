@@ -125,7 +125,6 @@ class Http(Stream, metaclass=TouchUpMeta):
 
                 self.stage = Stage.HANDLER
                 self.perft0 = perf_counter()
-                self.request.conn_info = self.protocol.conn_info
                 await self.protocol.request_handler(self.request)
 
                 # Handler finished, response should've been sent
@@ -264,6 +263,9 @@ class Http(Stream, metaclass=TouchUpMeta):
             transport=self.protocol.transport,
             app=self.protocol.app,
         )
+        # Before http.lifecycle.request: its handlers may read the client
+        # address, which TRUSTED_PROXIES decides from the connection.
+        request.conn_info = self.protocol.conn_info
         self.protocol.request_class._current.set(request)
         await self.dispatch(
             "http.lifecycle.request",

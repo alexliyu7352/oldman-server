@@ -124,3 +124,20 @@ def test_unix_socket_connections(app, trusted, expected):
         if os.path.exists(SOCKPATH):
             os.unlink(SOCKPATH)
     assert results[0]["remote_addr"] == expected
+
+
+def test_the_request_signal_sees_the_forwarded_client(app):
+    # http.lifecycle.request runs as soon as the request exists: the trust
+    # decision needs the connection then (it was read as None, and the empty
+    # result kept for the whole request).
+    proxied_app(app, "127.0.0.1")
+    seen = []
+
+    @app.signal("http.lifecycle.request")
+    async def early(request):
+        seen.append([request.client_ip, request.scheme])
+
+    _, response = app.test_client.get("/", headers=FORWARDED)
+    assert seen == [["203.0.113.9", "https"]]
+    assert response.json == {"remote_addr": "203.0.113.9",
+                             "client_ip": "203.0.113.9", "scheme": "https"}
