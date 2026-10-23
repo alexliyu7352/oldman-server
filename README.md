@@ -65,7 +65,7 @@ Sanic 的设置照常生效：
 |---|---|
 | `NATIVE_SHARDS` / `NATIVE_SHARD_CPUS` | shard 数量（默认最多 2，取进程 CPU 集合中最后几个）或指定 CPU（只用于单进程） |
 | `NATIVE_WORKER_CPUS` | 多 worker 时每个 worker 的 CPU 组，如 `"0,1,2;3,4,5"`（每组第一个给 Python，其余给 shard）；默认由主进程按 1 + `NATIVE_SHARDS` 个 CPU 一组依次切分 |
-| `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出回 503） |
+| `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出时由原生层直接回 503，不经错误处理器：这时 Python 已经满载） |
 | `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB） |
 | `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
 | `NATIVE_REACTOR_BACKEND` | Seastar 的 reactor 后端：`epoll`（默认）、`linux-aio`、`io_uring`；空字符串由 Seastar 选第一个可用的（io_uring、linux-aio、epoll 依次）。shard 吃满时 linux-aio 比 epoll 略快（多 worker 对照中 small/body 约 +1–2%，1024 连接的 sleep 约 +8%），但每个 shard 能挂起的连接数受 aio 配额限制（约 2 万，系统 `fs.aio-max-nr` 紧张时更少），超出时进程会中止；io_uring 在 Linux 5.15 上比 epoll 慢约 7% |

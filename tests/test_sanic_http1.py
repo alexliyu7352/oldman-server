@@ -1167,3 +1167,56 @@ def test_a_streamed_response_never_goes_past_its_content_length():
                                 errors, app_factory=length_app)
     assert (over, at_once) == (b"12345", b"12345")
     assert raised == b"Response was bigger than content-length"
+
+
+def blocking_app(name):
+    import time
+    app = OldmanServer(name, configure_logging=False)
+    app.config.ACCESS_LOG = False
+
+    @app.get("/x")
+    async def x(request):
+        return text("ok")
+
+    @app.get("/block")
+    async def block(request):
+        time.sleep(1)  # blocks the event loop: Python takes no events meanwhile
+        return text("blocked")
+    return app
+
+
+def test_events_of_admitted_requests_do_not_fill_the_queue():
+    # The queue to Python counted every event towards max_requests, those of
+    # requests Python already had included (body data, connection closes): a
+    # new request was refused with 500 while 2 of 4 requests were in flight.
+    import socket
+    import time
+
+    def blocking_steps(port):
+        def get(sock, target):
+            sock.sendall(f"GET {target} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += sock.recv(4096)
+            return int(data.split(b" ", 2)[1])
+
+        socks = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(8)]
+        assert [get(sock, "/x") for sock in socks] == [200] * 8
+        blocker = socket.create_connection(("127.0.0.1", port), timeout=5)
+        blocker.sendall(b"GET /block HTTP/1.1\r\nHost: x\r\n\r\n")
+        time.sleep(0.3)  # the event loop is blocked now
+        for sock in socks:
+            sock.close()  # eight connection-closed events for Python
+        time.sleep(0.2)
+        late = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            return get(late, "/x")
+        finally:
+            late.close()
+            blocker.close()
+
+    async def scenario(reader, writer):
+        _, port = writer.get_extra_info("peername")
+        return await asyncio.to_thread(blocking_steps, port)
+
+    assert run("http1_admitted_events", scenario, app_factory=blocking_app, max_requests=4) == [200]

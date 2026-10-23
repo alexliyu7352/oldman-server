@@ -96,6 +96,9 @@ struct RequestEvent {
     uint64_t connection = 0;
     unsigned sequence = 0;
     bool unix_socket = false;  // client is empty and server the socket path
+    // Of a request Python already received (Shared::publish): not counted
+    // towards the queue's max_requests.
+    bool admitted = false;
 };
 // Kinds of framework-host decisions: a complete response, or a streamed one
 // (start with status/headers/first data, then data, end or abort).

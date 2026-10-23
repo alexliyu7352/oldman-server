@@ -118,6 +118,10 @@ struct Lease {
     Lease(Counts& c, size_t b) : counts(c), bytes(b) {}
     ~Lease() { --counts.active_requests; counts.reserved_bytes -= bytes; }
 };
+// The queue to Python holds max_requests new requests (Shared::publish).
+struct QueueFull : std::runtime_error {
+    QueueFull() : std::runtime_error("decision queue full") {}
+};
 struct Shared {
     ServerConfig config;
     unsigned shard_count;
@@ -163,23 +167,41 @@ struct Shared {
     // admitted: an event of a request Python already received (body data, write
     // acknowledgements, its deadline, a connection's close). Its memory is
     // bounded by that request's limits, so it does not take a queue slot.
+    // New requests in `events`: the queue's limit counts these only, not the
+    // events of requests Python already has (body data, acknowledgements,
+    // closes), which their own limits bound.
+    size_t queued_requests = 0;  // under mutex
     void publish(RequestEvent event, bool admitted = false) {
         {
             std::lock_guard lock(mutex);
-            if (!admitted && events.size() >= config.max_requests)
-                throw std::runtime_error("decision queue full");
+            if (!admitted && queued_requests >= config.max_requests) throw QueueFull{};
+            event.admitted = admitted;
+            if (!admitted) ++queued_requests;
             events.emplace(event.id, std::move(event));
         }
         notify();
     }
+    // Under mutex: an event leaves `events`.
+    void unqueue(const RequestEvent& event) {
+        if (!event.admitted) --queued_requests;
+    }
     void erase(uint64_t id) {
         std::lock_guard lock(mutex);
-        if (!events.erase(id)) pending_application_nodes.erase(id);
+        if (auto it = events.find(id); it != events.end()) {
+            unqueue(it->second);
+            events.erase(it);
+        } else {
+            pending_application_nodes.erase(id);
+        }
     }
     // Removes a request event Python has not drained yet; false once drained.
     bool withdraw(uint64_t id) {
         std::lock_guard lock(mutex);
-        return events.erase(id) > 0;
+        auto it = events.find(id);
+        if (it == events.end()) return false;
+        unqueue(it->second);
+        events.erase(it);
+        return true;
     }
 };
 struct Decision {
@@ -1125,6 +1147,11 @@ class Service {
                 peer_left(connection, connection_key);
             }
             answer = co_await std::move(deciding);
+        } catch (const QueueFull&) {
+            // Overloaded: Python has max_requests new requests to take first.
+            ++counts.rejected;
+            reject(error_status ? error_status : 503);
+            co_return;
         } catch (...) {
             ++counts.errors;
             reject(error_status ? error_status : closing ? 503 : 500);
@@ -1466,7 +1493,7 @@ class Service {
         uint64_t id = preassigned_id ? preassigned_id : (++next_id << 16) | ss::this_shard_id();
         if (published_id) *published_id = id;
         auto waiter = std::make_unique<Waiter>();
-        auto future = waiter->promise.get_future();
+        auto& promise = waiter->promise;
         waiters.emplace(id, std::move(waiter));
         ++counts.pending_decisions; ++counts.decisions;
         auto begin = clock_ns();
@@ -1488,6 +1515,9 @@ class Service {
             }
             if (copied) { event.body = *copied; counts.body_bytes_to_python += copied->size(); }
             shared.publish(std::move(event));
+            // Only now: a promise destroyed with its future attached (the
+            // queue was full) would log "Exceptional future ignored".
+            auto future = promise.get_future();
             const auto deadline = ss::lowres_clock::now() +
                 std::chrono::milliseconds(shared.config.decision_timeout_ms);
             if (!notify_timeout) {
@@ -2091,6 +2121,7 @@ std::vector<RequestEvent> NetworkServer::drain(size_t count) {
     result.reserve(std::min(count, p->shared.events.size()));
     while (!p->shared.events.empty() && result.size() < count) {
         auto it = p->shared.events.begin();
+        p->shared.unqueue(it->second);
         const bool application = it->second.route == "application";
         result.push_back(std::move(it->second));
         if (application) {
