@@ -1,13 +1,11 @@
-"""Turns at accepting for worker processes that share one listening socket (a
-unix socket, or one passed in).
+"""Turns at accepting for worker processes that share one listening socket
+(the main process's TCP or unix socket, or one passed in).
 
 Every worker's shard 0 accepts on the same socket. Left alone, the worker whose
 shard is busy (polling rather than sleeping) wins nearly every new connection.
 So the main process gives the workers a table of open-connection counts in
 shared memory, and a worker's shard 0 accepts only while no other worker has
-fewer (native/server.cc, accept_application). A TCP address is not shared:
-each worker listens there with its own SO_REUSEPORT socket and the kernel
-spreads the connections.
+fewer (native/server.cc, accept_shared).
 
 Plain Python: the main process creates the table without the extension.
 """

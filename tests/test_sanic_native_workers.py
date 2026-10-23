@@ -1,4 +1,4 @@
-"""CPU groups, address reservations and accept turns for native worker processes."""
+"""CPU groups, listening sockets and accept turns for native worker processes."""
 import ctypes
 import errno
 import multiprocessing
@@ -8,7 +8,7 @@ import pytest
 
 from oldman_server.config import Config
 from oldman_server.native import accept, cpus, listen
-from oldman_server.server.socket import bind_socket, reuseport_listener
+from oldman_server.server.socket import configure_socket
 
 
 def listening(sock):
@@ -107,62 +107,35 @@ def test_a_worker_takes_its_own_address_by_number(monkeypatch):
     assert listen.worker_address(planned) == ("unix", "/run/w2.sock")
 
 
-def test_a_reserved_address_takes_listeners_and_no_connections():
-    reservation = bind_socket("127.0.0.1", 0, reserve=True)
-    listeners = []
-    try:
-        assert not listening(reservation)
-        assert reservation.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT)
-        address = reservation.getsockname()
-        listeners = [reuseport_listener(reservation) for _ in range(2)]
-        assert all(listening(listener) for listener in listeners)
-        # Taken, as by any listener: another server (Sanic's bind_socket, or
-        # another reservation) fails to bind it.
-        with pytest.raises(OSError) as error:
-            bind_socket(*address, reserve=True)
+def test_the_main_process_listens_on_a_tcp_address():
+    # The workers all accept on this socket, as in Sanic. Listening from the
+    # start, it holds the address while no worker accepts (as they start, or
+    # all restart): connections wait in its queue rather than being refused,
+    # and another server cannot bind the address then.
+    settings = {"sock": None, "unix": None, "backlog": 100, "host": "127.0.0.1", "port": 0}
+    with configure_socket(settings, shared=True) as sock:
+        assert settings["sock"] is sock and settings["host"] is None
+        assert listening(sock)
+        assert not sock.get_inheritable()  # as the shared unix socket (below)
+        other = socket.socket()
+        other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        with other, pytest.raises(OSError) as error:
+            other.bind(sock.getsockname())
         assert error.value.errno == errno.EADDRINUSE
-        accepted = 0
-        for _ in range(8):
-            with socket.create_connection(address):
-                for listener in listeners:
-                    listener.settimeout(0)
-                    try:
-                        listener.accept()[0].close()
-                        accepted += 1
-                    except BlockingIOError:
-                        pass
-        assert accepted == 8  # all on the listeners, none on the reservation
-    finally:
-        for sock in (reservation, *listeners):
-            sock.close()
+        with socket.create_connection(sock.getsockname()):
+            sock.settimeout(1)
+            sock.accept()[0].close()
 
 
-def test_only_a_reservation_is_one():
-    # configure_socket says when the socket is its reservation; a socket the
-    # application passes is served as it is, whatever its options.
-    import tempfile
-    from oldman_server.server.socket import configure_socket
-    settings = {"sock": None, "unix": None, "backlog": 100, "host": "127.0.0.1", "port": 0}
-    with configure_socket(settings, reserve=True):
-        assert settings["sock_reserved"] is True
-    settings = {"sock": None, "unix": None, "backlog": 100, "host": "127.0.0.1", "port": 0}
-    with configure_socket(settings):
-        assert settings["sock_reserved"] is False
-    with tempfile.TemporaryDirectory() as directory:
-        settings = {"sock": None, "unix": f"{directory}/a.sock", "backlog": 100,
-                    "host": None, "port": None}
-        with configure_socket(settings, reserve=True):
-            assert "sock_reserved" not in settings
 def test_a_shared_unix_socket_is_not_inherited_across_exec():
     # The workers get it from multiprocessing (spawn) or with the process
     # (fork); a program the application starts must not keep it listening,
     # or the path is never removed and clients wait on it.
     import tempfile
-    from oldman_server.server.socket import configure_socket
     with tempfile.TemporaryDirectory() as directory:
         settings = {"sock": None, "unix": f"{directory}/app.sock", "backlog": 100,
                     "host": None, "port": None}
-        sock = configure_socket(settings, reserve=True)
+        sock = configure_socket(settings, shared=True)
         with sock:
             assert settings["sock"] is sock
             assert not sock.get_inheritable()

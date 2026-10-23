@@ -12,16 +12,11 @@ from oldman_server.constants import DEFAULT_BACKLOG
 
 
 
-def bind_socket(
-    host: str, port: int, *, backlog=DEFAULT_BACKLOG, reserve=False
-) -> socket.socket:
+def bind_socket(host: str, port: int, *, backlog=DEFAULT_BACKLOG) -> socket.socket:
     """Create TCP server socket.
     :param host: IPv4, IPv6 or hostname may be specified
     :param port: TCP port number
     :param backlog: Maximum number of connections to queue
-    :param reserve: Only reserve the address for the native host, whose
-        serving processes each listen there (reuseport_listener), instead of
-        listening
     :return: socket.socket object
     """
     location = (host, port)
@@ -36,45 +31,8 @@ def bind_socket(
         sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(location)
-    if reserve:
-        # Bound without SO_REUSEPORT, so a taken address fails here as for a
-        # listener; marked afterwards, so the serving processes can bind
-        # their own listeners to it. Not listening, it gets no connections.
-        #
-        # Accepted limit: while no serving process listens yet (startup, a
-        # restart of all workers) the reservation alone holds the address,
-        # and a socket that is not listening does not keep others away from
-        # it: another socket with SO_REUSEADDR (another instance, or another
-        # user's program) can bind it then, and connections are refused
-        # rather than queued. SO_REUSEADDR is still needed here: without it
-        # the bind fails while the previous run's connections are in
-        # TIME_WAIT. Holding a listening socket instead would mean one
-        # socket shared by all workers (as for a unix socket). README notes.
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    else:
-        sock.listen(backlog)
+    sock.listen(backlog)
     sock.set_inheritable(True)
-    return sock
-
-
-def reuseport_listener(reservation: socket.socket, backlog=DEFAULT_BACKLOG):
-    """A listener of this process at a reserved address. The kernel spreads
-    the address's connections over the processes' listeners."""
-    sock = socket.socket(reservation.family, socket.SOCK_STREAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        if reservation.family == socket.AF_INET6:
-            sock.setsockopt(
-                socket.IPPROTO_IPV6,
-                socket.IPV6_V6ONLY,
-                reservation.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY),
-            )
-        sock.bind(reservation.getsockname())
-        sock.listen(backlog)
-    except BaseException:
-        sock.close()
-        raise
     return sock
 
 
@@ -176,13 +134,12 @@ def remove_unix_socket(path: Path | str | None) -> None:
 
 
 def configure_socket(
-    server_settings: dict[str, Any], *, reserve=False, mode=0o666
+    server_settings: dict[str, Any], *, shared=False, mode=0o666
 ) -> socket.SocketType | None:
-    # Create a listening socket or use the one in settings. With reserve (the
-    # native host), a TCP address is only reserved: each serving process
-    # listens there itself (reuseport_listener); a unix socket is passed to
-    # the serving processes, which all accept on it (unix sockets have no
-    # SO_REUSEPORT), instead of each binding and renaming its own over the path.
+    # Create a listening socket or use the one in settings. The serving
+    # processes all accept on a TCP socket bound here, as in Sanic; with
+    # shared (the native host) on a unix socket bound here as well, instead
+    # of each binding and renaming its own over the path.
     sock = server_settings.get("sock")
     unix = server_settings["unix"]
     backlog = server_settings["backlog"]
@@ -190,7 +147,7 @@ def configure_socket(
         unix = Path(unix).absolute()
         sock = bind_unix_socket(unix, mode=mode, backlog=backlog)
         server_settings["unix"] = unix
-        if reserve:
+        if shared:
             # Not inheritable: workers get it from multiprocessing, not exec.
             server_settings["sock"] = sock
     if sock is None:
@@ -198,14 +155,12 @@ def configure_socket(
             server_settings["host"],
             server_settings["port"],
             backlog=backlog,
-            reserve=reserve,
         )
-        sock.set_inheritable(True)
+        # With shared, not inheritable either: a program the application
+        # starts must not keep the address listening after the server exits
+        # (clients would wait on it rather than be refused).
+        sock.set_inheritable(not shared)
         server_settings["sock"] = sock
-        # Our reservation, not a socket the application passed (which may
-        # also be bound, not listening, with SO_REUSEPORT): the serving
-        # processes open their listeners at its address.
-        server_settings["sock_reserved"] = reserve
         server_settings["host"] = None
         server_settings["port"] = None
     return sock

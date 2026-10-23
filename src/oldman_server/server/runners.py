@@ -32,7 +32,6 @@ from oldman_server.server.socket import (
     bind_socket,
     bind_unix_socket,
     remove_unix_socket,
-    reuseport_listener,
     unix_socket_mode,
     worker_listener,
 )
@@ -336,7 +335,7 @@ def _native_unavailable(loop) -> str | None:
 
 def _serve_native(
     host, port, app, sock, unix, bound_unix, backlog, loop,
-    register_sys_signals, run_multiple, run_async, sock_reserved=False,
+    register_sys_signals, run_multiple, run_async,
 ):
     """HTTP/1.1 through the native (Seastar) host when NATIVE_SERVER is set.
 
@@ -359,25 +358,19 @@ def _serve_native(
         ) from error
     # The native host accepts on Sanic's socket (TCP or unix), which stays
     # open while serving and closes with the server, as asyncio's does; like
-    # asyncio's create_server, it is put in the listening state first. On an
-    # address Sanic reserved (configure_socket), this process listens with
-    # its own SO_REUSEPORT socket: the kernel spreads connections over the
-    # worker processes, whose shard 0 hands them to the other shards.
+    # asyncio's create_server, it is put in the listening state first. Its
+    # shard 0 hands the connections to the other shards.
     if sock is None:
         # create_server() without a socket: bound here as Sanic's bind_socket
         # binds (a host name resolves), then served like a socket passed in.
         sock = bind_socket(host or "127.0.0.1", port or 0, backlog=backlog)
     sockets = [sock]
     accept = None
-    if sock_reserved:
-        sock = reuseport_listener(sock, backlog)
-        sockets.append(sock)
-    elif sock is not None:
-        sock.listen(backlog)
-        if run_multiple:
-            # Worker processes share this socket: they take turns accepting,
-            # and none may shut it down for the others when it stops.
-            accept = {"listen_shared": True, **accept_turn(app.state.native_accept_counts)}
+    sock.listen(backlog)
+    if run_multiple:
+        # Worker processes share this socket: they take turns accepting,
+        # and none may shut it down for the others when it stops.
+        accept = {"listen_shared": True, **accept_turn(app.state.native_accept_counts)}
     # NATIVE_WORKER_LISTEN: this process's own address as well, so that a
     # proxy balances requests over the worker processes.
     own = worker_address(app.config)
@@ -483,7 +476,6 @@ def _serve_http_1(
     signal,
     state,
     asyncio_server_kwargs,
-    sock_reserved=False,
 ):
     connections = connections if connections is not None else set()
     # Each worker process of Sanic's worker manager (run_multiple) serves
@@ -505,7 +497,7 @@ def _serve_http_1(
                 bound_unix = unix
             return _serve_native(
                 host, port, app, sock, unix, bound_unix, backlog, loop,
-                register_sys_signals, run_multiple, run_async, sock_reserved,
+                register_sys_signals, run_multiple, run_async,
             )
     protocol_kwargs = _build_protocol_kwargs(protocol, app.config)
     server = partial(

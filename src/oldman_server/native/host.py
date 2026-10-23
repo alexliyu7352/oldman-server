@@ -1233,8 +1233,8 @@ class NativeServer:
 
 async def create_server(app, config, sockets=()):
     """The serving half of app.create_server(): a NativeServer for AsyncioServer.
-    sockets (the one config's listen_fd refers to, and the address
-    reservation it listens on) close with it."""
+    sockets (the one config's listen_fd refers to, and this process's own
+    NATIVE_WORKER_LISTEN socket) close with it."""
     try:
         return NativeServer(app, await open_engine(app, config), sockets)
     except BaseException:

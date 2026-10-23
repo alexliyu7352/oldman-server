@@ -1011,7 +1011,7 @@ class StartupMixin(metaclass=AppMeta):
                 for sock in [
                     configure_socket(
                         server_info.settings,
-                        reserve=native_server(app.config),
+                        shared=native_server(app.config),
                         mode=unix_socket_mode(app.config),
                     )
                     for app in apps
@@ -1227,7 +1227,7 @@ class StartupMixin(metaclass=AppMeta):
                 )
             sock = configure_socket(
                 kwargs,
-                reserve=native_server(primary.config),
+                shared=native_server(primary.config),
                 mode=unix_socket_mode(primary.config),
             )
             if main_loop is not None:
@@ -1262,7 +1262,7 @@ class StartupMixin(metaclass=AppMeta):
                 sock.close()
             if sock and kwargs.get("sock") is sock and sock.family == AF_UNIX:
                 # The unix socket was passed to the native host (configure_socket
-                # with reserve): bound here, so removed here.
+                # with shared): bound here, so removed here.
                 remove_unix_socket(kwargs.get("unix"))
 
             if main_loop is not None:

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
-def native_config(port, cpus, mode, listen_fd=-1):
+def native_config(port, cpus, mode, listen_fd=-1, accept=None):
     from oldman_server.native.engine import Config, ServerConfig
     # As an application would set NATIVE_REACTOR_BACKEND (calibrate.py's
     # mode:workload:OLDMAN_SERVER_NATIVE_REACTOR_BACKEND=io_uring).
@@ -29,7 +29,7 @@ def native_config(port, cpus, mode, listen_fd=-1):
         probe_headers='pid' if mode == 'candidate' else 'all',
         # Sanic's KEEP_ALIVE_TIMEOUT / REQUEST_TIMEOUT defaults, as stock enforces.
         keep_alive_timeout_ms=120000 if mode == 'candidate' else 0,
-        request_timeout_ms=60000 if mode == 'candidate' else 0))
+        request_timeout_ms=60000 if mode == 'candidate' else 0, **(accept or {})))
 
 
 def application_contract(engine, mode):
@@ -191,12 +191,14 @@ def main():
     from probes.sanic_boundary.application import make_app
     if args.mode == 'candidate':
         from oldman_server.native.host import serve
+    # Candidate worker processes: the socket they share and their accept turns.
+    shared = {}
 
     class Service:
         def __init__(self, mode, cpus, requests, byte_limit):
             self.cpus = cpus
             self.counts = dict(started=0, finished=0, responses=0, errors=0, active=0)
-            self.engine = self.host = self.server = self.listener = None
+            self.engine = self.host = self.server = None
 
         async def start(self, port, listener=None):
             if args.mode == 'app':
@@ -221,15 +223,17 @@ def main():
                     response.headers['X-Probe-Pid'] = str(os.getpid())
             if args.mode == 'candidate':
                 listen_fd = -1
+                accept = None
                 if args.workers > 1:
-                    # One SO_REUSEPORT listener per worker process, as
-                    # Sanic's workers have with NATIVE_SERVER (reuseport_listener).
-                    self.listener = socket.socket()
-                    self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-                    self.listener.bind(('127.0.0.1', port)); self.listener.listen(1024)
-                    listen_fd = self.listener.fileno()
-                config = native_config(port, self.cpus, args.mode, listen_fd)
+                    # The parent's listening socket, on which the worker
+                    # processes take turns accepting, as Sanic's workers do
+                    # with NATIVE_SERVER (oldman_server.native.accept).
+                    import ctypes
+                    from oldman_server.native.accept import SLOTS
+                    listen_fd = shared['listener'].fileno()
+                    accept = dict(listen_shared=True, accept_counts=ctypes.addressof(shared['table']),
+                                  accept_slots=SLOTS, accept_slot=shared['groups'].index(self.cpus))
+                config = native_config(port, self.cpus, args.mode, listen_fd, accept)
                 self.host = serve(app, config)
                 self.engine = await self.host.__aenter__()
                 os.sched_setaffinity(0, {self.cpus[0]})
@@ -282,8 +286,6 @@ def main():
                 for connection in list(self.server.connections):
                     connection.close()
                 await self.server.after_stop()
-            if self.listener:
-                self.listener.close()
 
     def child(worker_args, cpu, requests, byte_limit, connection, inherited):
         for pipe in inherited:
@@ -307,7 +309,14 @@ def main():
     if args.mode == 'stock':
         comparison.prefork(args, cpus)
     elif args.workers > 1:
-        comparison.prefork(args, [cpus[i:i + size] for i in range(0, len(cpus), size)])
+        import multiprocessing
+        from oldman_server.native.accept import counts
+        shared['groups'] = [cpus[i:i + size] for i in range(0, len(cpus), size)]
+        shared['listener'] = socket.socket()
+        shared['listener'].setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        shared['listener'].bind(('127.0.0.1', args.port)); shared['listener'].listen(1024)
+        shared['table'] = counts(multiprocessing.get_context('fork'))
+        comparison.prefork(args, shared['groups'])
     else:
         uvloop.run(comparison.worker(args, cpus, args.requests, args.bytes))
 

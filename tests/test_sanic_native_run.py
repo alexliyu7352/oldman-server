@@ -313,17 +313,19 @@ def check_worker_cpus(results):
 
 
 def test_workers_serve_natively_on_their_own_cpus(short_dir):
-    # The main process reserves the address; each worker listens there with
-    # its own SO_REUSEPORT socket and serves through its own native host,
-    # Python and shards on the CPU group the main process planned for it.
+    # The workers accept on the main process's socket, as in Sanic, and each
+    # serves through its own native host, Python and shards on the CPU group
+    # the main process planned for it.
     port = free_port()
     [results], listeners = run_workers(short_dir, {"PORT": str(port)})
     assert {result["worker"] for result in results} == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
     check_worker_cpus(results)
     assert {result["location"] for result in results} == {f"http://127.0.0.1:{port}"}
     assert {result["server"] for result in results} == {f"127.0.0.1:{port}"}
-    # Each worker listens with its own socket.
-    assert len(set.union(*listeners.values())) == 2
+    assert listeners.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
+    assert len(set.union(*listeners.values())) == 1
+    # Taking turns (oldman_server.native.accept), both get part of a burst.
+    assert min(Counter(result["worker"] for result in results).values()) >= 16
 
 
 def test_restarted_workers_serve_natively_again(short_dir):
@@ -352,24 +354,26 @@ def test_workers_share_a_unix_socket(short_dir):
     assert min(Counter(result["worker"] for result in results).values()) >= 16
 
 
-def test_workers_sharing_a_unix_socket_take_turns(short_dir):
+@pytest.mark.parametrize("family", ["unix", "tcp"])
+def test_workers_sharing_an_address_take_turns(short_dir, family):
     # Connections one after another, kept open: a worker accepts while no
     # other has fewer open connections. Without turns, the worker whose shard
     # is busy polling (not sleeping) takes nearly every connection.
-    path = short_dir / "app.sock"
-    [results], _ = run_workers(short_dir, {"UNIX": str(path), "HOLD": "16",
+    address = {"UNIX": str(short_dir / "app.sock")} if family == "unix" else {"PORT": str(free_port())}
+    [results], _ = run_workers(short_dir, {**address, "HOLD": "16",
                                            "OLDMAN_SERVER_NATIVE_SHARDS": "1"})
     split = Counter(result["worker"] for result in results)
     assert split.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
     assert max(split.values()) - min(split.values()) <= 2
 
 
-def test_workers_sharing_a_unix_socket_split_a_burst(short_dir):
+@pytest.mark.parametrize("family", ["unix", "tcp"])
+def test_workers_sharing_an_address_split_a_burst(short_dir, family):
     # Hundreds of connections at once: a worker counts each connection as it
     # accepts it, so the other worker's turn comes during the burst rather
     # than after the first has taken all it could.
-    path = short_dir / "app.sock"
-    [results], _ = run_workers(short_dir, {"UNIX": str(path), "BURST": "512",
+    address = {"UNIX": str(short_dir / "app.sock")} if family == "unix" else {"PORT": str(free_port())}
+    [results], _ = run_workers(short_dir, {**address, "BURST": "512",
                                            "OLDMAN_SERVER_NATIVE_SHARDS": "1"})
     split = Counter(result["worker"] for result in results)
     assert split.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
@@ -405,12 +409,28 @@ RESTART_APP = textwrap.dedent('''
         app.m.restart(all_workers=True)
         return json_response({})
 
+    @app.main_process_ready
+    async def bound(app):
+        open("bound", "w").close()
+
+    @app.before_server_start
+    async def starting(app):
+        # Workers that are slow to start: a while with none accepting.
+        await asyncio.sleep(float(os.environ.get("START_DELAY", 0)))
+
     @app.after_server_start
     async def ready(app):
         open(f"ready-{os.getpid()}", "w").close()
 
+    @app.after_server_stop
+    async def stopped(app):
+        open(f"stopped-{os.getpid()}", "w").close()
+
     if __name__ == "__main__":
-        app.run(unix=os.environ["UNIX"], workers=2, motd=False)
+        if "PORT" in os.environ:
+            app.run(host="127.0.0.1", port=int(os.environ["PORT"]), workers=2, motd=False)
+        else:
+            app.run(unix=os.environ["UNIX"], workers=2, motd=False)
 ''')
 
 
@@ -468,6 +488,49 @@ def test_a_replaced_worker_does_not_disturb_its_successors_turns(short_dir):
         os.killpg(process.pid, signal.SIGTERM)
         process.communicate(timeout=30)
     assert len(split) == 2 and max(split.values()) - min(split.values()) <= 2, split
+
+
+def test_a_tcp_address_queues_connections_while_no_worker_accepts(short_dir):
+    # The main process listens from the start: a connection waits until a
+    # worker accepts it, as the workers start and as they all restart. (With a
+    # listener per worker instead, such a connection was refused.)
+    import socket
+    import time
+    port = free_port()
+    script = short_dir / "restart_app.py"
+    script.write_text(RESTART_APP)
+    process = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, cwd=short_dir,
+                               env={**os.environ, "PORT": str(port), "START_DELAY": "1"},
+                               start_new_session=True)
+
+    def wait_for(pattern, count):
+        deadline = time.monotonic() + 30
+        while len(list(short_dir.glob(pattern))) < count:
+            assert process.poll() is None and time.monotonic() < deadline
+            time.sleep(0.01)
+
+    def ask(target):
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as client:
+            client.sendall(f"GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+            received = b""
+            while chunk := client.recv(4096):
+                received += chunk
+        return json.loads(received.partition(b"\r\n\r\n")[2])
+
+    try:
+        wait_for("bound", 1)
+        assert not list(short_dir.glob("ready-*"))
+        first = ask("/who")["pid"]
+        wait_for("ready-*", 2)
+        ask("/restart")
+        wait_for("stopped-*", 2)
+        assert len(list(short_dir.glob("ready-*"))) == 2  # the successors still start
+        second = ask("/who")["pid"]
+    finally:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.communicate(timeout=30)
+    assert second != first
 
 
 @pytest.mark.parametrize("family", ["unix", "tcp"])
@@ -854,8 +917,7 @@ def test_create_server_with_a_host_name():
 
 def test_a_passed_socket_is_served_as_it_is():
     # Bound, not listening, with SO_REUSEPORT (as an application may prepare
-    # it): the host listens on this socket, as Sanic does, rather than taking
-    # it for its own address reservation.
+    # it): the host listens on this socket, as Sanic does.
     lines, _ = run('''
         import socket
         sock = socket.socket()
