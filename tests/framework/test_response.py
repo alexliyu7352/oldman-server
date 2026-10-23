@@ -750,16 +750,12 @@ def test_file_response_headers(
         and f"max-age={test_max_age}" in headers.get("cache-control")
         and "public" in headers.get("cache-control")
     )
-    assert (
-        "expires" in headers
-        and headers.get("expires")[:-6]
-        == formatdate(test_expires, usegmt=True)[:-6]
-        # [:-6] to allow at most 1 min difference
-        # It's minimal for cases like:
-        # Thu, 26 May 2022 05:36:59 GMT
-        # AND
-        # Thu, 26 May 2022 05:37:00 GMT
-    )
+    # At most 1 min difference, compared as times: cutting the seconds off
+    # the strings failed when the minute changed in between (05:36:59 and
+    # 05:37:00).
+    assert "expires" in headers and abs(
+        parsedate_to_datetime(headers.get("expires")).timestamp() - test_expires
+    ) <= 60
     assert response.status == 200
     assert "last-modified" in headers and headers.get(
         "last-modified"
