@@ -378,3 +378,46 @@ def test_malformed_chunks_are_rejected_on_either_server(client, chunk):
     )
     response = client.recv()
     assert response.startswith(b"HTTP/1.1 400"), response
+
+
+@pytest.mark.parametrize(
+    "size_line",
+    (
+        b"5;\nx",  # a bare LF inside an extension
+        b"5;a=\x01",  # a control character
+        b"5;" + b"x" * 70,  # past 64 bytes, though it arrives at once
+    ),
+)
+def test_bad_chunk_size_line(size_line, client):
+    # Both servers parse chunk size lines alike: Sanic only bounded one that
+    # had not ended yet, and took any bytes in an extension.
+    client.send(
+        b"POST /upload HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n"
+        + size_line + b"\r\nhello\r\n0\r\n\r\n"
+    )
+    headers, body = client.recv().rsplit(b"\r\n\r\n", 1)
+    assert b"400 Bad Request" in headers
+    assert b"Bad chunked encoding" in body
+
+
+def test_chunk_extension_is_read_past(client):
+    client.send(
+        b"POST /upload HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n"
+        b"5;name=value\r\nhello\r\n0\r\n\r\n"
+    )
+    assert client.recv().endswith(b'["hello"]')
+
+
+@pytest.mark.parametrize(
+    "request_bytes",
+    (
+        # RFC 9112 6.1: Transfer-Encoding in an HTTP/1.0 message is faulty framing.
+        b"POST /upload HTTP/1.0\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        # RFC 9112 3.2: more than one Host field.
+        b"GET / HTTP/1.1\r\nHost: a.example\r\nHost: b.example\r\n\r\n",
+    ),
+)
+def test_ambiguous_framing_or_host(request_bytes, client):
+    client.send(request_bytes)
+    headers, body = client.recv().rsplit(b"\r\n\r\n", 1)
+    assert b"400 Bad Request" in headers

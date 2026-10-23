@@ -137,7 +137,7 @@ Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& 
         return bad();  // Sanic answers other versions with Bad Request too
     }
 
-    bool close = false, keep_alive = false, bad_length = false;
+    bool close = false, keep_alive = false, bad_length = false, host = false;
     std::string_view expect;
     size_t pos = line_end + 2;
     while (pos < text.size()) {
@@ -166,10 +166,17 @@ Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& 
                 head.has_content_length = true;
                 head.content_length = length;
             } else {
+                // RFC 9112 6.1: an HTTP/1.0 message with Transfer-Encoding has
+                // faulty framing (an HTTP/1.0 proxy may not have understood it).
+                if (http10) return bad();
                 // Only the "chunked" coding is decoded.
                 head.chunked = iequals(value, "chunked");
                 head.has_transfer_encoding = true;
             }
+        } else if (iequals(name, "host")) {
+            // RFC 9112 3.2: which of several Host fields to route by is ambiguous.
+            if (host) return bad();
+            host = true;
         } else if (iequals(name, "connection")) {
             auto rest = value;
             while (!rest.empty()) {
@@ -222,6 +229,12 @@ Chunked ChunkedDecoder::feed(std::string_view data, size_t& pos, std::string& bo
             state_ = State::size;
             break;
         case State::size: {
+            // Sanic's 64-byte bound, whether the line arrives at once or not; no
+            // control characters in an extension (a bare LF in one could end the
+            // line for a proxy that forwards the body).
+            if (line.size() > 64) return Chunked::bad_request;
+            for (unsigned char c : line)
+                if ((c < 0x20 && c != '\t') || c == 0x7f) return Chunked::bad_request;
             const auto digits = line.substr(0, line.find(';'));
             size_t size = 0;
             const auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), size, 16);

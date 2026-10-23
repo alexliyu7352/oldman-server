@@ -7,6 +7,8 @@ if TYPE_CHECKING:
     from oldman_server.request import Request
     from oldman_server.response import BaseHTTPResponse
 
+import re
+
 from asyncio import CancelledError, sleep
 from time import perf_counter
 
@@ -37,6 +39,9 @@ ABORT_NOT_STARTED = (
 
 
 _HEX_DIGITS = b"0123456789abcdefABCDEF"
+# Control characters other than HTAB (RFC 9110 5.5), not allowed in a chunk
+# size line's extensions.
+_CONTROL = re.compile(rb"[\x00-\x08\x0a-\x1f\x7f]")
 
 
 class Http(Stream, metaclass=TouchUpMeta):
@@ -225,6 +230,7 @@ class Http(Stream, metaclass=TouchUpMeta):
 
             self.head_only = method.upper() == "HEAD"
             request_body = False
+            host = False
             headers = []
 
             for name, value in (h.split(":", 1) for h in split_headers):
@@ -237,7 +243,16 @@ class Http(Stream, metaclass=TouchUpMeta):
                         raise ValueError(
                             "Duplicate Content-Length or Transfer-Encoding"
                         )
+                    # RFC 9112 6.1: an HTTP/1.0 message with Transfer-Encoding
+                    # has faulty framing.
+                    if name == "transfer-encoding" and protocol == "HTTP/1.0":
+                        raise ValueError("Transfer-Encoding in HTTP/1.0")
                     request_body = True
+                elif name == "host":
+                    # RFC 9112 3.2: several Host fields are ambiguous.
+                    if host:
+                        raise ValueError("Duplicate Host")
+                    host = True
                 elif name == "connection":
                     self.keep_alive = value.lower() == "keep-alive"
 
@@ -536,8 +551,12 @@ class Http(Stream, metaclass=TouchUpMeta):
             # RFC 9112 7.1: the previous chunk's data ends with CRLF, and the
             # size is hex digits only (int() would also take "0x5" or " 5"),
             # as the native host parses it.
-            raw = buf[2:pos].split(b";", 1)[0]
-            if buf[:2] != b"\r\n" or not raw or raw.strip(_HEX_DIGITS):
+            line = buf[2:pos]
+            raw = line.split(b";", 1)[0]
+            # The 64-byte bound also when the line arrives at once; no control
+            # characters in an extension, as the native host parses it.
+            if (buf[:2] != b"\r\n" or not raw or raw.strip(_HEX_DIGITS)
+                    or len(line) > 64 or _CONTROL.search(line)):
                 self.keep_alive = False
                 raise BadRequest("Bad chunked encoding")
             size = int(raw, 16)
