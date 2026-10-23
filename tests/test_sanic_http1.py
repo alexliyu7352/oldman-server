@@ -298,16 +298,47 @@ def test_keep_alive_idle_and_request_deadlines():
 
     async def slow_head(reader, writer):
         writer.write(b"GET /small HTTP/1.1\r\nHost:")
-        status, headers, _ = await asyncio.wait_for(read_response(reader), 2)
-        assert status == 408 and ("Connection", "close") in headers
+        status, headers, body = await asyncio.wait_for(read_response(reader), 2)
+        # RequestTimeout through the error handler, as Sanic.
+        assert status == 408 and ("Connection", "close") in headers and b"Request Timeout" in body
         assert await reader.read() == b""
 
     async def slow_body(reader, writer):
+        # While the handler runs, Sanic times the body by RESPONSE_TIMEOUT
+        # (from the last data received), not REQUEST_TIMEOUT.
         writer.write(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc")
-        status, _, _ = await asyncio.wait_for(read_response(reader), 2)
-        assert status == 408
-    run("http1_deadlines", idle, slow_head, slow_body,
-        keep_alive_timeout_ms=200, request_timeout_ms=200)
+        status, _, body = await asyncio.wait_for(read_response(reader), 2)
+        assert status == 503 and b"Response Timeout" in body
+
+    async def progressing_body(reader, writer):
+        # A body that keeps arriving outlasts both deadlines (it took a 408
+        # once REQUEST_TIMEOUT passed since the request began).
+        writer.write(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\n")
+        for _ in range(12):
+            await asyncio.sleep(0.1)
+            writer.write(b"x")
+        return (await asyncio.wait_for(read_response(reader), 2))[0::2]
+
+    *_, progressed = run("http1_deadlines", idle, slow_head, slow_body, progressing_body,
+                         keep_alive_timeout_ms=200, request_timeout_ms=300, decision_timeout_ms=400)
+    assert progressed == (200, b"x" * 12)
+
+
+def test_sanic_timeouts_map_to_the_host():
+    # 0 meant "no deadline" to the host but "at the first check" (0.1 s) to
+    # Sanic; values past a day or infinite made the server fail to start.
+    from oldman_server.native.host import native_config
+    app = OldmanServer("timeout_mapping", configure_logging=False)
+    app.config.KEEP_ALIVE_TIMEOUT, app.config.REQUEST_TIMEOUT = 0, 0.05
+    app.config.RESPONSE_TIMEOUT, app.config.GRACEFUL_TCP_CLOSE_TIMEOUT = 0, 0
+    server = native_config(app).server
+    assert (server.keep_alive_timeout_ms, server.request_timeout_ms, server.decision_timeout_ms,
+            server.write_timeout_ms) == (100, 100, 100, 100)
+    app.config.KEEP_ALIVE_TIMEOUT, app.config.REQUEST_TIMEOUT = float("inf"), 200_000
+    app.config.RESPONSE_TIMEOUT = float("inf")
+    server = native_config(app).server
+    assert (server.keep_alive_timeout_ms, server.request_timeout_ms, server.decision_timeout_ms,
+            server.write_timeout_ms) == (0, 86_400_000, 86_400_000, 0)
 
 
 def test_keep_alive_disabled_closes_after_each_response():

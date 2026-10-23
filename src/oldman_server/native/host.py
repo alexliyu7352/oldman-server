@@ -17,7 +17,7 @@ from oldman_server.application.state import ApplicationServerInfo
 from oldman_server import compat as _compat
 from oldman_server.compat import Header
 from oldman_server.exceptions import (BadRequest, ExpectationFailed, PayloadTooLarge, RequestCancelled,
-                              OldmanServerException, ServerError, ServiceUnavailable)
+                              OldmanServerException, RequestTimeout, ServerError, ServiceUnavailable)
 from oldman_server.helpers import has_message_body
 from oldman_server.http import http1 as _http1
 from oldman_server.http.constants import Stage
@@ -67,7 +67,17 @@ _ENCODED_HEADERS = {}
 
 # Exceptions Sanic's Http raises for what the native host rejects while reading
 # a request, by status; the message is the host's (the same text as Sanic's).
-_PROTOCOL_ERRORS = {400: BadRequest, 413: PayloadTooLarge, 417: ExpectationFailed}
+_PROTOCOL_ERRORS = {400: BadRequest, 408: RequestTimeout, 413: PayloadTooLarge, 417: ExpectationFailed}
+
+
+def _timeout_ms(seconds):
+    """A Sanic timeout in the host's milliseconds, 0 meaning none. Sanic checks
+    its timeouts at least 0.1 s apart, so a shorter one (0 included) acts as
+    0.1 s; one past a day is cut to a day; infinity is none."""
+    seconds = float(seconds)
+    if seconds == float("inf"):
+        return 0
+    return min(86_400_000, max(100, int(seconds * 1000)))
 
 
 def _protocol_error(status, message):
@@ -1047,7 +1057,7 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
         # Sanic pauses reading at REQUEST_BUFFER_SIZE.
         body_window_bytes=max(1, min(int(config.REQUEST_BUFFER_SIZE), 1 << 30)),
         max_response_bytes=int(config.get("NATIVE_MAX_RESPONSE_SIZE") or 128 * 1024 * 1024),
-        decision_timeout_ms=min(86_400_000, max(1, int(float(config.RESPONSE_TIMEOUT) * 1000))),
+        decision_timeout_ms=_timeout_ms(config.RESPONSE_TIMEOUT) or 86_400_000,
         # Sanic writes no Date header.
         generate_date_header=False, coalesce_notifications=True, probe_headers="none",
         # Http.set_header_max_size (Config._configure_header_size).
@@ -1055,13 +1065,13 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
                                       int(config.REQUEST_BUFFER_SIZE) - 4096,
                                       max_body, _http1.Http.HEADER_CEILING)),
         keep_alive=bool(config.KEEP_ALIVE), framework_errors=True,
-        keep_alive_timeout_ms=int(float(config.KEEP_ALIVE_TIMEOUT) * 1000),
+        keep_alive_timeout_ms=_timeout_ms(config.KEEP_ALIVE_TIMEOUT),
         # Sanic hands a response to its transport and closes an idle connection
         # after KEEP_ALIVE_TIMEOUT, waiting GRACEFUL_TCP_CLOSE_TIMEOUT for the
         # unsent rest: a peer that stops reading is cut off after about that.
-        write_timeout_ms=min(int((float(config.KEEP_ALIVE_TIMEOUT)
-                                  + float(config.GRACEFUL_TCP_CLOSE_TIMEOUT)) * 1000), 86_400_000),
-        request_timeout_ms=int(float(config.REQUEST_TIMEOUT) * 1000))
+        write_timeout_ms=_timeout_ms(float(config.KEEP_ALIVE_TIMEOUT)
+                                     + float(config.GRACEFUL_TCP_CLOSE_TIMEOUT)),
+        request_timeout_ms=_timeout_ms(config.REQUEST_TIMEOUT))
     backend = config.get("NATIVE_REACTOR_BACKEND")
     return Config(shard_cpus=shards, server=server,
                   **({} if backend is None else {"reactor_backend": str(backend)}))

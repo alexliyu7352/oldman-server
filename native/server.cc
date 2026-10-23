@@ -202,6 +202,10 @@ struct Waiter {
     // A tunnel's reading of the peer is paused by Python (backpressure).
     bool paused = false;
     std::optional<ss::promise<>> resumed;
+    // The response deadline (decide) until it is reported: request body data
+    // arriving restarts it, as Sanic's RESPONSE_TIMEOUT counts from the last
+    // data received.
+    ss::timer<ss::lowres_clock>* response_deadline = nullptr;
 };
 // Request fields a framework handler receives, owned and independent of the
 // HTTP implementation that parsed them.
@@ -789,22 +793,31 @@ class Service {
                 done.ignore_ready_future();
                 if (!connection.shut_here) peer_left(connection, connection_key);
             });
-        // mid_request: a body is being received even if nothing of it is buffered.
-        auto read_more = [&](bool mid_request = false) -> ss::future<bool> {
-            const bool idle = !mid_request && buffer.size() == consumed;
+        // What a read waits for, and so its deadline. Sanic times each stage
+        // from the last data received: KEEP_ALIVE_TIMEOUT between requests;
+        // REQUEST_TIMEOUT while a head arrives (here from its first byte, which
+        // a peer sending a byte at a time cannot extend); RESPONSE_TIMEOUT
+        // while the handler runs, so a body arriving then has no deadline of
+        // its own (it restarts the response deadline); after the response, the
+        // rest of the body as KEEP_ALIVE_TIMEOUT.
+        enum class Reading { next, request, body, rest };
+        auto read_more = [&](Reading reading = Reading::next) -> ss::future<bool> {
+            const bool idle = reading == Reading::rest ||
+                              (reading == Reading::next && buffer.size() == consumed);
             if (idle && draining) co_return false;  // Sanic's close_if_idle
             waiting = idle ? Wait::idle : Wait::request;
-            const auto timeout = idle ? config.keep_alive_timeout_ms : config.request_timeout_ms;
+            const auto timeout = reading == Reading::body ? 0
+                                 : idle ? config.keep_alive_timeout_ms : config.request_timeout_ms;
             if (timeout) {
                 deadline.arm(idle ? ss::lowres_clock::now() + std::chrono::milliseconds(timeout)
                                   : request_started + std::chrono::milliseconds(timeout));
             }
-            connection.idle = idle;
+            connection.idle = idle && reading == Reading::next;
             auto chunk = co_await connection.input.read();
             connection.idle = false;
             deadline.cancel();
             if (chunk.empty()) co_return false;
-            if (idle) request_started = ss::lowres_clock::now();
+            if (idle && reading == Reading::next) request_started = ss::lowres_clock::now();
             buffer.append(chunk.get(), chunk.size());
             co_return true;
         };
@@ -887,7 +900,7 @@ class Service {
                             continued = true;
                         }
                         co_await flush_output(connection, output);
-                        if (!co_await read_more(true)) break;
+                        if (!co_await read_more(Reading::request)) break;
                         state = decoder.feed(buffer, pos, body, config.max_body_bytes);
                     }
                     if (state == http1::Chunked::incomplete) break;  // peer closed or deadline
@@ -903,7 +916,7 @@ class Service {
                         // The generic framework host hands Python complete bodies only.
                         if (head.expect_continue && http11) output.append("HTTP/1.1 100 Continue\r\n\r\n");
                         co_await flush_output(connection, output);
-                        while (buffer.size() - start < length && co_await read_more(true)) {}
+                        while (buffer.size() - start < length && co_await read_more(Reading::request)) {}
                         if (buffer.size() - start < length) break;  // peer closed or deadline
                     }
                     const size_t available = std::min(length, buffer.size() - start);
@@ -990,24 +1003,21 @@ class Service {
                         }
                         bool more = false;
                         try {
-                            more = co_await read_more(true);
+                            more = co_await read_more(flow.publishing ? Reading::body : Reading::rest);
                         } catch (...) {}  // reset by the peer
                         if (!more) {
                             body_ok = false;
-                            if (flow.stopped) co_return;
-                            if (expired == Wait::request) {
-                                // A response may have started: its handler's read
-                                // ends with the timeout either way.
-                                publish_data({}, "error:408:Request Timeout");
-                                abort_request(root, 408);
-                            } else {
-                                // The peer closed or reset it mid-body: the handler
-                                // is cancelled, also once its response started.
-                                peer_left(connection, connection_key);
-                                abort_request(root, 503);
-                            }
+                            // Stopped here, or the rest timed out after the response.
+                            if (flow.stopped || !flow.publishing) co_return;
+                            // The peer closed or reset it mid-body: the handler is
+                            // cancelled, also once its response started.
+                            peer_left(connection, connection_key);
+                            abort_request(root, 503);
                             co_return;
                         }
+                        if (auto it = waiters.find(root); it != waiters.end() && it->second->response_deadline)
+                            it->second->response_deadline->rearm(
+                                ss::lowres_clock::now() + std::chrono::milliseconds(config.decision_timeout_ms));
                     }
                 };
                 // Seastar coroutines run eagerly: respond_application publishes the
@@ -1035,8 +1045,14 @@ class Service {
                 }
                 keep = !close && !connection.peer_gone;
             }
-            if (expired == Wait::request) {
-                // Sanic answers a request that did not arrive in time with 408.
+            if (expired == Wait::request && config.framework_errors) {
+                // Sanic answers a request that did not arrive in time with
+                // RequestTimeout through its error handler.
+                ApplicationInput input{{}, "1.1", {}, client, server, connection_key, ++sequence, unix_socket};
+                bool close = true;
+                co_await respond_application(connection, "NONE", std::move(input), {}, false, true, close,
+                                             output, 0, "error:408:Request Timeout", 408);
+            } else if (expired == Wait::request) {
                 http1::append_error(output, 408, true, date(), probe_lines);
             }
             co_await flush_output(connection, output);
@@ -1480,6 +1496,7 @@ class Service {
                         abort_request(id, 504);
                         return;
                     }
+                    if (auto it = waiters.find(id); it != waiters.end()) it->second->response_deadline = nullptr;
                     ++counts.decision_timeouts;
                     if (shared.withdraw(id)) {
                         abort_request(id, 504);  // Python never received it
@@ -1493,6 +1510,11 @@ class Service {
                     timer.arm(ss::lowres_clock::now() + std::chrono::seconds(2));
                 });
                 timer.arm(deadline);
+                // Until this returns: a streamed response keeps its waiter, not the timer.
+                waiters.at(id)->response_deadline = &timer;
+                auto forget = ss::defer([this, id]() noexcept {
+                    if (auto it = waiters.find(id); it != waiters.end()) it->second->response_deadline = nullptr;
+                });
                 result = co_await std::move(future);
                 result->timed_out = reported;
             }
