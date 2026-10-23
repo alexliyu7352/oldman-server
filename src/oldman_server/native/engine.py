@@ -316,6 +316,16 @@ class _Inbound:
 _OVER_LIMIT = object()
 
 
+def _connection_lost(state):
+    """state.connection_lost(); its exception is logged, not raised: the
+    other events (connections) must still be handled."""
+    try:
+        state.connection_lost()
+    except Exception:
+        logging.getLogger("oldman_server.error").exception(
+            "connection_lost of a native connection failed")
+
+
 class BodyError(Exception):
     """The request body cannot be read: the host rejected it (status, message)."""
 
@@ -492,8 +502,9 @@ class Engine:
         self._application_bytes_headers = application_bytes_headers
         self._application_tasks = {}
         self._application_returns = (
-            _native.ApplicationResponseBatch(config.server.max_response_bytes,
-                                                    bytes_headers=application_bytes_headers)
+            _native.ApplicationResponseBatch(
+                config.server.max_response_bytes, bytes_headers=application_bytes_headers,
+                no_body_statuses=config.server.application_dispatch_all)
             if application_native_results else [])
         self._application_flush_scheduled = False
         self._application_terminal = set()
@@ -1036,7 +1047,7 @@ class Engine:
                 connections = self.application_connections
                 state = connections.get(size)
                 if state:
-                    state.connection_lost()
+                    _connection_lost(state)
                 elif size in connections:
                     connections[size] = False
                 if parent in self._application_tasks:
@@ -1339,7 +1350,7 @@ class Engine:
         """The server stopped: every connection is gone."""
         for state in tuple(self.application_connections.values()):
             if state:  # None or False: no state was created for it
-                state.connection_lost()
+                _connection_lost(state)
         self.application_connections.clear()
 
     @property

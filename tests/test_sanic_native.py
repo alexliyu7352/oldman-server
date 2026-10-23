@@ -124,8 +124,10 @@ def test_native_sanic_batch_owns_final_responses_and_isolates_invalid_siblings()
             final = raw(f"final-{value}".encode(), status=201,
                         headers={"X-Value": str(value), "X-Latin": "café"})
             if value == 3:
-                # Rejected by the shared native validator, after Sanic finishes.
-                final.headers["Connection"] = "close"
+                # Rejected by the shared native validator, after Sanic finishes
+                # (a control character; a Connection field is framed by the
+                # host on this path too, as on the checked one).
+                final.headers["X-Bad"] = "a\x01b"
             retained.append(final)
             return final
         cfg = config(application_dispatch_all=True, decision_timeout_ms=3000)

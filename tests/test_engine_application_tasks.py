@@ -163,3 +163,20 @@ def test_a_request_answered_at_close_leaves_no_body_buffer():
         engine._flush_application()
         assert runtime.responses == [(1 << 16, 503)]
     run(scenario)
+
+
+def test_a_failing_connection_lost_at_close_still_releases_the_others():
+    class Failing:
+        def __init__(self, calls):
+            self.calls = calls
+
+        def connection_lost(self):
+            self.calls.append(self)
+            raise RuntimeError("connection_lost failed")
+
+    async def scenario(engine, runtime, started):
+        calls = []
+        engine.application_connections.update({1: Failing(calls), 2: Failing(calls), 3: None})
+        engine._release_connections()
+        assert len(calls) == 2 and engine.application_connections == {}
+    run(scenario)

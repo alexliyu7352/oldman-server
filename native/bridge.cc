@@ -305,10 +305,11 @@ struct ApplicationResponseBatch {
     std::vector<probe::RequestDecision> pending;
     size_t max_response_bytes;
     bool bytes_headers;
+    bool no_body_statuses;  // 204 and 304 as the checked path takes them
     uint64_t json_encoded = 0, json_fallback = 0, queued = 0, flushed = 0;
 
-    ApplicationResponseBatch(size_t limit, bool encoded_headers)
-        : max_response_bytes(limit), bytes_headers(encoded_headers) {}
+    ApplicationResponseBatch(size_t limit, bool encoded_headers, bool bodyless_statuses)
+        : max_response_bytes(limit), bytes_headers(encoded_headers), no_body_statuses(bodyless_statuses) {}
 
     bool normalize(py::handle result, probe::RequestDecision& decision) {
         if (PyDict_Check(result.ptr())) {
@@ -350,7 +351,7 @@ struct ApplicationResponseBatch {
         if (PyTuple_CheckExact(result.ptr()) && PyTuple_GET_SIZE(result.ptr()) == 3)
             return checked_http_response_fields(PyTuple_GET_ITEM(result.ptr(), 0),
                 PyTuple_GET_ITEM(result.ptr(), 1), PyTuple_GET_ITEM(result.ptr(), 2),
-                max_response_bytes, decision, bytes_headers);
+                max_response_bytes, decision, bytes_headers, no_body_statuses);
         return false;
     }
 
@@ -444,8 +445,8 @@ PYBIND11_MODULE(_native, m) {
         return py::bytes(probe::json_codec::encode(value, max_response_bytes));
     }, py::arg("value"), py::arg("max_response_bytes") = 134217728);
     py::class_<ApplicationResponseBatch>(m, "ApplicationResponseBatch")
-        .def(py::init<size_t, bool>(), py::arg("max_response_bytes"),
-             py::kw_only(), py::arg("bytes_headers") = false)
+        .def(py::init<size_t, bool, bool>(), py::arg("max_response_bytes"),
+             py::kw_only(), py::arg("bytes_headers") = false, py::arg("no_body_statuses") = false)
         .def("append_result", &ApplicationResponseBatch::append_result,
              py::arg("id"), py::arg("shard"), py::arg("result"))
         .def("append_body_read", &ApplicationResponseBatch::append_body_read,
@@ -646,8 +647,15 @@ PYBIND11_MODULE(_native, m) {
                             auto state = py::reinterpret_borrow<py::object>(kept);
                             if (PyDict_DelItem(registry, key.ptr()) < 0) throw py::error_already_set();
                             // None or False: no state was created for it.
-                            if (state.ptr() != Py_None && state.ptr() != Py_False)
-                                state.attr("connection_lost")();
+                            if (state.ptr() != Py_None && state.ptr() != Py_False) {
+                                try {
+                                    state.attr("connection_lost")();
+                                } catch (py::error_already_set& error) {
+                                    // The events are off the native queue: the rest
+                                    // of the batch must still reach Python.
+                                    error.discard_as_unraisable("connection_lost of a native connection");
+                                }
+                            }
                         }
                     }
                     continue;
@@ -668,14 +676,17 @@ PYBIND11_MODULE(_native, m) {
                     }
                 } else {
                     py::object body = e.copied ? py::object(py::bytes(e.body)) : py::object(py::none());
-                    item = py::make_tuple(e.id, e.shard, e.method, e.route, e.body_size,
-                                          std::move(body), e.parameter, e.parent);
+                    // Latin-1 cannot fail (a probe route's parameter is a raw query value).
+                    item = py::make_tuple(e.id, e.shard, decode_latin1(e.method), decode_latin1(e.route),
+                                          e.body_size, std::move(body), decode_latin1(e.parameter), e.parent);
                 }
                 // Fresh, unpublished list: each slot receives one owned reference.
                 PyList_SET_ITEM(out.ptr(), static_cast<Py_ssize_t>(slot++), item.release().ptr());
             }
             // Event reservations expire here; retaining a Python request retains
             // only its plain request data and cannot retain native admission.
+            // Accepted risk: running out of memory (or an exception from a
+            // signal handler) while building this list loses the batch's rest.
             return out;
         }, py::arg("count"), py::arg("connections") = py::none())
         .def("resolve_request", [](probe::Runtime& r, uint64_t id, unsigned shard, int code, py::bytes body, bool retire) {
@@ -800,7 +811,13 @@ PYBIND11_MODULE(_native, m) {
             return d;
         })
         .def("fd", &probe::Runtime::fd)
-        .def("submit_policy", &probe::Runtime::submit_policy, py::call_guard<py::gil_scoped_release>())
+        // Bound class arguments are copied while the GIL is held: with
+        // call_guard the copy would read the Python-owned object without it.
+        .def("submit_policy", [](probe::Runtime& r, uint64_t id, const probe::NativePolicy& policy) {
+            auto owned = policy;
+            py::gil_scoped_release release;
+            return r.submit_policy(id, owned);
+        })
         .def("submit", [](probe::Runtime& r, uint64_t id, py::bytes payload, uint64_t delay) {
             std::string owned = payload;
             py::gil_scoped_release release;
@@ -894,8 +911,11 @@ PYBIND11_MODULE(_native, m) {
             }
             return out;
         })
-        .def("start_server", &probe::Runtime::start_server, py::arg("server"),
-             py::call_guard<py::gil_scoped_release>())
+        .def("start_server", [](probe::Runtime& r, const probe::ServerConfig& server) {
+            auto owned = server;
+            py::gil_scoped_release release;
+            return r.start_server(std::move(owned));
+        }, py::arg("server"))
         .def("drain_server", &probe::Runtime::drain_server, py::arg("generation") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("stop_server", &probe::Runtime::stop_server, py::arg("generation") = 0,

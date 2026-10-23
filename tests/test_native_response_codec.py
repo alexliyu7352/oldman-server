@@ -337,3 +337,13 @@ def test_invalid_request_identity_never_queues(request_id, shard):
     with pytest.raises((TypeError, ValueError, OverflowError)):
         batch.append_result(request_id, shard, b"ok")
     assert len(batch) == 0
+
+
+def test_the_response_batch_takes_bodyless_statuses_as_the_checked_path():
+    # The experimental batch checked 204 and 304 as statuses that must not
+    # have a framework-written body, unlike the checked path: they became 500.
+    batch = native.ApplicationResponseBatch(128, no_body_statuses=True)
+    assert batch.append_result(1, 0, (204, b"", ())) is True
+    assert batch.append_result(2, 0, (304, b"", (("ETag", '"x"'),))) is True
+    plain = native.ApplicationResponseBatch(128)
+    assert plain.append_result(3, 0, (204, b"", ())) is False  # the generic host's rule

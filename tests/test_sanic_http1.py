@@ -1277,3 +1277,61 @@ def test_a_response_goes_out_before_the_rest_of_its_body():
 
     assert run("http1_early_response", scenario, app_factory=body_app) == [
         ((200, b"early"), (200, b"early"))]
+
+
+def test_a_failing_connection_lost_does_not_lose_the_other_events(monkeypatch):
+    # The binding took a batch of events off the native queue, then built the
+    # Python side: an exception from one connection state's connection_lost
+    # dropped the rest of the batch (here the other connections' closes, so
+    # their entries stayed in the registry for good).
+    import socket
+    import time
+    from oldman_server.models import server_types
+
+    def failing(self):
+        raise RuntimeError("connection_lost failed")
+    monkeypatch.setattr(server_types._NativeConnection, "connection_lost", failing)
+
+    def app_factory(name):
+        app = blocking_app(name)
+
+        @app.get("/conn")
+        async def conn(request):
+            return text(str(request.conn_info is not None))  # creates the connection's state
+
+        @app.get("/registered")
+        async def registered(request):
+            return text(str(len(server_types.native_connections)))
+        return app
+
+    def blocking_steps(port):
+        def get(sock, target):
+            sock.sendall(f"GET {target} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            data = b""
+            while b"\r\n\r\n" not in data or not data.endswith((b"True", b"blocked")) and len(data) < 400:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            return data
+
+        socks = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(4)]
+        for sock in socks:
+            get(sock, "/conn")
+        blocker = socket.create_connection(("127.0.0.1", port), timeout=5)
+        blocker.sendall(b"GET /block HTTP/1.1\r\nHost: x\r\n\r\n")
+        time.sleep(0.3)
+        for sock in socks:
+            sock.close()  # four closes, one batch once the loop is free
+        time.sleep(1.2)
+        blocker.close()
+        time.sleep(0.2)
+
+    async def scenario(reader, writer):
+        _, port = writer.get_extra_info("peername")
+        await asyncio.to_thread(blocking_steps, port)
+        writer.write(b"GET /registered HTTP/1.1\r\nHost: x\r\n\r\n")
+        return (await asyncio.wait_for(read_response(reader), 3))[2]
+
+    # Only the asking connection is left.
+    assert run("http1_failing_connection_lost", scenario, app_factory=app_factory) == [b"1"]
