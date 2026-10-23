@@ -1258,6 +1258,7 @@ class Service {
         auto reading = read_peer();
         int64_t sent = 0;
         uint64_t unacked = 0;  // bytes Python queued and has not been told are written
+        bool overrun = false;  // data past the declared Content-Length came
         auto frame = [&](std::string_view data) {
             if (!send_body || data.empty()) return;
             if (framing == Framing::chunked) {
@@ -1265,6 +1266,13 @@ class Service {
                 output.append(data);
                 output.append("\r\n");
             } else {
+                if (framing == Framing::length && static_cast<int64_t>(data.size()) > start.content_length - sent) {
+                    // Never past the declared length (a client would read the rest
+                    // as the next response): what fits goes out, then the
+                    // connection ends. Python raises first, as Sanic does.
+                    data = data.substr(0, static_cast<size_t>(std::max<int64_t>(start.content_length - sent, 0)));
+                    overrun = true;
+                }
                 output.append(data);
             }
             sent += static_cast<int64_t>(data.size());
@@ -1365,7 +1373,7 @@ class Service {
         put(start.body);
         bool ended = false, failed = false;
         for (;;) {
-            if (!co_await flush_and_acknowledge()) {
+            if (!co_await flush_and_acknowledge() || overrun) {
                 failed = true;
                 break;
             }
@@ -1376,7 +1384,7 @@ class Service {
                 waiter.more.reset();
             }
             if (closing) { failed = true; break; }
-            while (!waiter.chunks.empty() && !ended && !failed) {
+            while (!waiter.chunks.empty() && !ended && !failed && !overrun) {
                 auto chunk = std::move(waiter.chunks.front());
                 waiter.chunks.pop_front();
                 if (chunk.kind == DecisionKind::stream_abort) { failed = true; break; }

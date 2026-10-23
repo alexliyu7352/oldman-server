@@ -334,7 +334,8 @@ class _BufferedExchange:
     # handler); request_bytes: a body still arriving's declared Content-Length
     # (-1 before its first read), or a whole body's size.
     __slots__ = ("stage", "response", "request_body", "body", "max_body", "result", "failure",
-                 "native", "streaming", "more_body", "request_max_size", "request_bytes")
+                 "native", "streaming", "more_body", "request_max_size", "request_bytes",
+                 "response_bytes_left")
 
     def __init__(self, body, max_body, native=None, more_body=False, request_max_size=float("inf")):
         self.stage = Stage.HANDLER
@@ -350,6 +351,8 @@ class _BufferedExchange:
         self.more_body = more_body
         self.request_max_size = request_max_size
         self.request_bytes = -1
+        # A streamed response's declared Content-Length less what was sent.
+        self.response_bytes_left = None
 
     def _limit(self, size):
         self.request_bytes = size
@@ -453,6 +456,8 @@ class _BufferedExchange:
             self.failure = error
             self.stage = Stage.FAILED
             raise
+        if lengths:
+            self.response_bytes_left = int(lengths[0]) - len(first)
         # Sanic's stage while a response is being sent: errors can no longer
         # produce an error response, only end the connection.
         self.streaming, self.stage = "open", Stage.RESPONSE
@@ -471,10 +476,25 @@ class _BufferedExchange:
             data = _bytes_body(data)
         if len(data) > self.max_body:
             self._fail("response body exceeds the native limit")
+        if self.response_bytes_left is not None:
+            self._count_sent(len(data), end_stream)
         if end_stream:
             self.streaming, self.stage = "ended", Stage.IDLE
         await _engine.stream_send(self.native.request_id, self.native.shard,
                                   STREAM_END if end_stream else STREAM_DATA, data)
+
+    def _count_sent(self, size, end_stream):
+        """Http.http1_response_normal: nothing past a declared Content-Length is
+        sent, nor an end before it. The stream fails then: the connection ends
+        after it (Sanic stops keep-alive once an error comes after the response
+        started)."""
+        left = self.response_bytes_left - size
+        if left < 0 or (end_stream and left):
+            self.failure = ServerError("Response was bigger than content-length" if left < 0
+                                       else "Response was smaller than content-length")
+            self.stage = Stage.FAILED
+            raise self.failure
+        self.response_bytes_left = left
 
     def abort(self):
         """End an open stream without completing it; the host closes the
@@ -612,6 +632,8 @@ class _BufferedExchange:
             return  # Sanic writes nothing for an empty read
         if self.streaming is None:
             await self._stream_start(b"")
+        if self.response_bytes_left is not None:
+            self._count_sent(length, False)
         await _engine.stream_file(self.native.request_id, self.native.shard, path, offset, length,
                                   chunk_size)
 

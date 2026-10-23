@@ -1117,3 +1117,53 @@ def test_request_max_size_beyond_128_mib():
 
     assert run("http1_beyond_128", upload, app_factory=body_app, max_body_bytes=200 << 20) == [
         (200, size)]
+
+
+def length_app(name):
+    app = OldmanServer(name, configure_logging=False)
+    app.config.ACCESS_LOG = False
+    app.ctx.errors = []
+
+    @app.get("/over")
+    async def over(request):
+        response = await request.respond(headers={"Content-Length": "5"}, content_type="text/plain")
+        await response.send(b"12345")
+        try:
+            await response.send(b"EXTRA")
+        except Exception as error:
+            app.ctx.errors.append(str(error))
+            raise
+
+    @app.get("/over-at-once")
+    async def over_at_once(request):
+        response = await request.respond(headers={"Content-Length": "5"}, content_type="text/plain")
+        await response.send(b"1234567890")
+        await response.eof()
+
+    @app.get("/errors")
+    async def errors(request):
+        return text("|".join(app.ctx.errors))
+    return app
+
+
+def test_a_streamed_response_never_goes_past_its_content_length():
+    # The host wrote whatever was sent after a declared Content-Length, under
+    # a keep-alive head: a client reading on would take the rest for the next
+    # response. Sanic raises "Response was bigger than content-length" instead
+    # of sending it; the host also holds the line itself and ends the connection.
+    def fetch(target):
+        async def scenario(reader, writer):
+            writer.write(f"GET {target} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            data = await asyncio.wait_for(reader.read(), 3)
+            head, _, body = data.partition(b"\r\n\r\n")
+            return body
+        return scenario
+
+    async def errors(reader, writer):
+        writer.write(b"GET /errors HTTP/1.1\r\nHost: x\r\n\r\n")
+        return (await read_response(reader))[2]
+
+    over, at_once, raised = run("http1_stream_length", fetch("/over"), fetch("/over-at-once"),
+                                errors, app_factory=length_app)
+    assert (over, at_once) == (b"12345", b"12345")
+    assert raised == b"Response was bigger than content-length"
