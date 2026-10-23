@@ -797,7 +797,7 @@ class Service {
         connection.consumed = &consumed;
         // Keep-alive idle and request-receive deadlines: the timer shuts the input
         // down, which ends the pending read; `expired` says which deadline it was.
-        enum class Wait { none, idle, request } expired = Wait::none, waiting = Wait::none;
+        enum class Wait { none, idle, request, response } expired = Wait::none, waiting = Wait::none;
         ss::lowres_clock::time_point request_started{};
         ss::timer<ss::lowres_clock> deadline([&] {
             expired = waiting;
@@ -820,20 +820,22 @@ class Service {
         // from the last data received: KEEP_ALIVE_TIMEOUT between requests;
         // REQUEST_TIMEOUT while a head arrives (here from its first byte, which
         // a peer sending a byte at a time cannot extend); RESPONSE_TIMEOUT
-        // while the handler runs, so a body arriving then has no deadline of
-        // its own (it restarts the response deadline); after the response, the
-        // rest of the body as KEEP_ALIVE_TIMEOUT.
+        // while the handler runs, a body arriving then included (each piece
+        // also restarts the response deadline decide keeps while Python has
+        // not answered; a streamed response has none); after the response,
+        // the rest of the body as KEEP_ALIVE_TIMEOUT.
         enum class Reading { next, request, body, rest };
         auto read_more = [&](Reading reading = Reading::next) -> ss::future<bool> {
             const bool idle = reading == Reading::rest ||
                               (reading == Reading::next && buffer.size() == consumed);
             if (idle && draining) co_return false;  // Sanic's close_if_idle
-            waiting = idle ? Wait::idle : Wait::request;
-            const auto timeout = reading == Reading::body ? 0
+            const bool body = reading == Reading::body;
+            waiting = idle ? Wait::idle : body ? Wait::response : Wait::request;
+            const auto timeout = body ? config.decision_timeout_ms
                                  : idle ? config.keep_alive_timeout_ms : config.request_timeout_ms;
             if (timeout) {
-                deadline.arm(idle ? ss::lowres_clock::now() + std::chrono::milliseconds(timeout)
-                                  : request_started + std::chrono::milliseconds(timeout));
+                deadline.arm(idle || body ? ss::lowres_clock::now() + std::chrono::milliseconds(timeout)
+                                          : request_started + std::chrono::milliseconds(timeout));
             }
             connection.idle = idle && reading == Reading::next;
             auto chunk = co_await connection.input.read();
@@ -1033,6 +1035,20 @@ class Service {
                             body_ok = false;
                             // Stopped here, or the rest timed out after the response.
                             if (flow.stopped || !flow.publishing) co_return;
+                            if (expired == Wait::response) {
+                                // Sanic's response timeout: the handler is cancelled (a
+                                // streamed response then ends, and the connection).
+                                // While Python has not answered, decide's own deadline,
+                                // restarted with the same piece, reports it.
+                                auto response = waiters.find(root);
+                                if (response == waiters.end() || !response->second->response_deadline) {
+                                    RequestEvent timeout{(++next_id << 16) | ss::this_shard_id(),
+                                                         ss::this_shard_id(), method, "application_timeout", 0};
+                                    timeout.parent = root;
+                                    shared.publish(std::move(timeout), true);
+                                }
+                                co_return;
+                            }
                             // The peer closed or reset it mid-body: the handler is
                             // cancelled, also once its response started.
                             peer_left(connection, connection_key);

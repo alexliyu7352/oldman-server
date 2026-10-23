@@ -1009,6 +1009,22 @@ def body_app(name):
             total += len(body)
         return text(str(total))
 
+    @app.post("/stream-echo", stream=True)
+    async def stream_echo(request):
+        response = await request.respond(content_type="text/plain")
+        await response.send(b"start", end_stream=False)
+        try:
+            while (body := await request.stream.read()) is not None:
+                await response.send(body, end_stream=False)
+        except asyncio.CancelledError:
+            app.ctx.echo_cancelled = True
+            raise
+        await response.send(b"end", end_stream=True)
+
+    @app.get("/echo-cancelled")
+    async def echo_cancelled(request):
+        return text(str(getattr(app.ctx, "echo_cancelled", False)))
+
     @app.post("/early", stream=True)
     async def early(request):
         return text("early")  # without reading the body
@@ -1335,3 +1351,27 @@ def test_a_failing_connection_lost_does_not_lose_the_other_events(monkeypatch):
 
     # Only the asking connection is left.
     assert run("http1_failing_connection_lost", scenario, app_factory=app_factory) == [b"1"]
+
+
+def test_a_body_that_stalls_under_a_streamed_response_times_out():
+    # Once a streamed response went out, the body read had no deadline at all:
+    # a client that stopped sending held the connection and the handler for
+    # good. As in Sanic's response stage, RESPONSE_TIMEOUT counts from the
+    # last data received: the handler is cancelled and the connection ends.
+    async def stall(reader, writer):
+        writer.write(b"POST /stream-echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc")
+        await reader.readuntil(b"\r\n\r\n")
+        try:
+            while await asyncio.wait_for(reader.read(1000), 3):
+                pass
+            ended = True
+        except TimeoutError:
+            ended = False
+        return ended
+
+    async def cancelled(reader, writer):
+        writer.write(b"GET /echo-cancelled HTTP/1.1\r\nHost: x\r\n\r\n")
+        return (await read_response(reader))[2]
+
+    assert run("http1_stalled_stream_body", stall, cancelled, app_factory=body_app,
+               decision_timeout_ms=500) == [True, b"True"]
