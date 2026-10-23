@@ -75,7 +75,7 @@ Sanic 的设置照常生效：
 
 原生主机在当前进程内服务明文 HTTP/1.1，监听 TCP 或 unix socket，包括 keep-alive、pipelining、chunked 请求体、流式请求与流式响应、背压、100-continue 和 WebSocket。
 
-- 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由 shard 上的 Seastar 文件 API 完成（走页缓存；不在缓存中的读交给 Seastar 的 syscall 线程，不阻塞 reactor），不再经 aiofiles 线程池；`file_stream()` 的文件内容由 shard 直接读出并写入连接，分块与原版相同。响应头、304/206、错误类型与原版一致。
+- 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由 shard 上的 Seastar 文件 API 完成（走页缓存；不在缓存中的读交给 Seastar 的 syscall 线程，不阻塞 reactor），不再经 aiofiles 线程池；`file_stream()` 的文件内容由 shard 直接读出并写入连接，分块与原版相同（带 Range 时的修正见「行为修正」）。响应头、304/206、错误类型与原版一致。
 - multipart 表单：`request.form` / `request.files` 的解析由 C++ 完成（`native/multipart.hh`），结果与 Sanic 的 `parse_multipart_form` 相同；遇到需要 Python 编解码或 Unicode 处理的表单（非 ASCII 的段头、非 UTF-8 字段、`filename*`、没有 name 的段、格式错误）则照旧由 Sanic 的解析器处理。
 - 监听 socket：由 Sanic 照原样绑定（unix socket 用临时名、权限默认 0o666（`UNIX_SOCKET_MODE`）、改名替换，退出时删除），原生主机在这个 socket 上接受连接（shard 0 接受后分给各 shard），它在服务期间保持打开、随服务器关闭，所以传入的 `sock`（TCP 或 AF_UNIX）、`app.serve_location` 与原版一致。TCP 地址由 Sanic 只做预留（绑定、不监听，并允许 SO_REUSEPORT），每个服务进程在同一地址上开自己的 SO_REUSEPORT 监听 socket，由内核按连接的四元组哈希把连接分给各进程（连接少时进程之间会不均）；地址已有监听者时照样在绑定时报错。不过在还没有任何服务进程监听的时候（启动时、所有 worker 一起重启时），只做预留的 socket 挡不住别的 socket：另一个设了 SO_REUSEADDR 的程序（包括本机其他用户的）这时能绑定同一端口，再启动的第二个实例也不会报错，新连接被拒绝而不是排队。（预留 socket 必须设 SO_REUSEADDR，否则上一次运行的连接还在 TIME_WAIT 时绑定会失败。）在乎这一点的部署用 unix socket，或让端口只在本机防火墙后可达。用户自己传入的 `sock` 一律照原版在它上面监听，不当作预留。unix socket 没有 SO_REUSEPORT：多 worker 时由主进程绑定一次，各 worker 都在这一个 socket 上接受连接，退出时由主进程删除；各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket。用户传入的共用 socket 同样如此。原版是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。放在 nginx 之后的部署见下一节。
 - 只服务明文 HTTP/1.1：TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见「与 Sanic 的差异」）。
@@ -158,6 +158,7 @@ server {
 - 响应中间件抛出的异常与 handler 抛出的一样交给错误处理器，送出错误处理器的响应，这个响应不再经过响应中间件；原版只记一条日志、照样送出原响应（oldman session 的 `save_session` 为此自己把响应换成 500，切换后直接抛出即可）。流式响应在 `request.respond()` 处抛出，handler 不拦截时同样交给错误处理器；拦截之后可以改回别的响应（它不再经过响应中间件）。送错误响应时（包括错误处理器自己调用 `request.respond()`）响应中间件再出错，仍只记日志、照送错误响应（与原版相同）。
 - 分块请求体按 RFC 9112 解析：块长度只能是十六进制数字（原版也接受 `0x5`、带空白的长度），块数据后必须是 CRLF（原版不检查这两个字节），块长度行（含扩展）最长 64 字节、扩展里不能有控制字符（原版只在这一行还没收完时限长，扩展内容不看），否则 400，与原生主机相同。HTTP/1.0 请求带 `Transfer-Encoding`（RFC 9112 6.1）或请求有多个 `Host`（RFC 9112 3.2）时 400；缺 `Host` 的 HTTP/1.1 请求仍照原版接受。
 - `content_type=None` 的响应不发送 `Content-Type`，不再发送字面值 `None`（oldman 代理里的默认值）。
+- `file_stream()` 带 Range 时按剩余量读取：范围大于 `chunk_size` 又不是它的整数倍时，原版最后一次多读多发，送出的字节超过 `Content-Range` 声明的范围。两种服务器相同。
 - 内置扩展类 `HealthExtension`、`HTTPExtension`、`InjectionExtension`、`OpenAPIExtension`、`TemplatingExtension` 从 `oldman_server.ext` 导出（oldman 原先从内部模块路径导入）。`TemplatingExtension` 需要 Jinja2，用到时才导入，不在 `from oldman_server.ext import *` 里。
 
 经原生主机时：
@@ -173,6 +174,7 @@ server {
 - `app.create_server()` 创建后即开始服务：`asyncio_server_kwargs`（如 `start_serving=False`）只用于 asyncio 服务器。
 - 关机时被截断的请求不另记 `Request: ... stopped. Transport is closed.` 日志（asyncio 服务器会记）。
 - 流式响应开始后不再受 `RESPONSE_TIMEOUT` 约束；原版在两次发送之间计时。
+- 带 `Expect: 100-continue` 的请求：请求体还没到时，原生主机在请求交给 Python 之前就回 `100 Continue`（请求体已随请求头到齐时不回，RFC 9110 允许）。原版在第一次读请求体时回；非 stream 路由在 handler 之前就读请求体，所以同样是立即回，只有 `stream=True` 且 handler 不读请求体就回应时，原版把 100 与响应一起发出。
 - 请求头的 `REQUEST_TIMEOUT` 从请求的第一个字节起计，原版从最后一次收到数据起计：一个字节一个字节慢慢发请求头的客户端不能无限拖住连接。
 - 请求体超过 `REQUEST_MAX_SIZE` 时（`stream=True` 的 handler 照常读完），这个请求的响应之后连接关闭；原版在 stream handler 读完请求体时保持 keep-alive。
 - 优雅停止与原版一样先停止接受新连接、关闭空闲连接，忙的连接照常服务（已经送达的 pipelined 请求也服务），在 `GRACEFUL_SHUTDOWN_TIMEOUT` 内等在途请求结束、响应写完；不同的是忙的连接在最后一个响应之后关闭（响应带 `Connection: close`），原版则让它保持 keep-alive，到宽限期结束才断开。宽限期过后取消仍在运行的 handler，最多再等 1 秒：不理会取消、继续运行的 handler 被留下（记一条警告），服务器照常停止（原版关闭事件循环时同样不等它）。
