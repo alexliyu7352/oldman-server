@@ -10,6 +10,7 @@
 #include <seastar/net/inet_address.hh>
 #include <boost/range/irange.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -17,6 +18,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <time.h>
 namespace ss=seastar;
 using Clock=std::chrono::steady_clock;
@@ -177,7 +179,16 @@ static ss::future<int> run(ss::app_template& app) {
     co_await loads.invoke_on_all(&Load::prime);
     co_await loads.invoke_on_all(&Load::phase,warmup,Clock::now()+std::chrono::milliseconds(2));
     std::cout<<"MEASURE_READY"<<std::endl;
-    std::string command; std::getline(std::cin,command);
+    {
+        // Wait for the controller's start line off the reactor: a blocking read
+        // here stalled shard 0, which then handled none of its connections'
+        // events (a server closing an idle one, say) until the line came.
+        std::string command;
+        std::atomic<bool> read{false};
+        std::thread reader([&] { std::getline(std::cin, command); read = true; });
+        while (!read) co_await ss::sleep(std::chrono::milliseconds(1));
+        reader.join();
+    }
     auto cpu0=cpu_seconds(); auto start=Clock::now()+std::chrono::milliseconds(2);
     co_await loads.invoke_on_all(&Load::phase,seconds,start);
     auto elapsed=std::chrono::duration<double>(Clock::now()-start).count(),cpu=cpu_seconds()-cpu0;
