@@ -524,6 +524,7 @@ class Service {
         // a peer that stops reading has the connection shut, failing the write.
         ss::timer<ss::lowres_clock> write_timer;
         bool idle = false;  // waiting for a request, nothing of it received
+        bool body_arriving = false;  // forward_body reads the connection
         explicit AppConnection(ss::connected_socket s)
             : socket(std::move(s)), input(socket.input()), output(socket.output()) {}
         void shut_input() {
@@ -975,6 +976,7 @@ class Service {
                     shared.publish(std::move(data), true);
                 };
                 auto forward_body = [&]() -> ss::future<> {
+                    auto arrived = ss::defer([&]() noexcept { connection.body_arriving = false; });
                     for (;;) {
                         std::string piece;
                         bool end = false;
@@ -1045,6 +1047,7 @@ class Service {
                 // Seastar coroutines run eagerly: respond_application publishes the
                 // request before its first suspension, so the data events that
                 // forward_body publishes afterwards always follow it.
+                connection.body_arriving = true;
                 auto responding = respond_application(connection, method, std::move(input),
                                                       std::move(body), head_request, http11, close,
                                                       output, root);
@@ -1182,6 +1185,16 @@ class Service {
                 waiters.erase(root);
                 retired = false;
             }
+            reject(500);
+            co_return;
+        }
+        if (streamed && answer->code == 101 && connection.body_arriving) {
+            // A tunnel while the request body still arrives (a WebSocket route
+            // with ignore_body): its reader and forward_body would both read
+            // the connection, and the body's rest would reach the tunnel.
+            ++counts.errors;
+            waiters.erase(root);
+            retired = false;
             reject(500);
             co_return;
         }
@@ -1440,7 +1453,10 @@ class Service {
             // Stop reading the peer: the input shutdown ends a pending read.
             tunnel_over = true;
             connection.shut_input();
-            if (waiter.resumed) waiter.resumed->set_value();
+            if (waiter.resumed) {
+                waiter.resumed->set_value();
+                waiter.resumed.reset();
+            }
         }
         co_await std::move(reading);
         if (tunnel) publish({}, "lost");
@@ -1836,14 +1852,21 @@ public:
         counts.body_bytes_from_python += body.size();
         if (kind == DecisionKind::tunnel_pause || kind == DecisionKind::tunnel_resume) {
             waiter.paused = kind == DecisionKind::tunnel_pause;
-            if (!waiter.paused && waiter.resumed) waiter.resumed->set_value();
+            if (!waiter.paused && waiter.resumed) {
+                waiter.resumed->set_value();
+                waiter.resumed.reset();
+            }
             return;
         }
         if (kind >= DecisionKind::stream_data) {
             // Continuation of a streamed response that respond_application writes.
             if (!waiter.replied) return;
             waiter.chunks.push_back(Decision{code, std::move(body), 0, retire, {}, kind});
-            if (waiter.more) waiter.more->set_value();
+            // Several pieces may come in one batch: wake the writer once.
+            if (waiter.more) {
+                waiter.more->set_value();
+                waiter.more.reset();
+            }
             return;
         }
         if (waiter.replied) return;
@@ -1905,8 +1928,14 @@ public:
                 waiter->promise.set_value(Decision{3, {}});
             } else {
                 // A streamed response or tunnel sees `closing`.
-                if (waiter->more) waiter->more->set_value();
-                if (waiter->resumed) waiter->resumed->set_value();
+                if (waiter->more) {
+                    waiter->more->set_value();
+                    waiter->more.reset();
+                }
+                if (waiter->resumed) {
+                    waiter->resumed->set_value();
+                    waiter->resumed.reset();
+                }
             }
         }
         co_await http.stop();

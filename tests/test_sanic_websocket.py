@@ -20,6 +20,11 @@ def make_app(name):
         async for message in ws:
             await ws.send(message)
 
+    @app.route("/echo-now", websocket=True, ignore_body=True)
+    async def echo_now(request, ws):  # upgrades without reading a body
+        async for message in ws:
+            await ws.send(message)
+
     @app.websocket("/greet")
     async def greet(request, ws):
         await ws.send(f"hello {request.args.get('name')}")  # then the handler ends
@@ -177,3 +182,19 @@ def test_a_late_tunnel_call_reaches_only_its_own_engine():
     first.closed = True
     tunnel.abort()  # a closed Engine is left alone
     first.stream_abort.assert_called_once()
+
+
+def test_no_tunnel_while_a_request_body_still_arrives():
+    # A WebSocket route that ignores the body upgraded while the body was
+    # still arriving: the tunnel's reader and the body's both read the
+    # connection, and the body's rest could reach the WebSocket.
+    async def upgrade_with_body(port):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"GET /echo-now HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+                     b"Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                     b"Sec-WebSocket-Version: 13\r\nContent-Length: 10\r\n\r\nabc")
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 3)
+        writer.close()
+        return head.split(b"\r\n", 1)[0]
+
+    assert run("ws_body_arriving", upgrade_with_body) == [b"HTTP/1.1 500 Internal Server Error"]
