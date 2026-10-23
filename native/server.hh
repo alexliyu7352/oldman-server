@@ -46,6 +46,10 @@ struct ServerConfig {
     int worker_listen_fd = -1;
     std::string worker_unix_path;
     size_t max_header_bytes = 8192;
+    // A request body still arriving while its handler runs: at most this many
+    // bytes go to Python ahead of what the handler has read (Sanic pauses
+    // reading at REQUEST_BUFFER_SIZE).
+    size_t body_window_bytes = 65536;
     bool keep_alive = true;
     unsigned keep_alive_timeout_ms = 0, request_timeout_ms = 0;
     // A write (of a response, or a piece of a large one) that the peer does
@@ -101,7 +105,7 @@ struct RequestEvent {
 // body "<offset> <length> <chunk size> <path>"; the shard reads it and reports
 // application_file when done.
 enum DecisionKind : int { complete = 0, stream_start = 1, stream_data = 2, stream_end = 3, stream_abort = 4,
-                          tunnel_pause = 5, tunnel_resume = 6, stream_file = 7 };
+                          tunnel_pause = 5, tunnel_resume = 6, stream_file = 7, body_read = 8 };
 struct RequestDecision {
     uint64_t id;
     unsigned shard;

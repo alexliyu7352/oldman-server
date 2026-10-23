@@ -52,7 +52,7 @@ Sanic 的设置照常生效：
 
 | 设置 | 原生主机的行为 |
 |---|---|
-| `REQUEST_MAX_SIZE`、`REQUEST_MAX_HEADER_SIZE`、`REQUEST_BUFFER_SIZE` | 请求体与请求头上限，与 Sanic 的计算相同 |
+| `REQUEST_MAX_SIZE`、`REQUEST_MAX_HEADER_SIZE`、`REQUEST_BUFFER_SIZE` | 请求体与请求头上限，与 Sanic 的计算相同（请求体上限在 handler 读取时检查，`stream=True` 的 handler 不受它约束）；还在到达的请求体按 `REQUEST_BUFFER_SIZE` 流控：交给 Python 而 handler 还没读走的部分不超过它，handler 读得慢，连接就收得慢 |
 | `REQUEST_TIMEOUT`、`KEEP_ALIVE`、`KEEP_ALIVE_TIMEOUT` | 由原生层执行 |
 | `RESPONSE_TIMEOUT` | 到期时取消 handler，由错误处理器回 503 “Response Timeout” |
 | `GRACEFUL_SHUTDOWN_TIMEOUT` | 停止时不再接受连接、关闭空闲连接，在这段时间内等在途请求结束、响应写完，之后取消与切断剩下的（见「与 Sanic 的差异」） |
@@ -67,7 +67,7 @@ Sanic 的设置照常生效：
 | `NATIVE_WORKER_CPUS` | 多 worker 时每个 worker 的 CPU 组，如 `"0,1,2;3,4,5"`（每组第一个给 Python，其余给 shard）；默认由主进程按 1 + `NATIVE_SHARDS` 个 CPU 一组依次切分 |
 | `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出回 503） |
 | `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB） |
-| `NATIVE_MAX_MEMORY` | 在途请求体可占用的内存 |
+| `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
 | `NATIVE_REACTOR_BACKEND` | Seastar 的 reactor 后端：`epoll`（默认）、`linux-aio`、`io_uring`；空字符串由 Seastar 选第一个可用的（io_uring、linux-aio、epoll 依次）。shard 吃满时 linux-aio 比 epoll 略快（多 worker 对照中 small/body 约 +1–2%，1024 连接的 sleep 约 +8%），但每个 shard 能挂起的连接数受 aio 配额限制（约 2 万，系统 `fs.aio-max-nr` 紧张时更少），超出时进程会中止；io_uring 在 Linux 5.15 上比 epoll 慢约 7% |
 | `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
 
@@ -173,6 +173,7 @@ server {
 - `app.create_server()` 创建后即开始服务：`asyncio_server_kwargs`（如 `start_serving=False`）只用于 asyncio 服务器。
 - 关机时被截断的请求不另记 `Request: ... stopped. Transport is closed.` 日志（asyncio 服务器会记）。
 - 流式响应开始后不再受 `RESPONSE_TIMEOUT` 约束；原版在两次发送之间计时。
+- 请求体超过 `REQUEST_MAX_SIZE` 时（`stream=True` 的 handler 照常读完），这个请求的响应之后连接关闭；原版在 stream handler 读完请求体时保持 keep-alive。
 - 优雅停止与原版一样先停止接受新连接、关闭空闲连接，忙的连接照常服务（已经送达的 pipelined 请求也服务），在 `GRACEFUL_SHUTDOWN_TIMEOUT` 内等在途请求结束、响应写完；不同的是忙的连接在最后一个响应之后关闭（响应带 `Connection: close`），原版则让它保持 keep-alive，到宽限期结束才断开。宽限期过后取消仍在运行的 handler，最多再等 1 秒：不理会取消、继续运行的 handler 被留下（记一条警告），服务器照常停止（原版关闭事件循环时同样不等它）。
 
 ## 测试与测量

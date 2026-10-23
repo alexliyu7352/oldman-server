@@ -173,6 +173,8 @@ def run(name, *scenarios, app_factory=None, backend=None, **overrides):
         cfg = config(application_dispatch_all=True, **overrides)
         if backend is not None:
             cfg = dataclasses.replace(cfg, reactor_backend=backend)
+        # As native_config maps it: the host's body limit is REQUEST_MAX_SIZE.
+        app.config.REQUEST_MAX_SIZE = cfg.server.max_body_bytes
         results = []
         async with serve()(app, cfg):
             for scenario in scenarios:
@@ -962,3 +964,125 @@ def test_the_write_deadline_follows_sanic_timeouts():
     app = OldmanServer("write_deadline_config", configure_logging=False)
     app.config.KEEP_ALIVE_TIMEOUT, app.config.GRACEFUL_TCP_CLOSE_TIMEOUT = 2, 0.5
     assert native_config(app).server.write_timeout_ms == 2500
+
+
+def body_app(name):
+    app = OldmanServer(name, configure_logging=False)
+    app.config.ACCESS_LOG = False
+
+    @app.post("/slow-reader", stream=True)
+    async def slow_reader(request):
+        total = len(await request.stream.read())
+        await asyncio.sleep(1.5)  # meanwhile the client keeps sending
+        while (body := await request.stream.read()) is not None:
+            total += len(body)
+        return text(str(total))
+
+    @app.post("/count", stream=True)
+    async def count(request):
+        total = 0
+        while (body := await request.stream.read()) is not None:
+            total += len(body)
+        return text(str(total))
+
+    @app.post("/length")
+    async def length(request):
+        return text(str(len(request.body)))
+
+    @app.get("/to-python")
+    async def to_python(request):
+        from oldman_server.native import host
+        return text(str(host._engine.server_stats()["body_bytes_to_python"]))
+    return app
+
+
+def test_a_request_body_arrives_as_fast_as_the_handler_reads_it():
+    # A stream handler reading slower than the client sends: the host read the
+    # whole body into Python's memory (64 MiB within 2.5 s, not counted in
+    # NATIVE_MAX_MEMORY). As Sanic pauses reading at REQUEST_BUFFER_SIZE, it
+    # forwards at most the window ahead of what the handler has read.
+    size = 32 << 20
+
+    async def upload(reader, writer):
+        writer.write(f"POST /slow-reader HTTP/1.1\r\nHost: x\r\nContent-Length: {size}\r\n\r\n".encode())
+        piece = b"u" * (1 << 20)
+        for _ in range(size // len(piece)):
+            writer.write(piece)
+        sending = asyncio.ensure_future(writer.drain())
+        await asyncio.sleep(1)
+        _, port = writer.get_extra_info("peername")
+        r2, w2 = await asyncio.open_connection("127.0.0.1", port)
+        w2.write(b"GET /to-python HTTP/1.1\r\nHost: x\r\n\r\n")
+        forwarded = int((await read_response(r2))[2])
+        w2.close()
+        await sending
+        status, _, body = await read_response(reader)
+        return forwarded, status, int(body)
+
+    (forwarded, status, received), = run("http1_body_window", upload, app_factory=body_app,
+                                         max_body_bytes=64 << 20, body_window_bytes=65536,
+                                         decision_timeout_ms=10000)
+    assert (status, received) == (200, size)
+    assert forwarded < 4 << 20, forwarded
+
+
+def test_a_stream_handler_reads_a_body_past_request_max_size():
+    # Sanic lifts REQUEST_MAX_SIZE for stream=True handlers; the host answered
+    # 413 to their reads. A plain handler still gets 413.
+    body = b"s" * 5000
+
+    def post(target, framing):
+        async def scenario(reader, writer):
+            if framing == "length":
+                head = f"Content-Length: {len(body)}"
+                pieces = [body[at:at + 1000] for at in range(0, len(body), 1000)]
+            else:
+                head = "Transfer-Encoding: chunked"
+                pieces = [b"3e8\r\n" + body[at:at + 1000] + b"\r\n" for at in range(0, len(body), 1000)]
+                pieces.append(b"0\r\n\r\n")
+            writer.write(f"POST {target} HTTP/1.1\r\nHost: x\r\n{head}\r\n\r\n".encode())
+            # Read while sending: a 413 comes before the body is all sent.
+            response = asyncio.ensure_future(read_response(reader))
+            try:
+                for piece in pieces:  # in pieces, as they arrive while the handler reads
+                    if response.done():
+                        break
+                    writer.write(piece)
+                    await writer.drain()
+                    await asyncio.sleep(0.01)
+            except (ConnectionError, RuntimeError):
+                pass  # the connection ended after the 413
+            status, _, answer = await response
+            return status, answer
+        return scenario
+
+    results = run("http1_stream_limit", post("/count", "length"), post("/count", "chunked"),
+                  post("/length", "length"), post("/length", "chunked"),
+                  app_factory=body_app, max_body_bytes=1024)
+    assert results[:2] == [(200, b"5000"), (200, b"5000")]
+    assert [status for status, _ in results[2:]] == [413, 413]
+
+
+def test_request_max_size_beyond_128_mib():
+    # REQUEST_MAX_SIZE above 128 MiB was cut to 128 MiB without a word: a
+    # 129 MiB body got 413 (200 from Sanic).
+    from oldman_server.native.host import native_config
+    app = OldmanServer("max_size_config", configure_logging=False)
+    app.config.REQUEST_MAX_SIZE = 200 << 20
+    assert native_config(app).server.max_body_bytes == 200 << 20
+    app.config.REQUEST_MAX_SIZE = float("inf")
+    assert native_config(app).server.max_body_bytes == 1 << 62
+    size = (129 << 20) + 1
+
+    async def upload(reader, writer):
+        writer.write(f"POST /length HTTP/1.1\r\nHost: x\r\nContent-Length: {size}\r\n\r\n".encode())
+        piece = b"b" * (1 << 20)
+        for _ in range(size >> 20):
+            writer.write(piece)
+            await writer.drain()
+        writer.write(b"b")
+        status, _, body = await read_response(reader)
+        return status, int(body)
+
+    assert run("http1_beyond_128", upload, app_factory=body_app, max_body_bytes=200 << 20) == [
+        (200, size)]

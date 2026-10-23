@@ -20,7 +20,10 @@ enum class Chunked { complete, incomplete, bad_request, too_large, chunk };
 class ChunkedDecoder {
     enum class State { size, data, data_end, trailer } state_ = State::size;
     size_t remaining_ = 0;
+    size_t declared_ = 0;
 public:
+    // The chunk sizes read so far (Sanic's Http.request_bytes), saturating.
+    size_t declared() const { return declared_; }
     // Decodes from data[pos...] into body, advancing pos past what it used.
     // With one_chunk it stops after each chunk's data (Chunked::chunk).
     Chunked feed(std::string_view data, size_t& pos, std::string& body, size_t max_body,

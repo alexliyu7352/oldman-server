@@ -92,6 +92,9 @@ class ServerConfig:
     worker_unix_path: str = ""
     max_header_bytes: int = 8192
     keep_alive: bool = True
+    # A request body still arriving goes to Python at most this far ahead of
+    # what its handler has read.
+    body_window_bytes: int = 65536
     keep_alive_timeout_ms: int = 0
     request_timeout_ms: int = 0
     # A write the peer does not take within this time closes the connection.
@@ -299,13 +302,18 @@ class _ApplicationStream:
 
 class _Inbound:
     """The rest of a request body still arriving as application_data events."""
-    __slots__ = ("chunks", "ended", "error", "waiter")
+    __slots__ = ("shard", "chunks", "ended", "error", "waiter")
 
-    def __init__(self):
+    def __init__(self, shard):
+        self.shard = shard
         self.chunks = deque()
         self.ended = False
         self.error = None
         self.waiter = None
+
+
+# In _Inbound.chunks: the body declared more than max_body_bytes from here on.
+_OVER_LIMIT = object()
 
 
 class BodyError(Exception):
@@ -321,6 +329,7 @@ class BodyError(Exception):
 STREAM_START, STREAM_DATA, STREAM_END, STREAM_ABORT = 1, 2, 3, 4
 TUNNEL_PAUSE, TUNNEL_RESUME = 5, 6
 STREAM_FILE = 7
+BODY_READ = 8  # the handler read this many bytes of a request body still arriving
 FILE_STAT, FILE_READ, FILE_OPEN = 0, 1, 2  # native file operations
 
 
@@ -401,9 +410,13 @@ class Engine:
                 raise ValueError("ports must be integers in 0..65535")
             if s.http_port and s.http_port == s.tcp_port:
                 raise ValueError("HTTP and framed TCP require separate ports")
+            # Without framework_errors the host buffers whole request bodies.
             if (min(s.max_requests, s.max_bytes, s.max_body_bytes, s.decision_timeout_ms) <= 0
-                    or s.max_body_bytes > 128 * 1024 * 1024 or s.decision_timeout_ms > 86_400_000):
+                    or s.max_body_bytes > (1 << 62 if s.framework_errors else 128 * 1024 * 1024)
+                    or s.decision_timeout_ms > 86_400_000):
                 raise ValueError("invalid server bounds")
+            if type(s.body_window_bytes) is not int or not 1 <= s.body_window_bytes <= 1 << 30:
+                raise ValueError("body_window_bytes must be within 1..1 GiB")
             if s.file_path and not os.path.isfile(s.file_path):
                 raise ValueError("file_path must identify a regular file")
             if len(s.upstream_ports) > 16 or any(type(p) is not int or not 1 <= p <= 65535 for p in s.upstream_ports):
@@ -699,19 +712,36 @@ class Engine:
                 self._application_flush_scheduled = True
                 self._loop.call_soon(self._flush_application)
 
-    async def receive(self, request_id):
-        """The next piece of a request body that is still arriving, or None at its end."""
+    async def receive(self, request_id, limited=True):
+        """The next piece of a request body that is still arriving, or None at its
+        end. limited: a chunked body past max_body_bytes raises BodyError 413
+        (otherwise, for a stream handler, it is read on)."""
         inbound = self._application_inbound.get(request_id)
         if inbound is None:
             return None
-        while not inbound.chunks and not inbound.ended and inbound.error is None:
-            inbound.waiter = self._loop.create_future()
-            try:
-                await inbound.waiter
-            finally:
-                inbound.waiter = None
+        while True:
+            while not inbound.chunks and not inbound.ended and inbound.error is None:
+                inbound.waiter = self._loop.create_future()
+                try:
+                    await inbound.waiter
+                finally:
+                    inbound.waiter = None
+            if not inbound.chunks or inbound.chunks[0] is not _OVER_LIMIT:
+                break
+            inbound.chunks.popleft()
+            if limited:
+                raise BodyError(413, "Request body exceeds the size limit")
         if inbound.chunks:
-            return inbound.chunks.popleft()
+            data = inbound.chunks.popleft()
+            # The shard sends at most body_window_bytes ahead of what was read.
+            if self._application_native_results:
+                self._application_returns.append_body_read(request_id, inbound.shard, len(data))
+                if not self._application_flush_scheduled:
+                    self._application_flush_scheduled = True
+                    self._loop.call_soon(self._flush_application)
+            else:
+                self._queue_stream_item((request_id, inbound.shard, 0, b"", (), BODY_READ, len(data)))
+            return data
         if inbound.error is not None:
             raise BodyError(*inbound.error)
         return None
@@ -947,7 +977,7 @@ class Engine:
         elif len(values) == 4:
             request_id, shard, request, marker = values
             if marker == "more":  # the body is still arriving
-                self._application_inbound[request_id] = _Inbound()
+                self._application_inbound[request_id] = _Inbound(shard)
             else:  # a protocol error, without a request
                 handler = self._application_error_handler
                 if handler is None:
@@ -971,6 +1001,8 @@ class Engine:
                         inbound.chunks.append(body)
                     if parameter == "end":
                         inbound.ended = True
+                    elif parameter == "over":
+                        inbound.chunks.append(_OVER_LIMIT)
                     elif parameter.startswith("error:"):
                         status, message = parameter[6:].split(":", 1)
                         inbound.error = (int(status), message)

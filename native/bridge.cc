@@ -397,6 +397,14 @@ struct ApplicationResponseBatch {
         return true;
     }
 
+    // The handler read `bytes` of a request body still arriving (flow control).
+    void append_body_read(py::handle id, py::handle shard, size_t bytes) {
+        probe::RequestDecision decision{response_id(id), response_shard(shard), 0, {}, true, {}};
+        decision.kind = probe::DecisionKind::body_read;
+        decision.content_length = static_cast<int64_t>(bytes);
+        pending.push_back(std::move(decision));
+        ++queued;
+    }
     void flush(probe::Runtime& runtime) {
         std::vector<probe::RequestDecision> owned;
         owned.swap(pending);
@@ -440,6 +448,8 @@ PYBIND11_MODULE(_native, m) {
              py::kw_only(), py::arg("bytes_headers") = false)
         .def("append_result", &ApplicationResponseBatch::append_result,
              py::arg("id"), py::arg("shard"), py::arg("result"))
+        .def("append_body_read", &ApplicationResponseBatch::append_body_read,
+             py::arg("id"), py::arg("shard"), py::arg("bytes"))
         .def("flush", &ApplicationResponseBatch::flush, py::arg("runtime"))
         .def("__len__", [](const ApplicationResponseBatch& batch) { return batch.pending.size(); })
         .def("stats", &ApplicationResponseBatch::stats);
@@ -526,6 +536,7 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("keep_alive", &probe::ServerConfig::keep_alive)
         .def_readwrite("keep_alive_timeout_ms", &probe::ServerConfig::keep_alive_timeout_ms)
         .def_readwrite("write_timeout_ms", &probe::ServerConfig::write_timeout_ms)
+        .def_readwrite("body_window_bytes", &probe::ServerConfig::body_window_bytes)
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
         .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors);
     m.attr("zlib_runtime_version") = ::zlibVersion();
@@ -740,10 +751,17 @@ PYBIND11_MODULE(_native, m) {
                 if (size >= 6) {
                     if (!PyLong_CheckExact(item[5].ptr())) throw py::type_error("decision kind must be int");
                     kind = py::cast<int>(item[5]);
-                    if (kind < probe::DecisionKind::complete || kind > probe::DecisionKind::stream_file)
+                    if (kind < probe::DecisionKind::complete || kind > probe::DecisionKind::body_read)
                         throw py::value_error("unknown decision kind");
                 }
-                if (kind >= probe::DecisionKind::stream_data) {
+                if (kind == probe::DecisionKind::body_read) {
+                    // The handler read this many bytes of the request body.
+                    if (size != 7 || !PyLong_CheckExact(item[6].ptr()))
+                        throw py::value_error("body_read needs the bytes read");
+                    decision.kind = kind;
+                    decision.code = 0;
+                    decision.content_length = py::cast<int64_t>(item[6]);
+                } else if (kind >= probe::DecisionKind::stream_data) {
                     // A later piece of a streamed response: its data only.
                     auto* data = item[3].ptr();
                     decision.kind = kind;

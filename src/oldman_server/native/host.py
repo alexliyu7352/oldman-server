@@ -320,12 +320,13 @@ class _NativeTunnel:
 
 
 class _BufferedExchange:
-    # request_max_size is only assigned (by Sanic, for stream=True handlers): the
-    # body is already buffered within REQUEST_MAX_SIZE and read() returns it whole.
+    # request_max_size: Http.read's limit (REQUEST_MAX_SIZE; none for a stream
+    # handler); request_bytes: a body still arriving's declared Content-Length
+    # (-1 before its first read), or a whole body's size.
     __slots__ = ("stage", "response", "request_body", "body", "max_body", "result", "failure",
-                 "native", "streaming", "more_body", "request_max_size")
+                 "native", "streaming", "more_body", "request_max_size", "request_bytes")
 
-    def __init__(self, body, max_body, native=None, more_body=False):
+    def __init__(self, body, max_body, native=None, more_body=False, request_max_size=float("inf")):
         self.stage = Stage.HANDLER
         self.response = None
         self.request_body = True
@@ -337,16 +338,31 @@ class _BufferedExchange:
         self.streaming = None
         # True while the request body is still arriving (body holds what came).
         self.more_body = more_body
+        self.request_max_size = request_max_size
+        self.request_bytes = -1
+
+    def _limit(self, size):
+        self.request_bytes = size
+        if size > self.request_max_size:
+            # Http.read; the host ends the connection after the response.
+            self.request_body = self.more_body = False
+            raise PayloadTooLarge("Request body exceeds the size limit")
 
     async def read(self):
         if not self.request_body:
             return None
         if self.more_body:
+            if self.request_bytes < 0:
+                # The first read: Http.read checks a declared Content-Length; the
+                # host reports a chunked body that declares more (receive).
+                declared = self.native.header("content-length")
+                self._limit(int(declared) if declared is not None else 0)
             if self.body:
                 body, self.body = self.body, b""
                 return body
             try:
-                data = await _engine.receive(self.native.request_id)
+                data = await _engine.receive(self.native.request_id,
+                                             self.request_max_size != float("inf"))
             except BodyError as error:
                 # Http.read(): a malformed or oversized body raises; the host
                 # closes the connection after the response.
@@ -357,6 +373,7 @@ class _BufferedExchange:
             return data
         self.request_body = False
         body, self.body = self.body, b""
+        self._limit(len(body))
         return body or None
 
     async def __aiter__(self):
@@ -654,6 +671,7 @@ class NativeApplication:
     def __init__(self, app, max_response_bytes):
         self.app = app
         self.max_response_bytes = max_response_bytes
+        self.request_max_size = app.config.REQUEST_MAX_SIZE
         # HttpProtocol reads ACCESS_LOG once per connection; once per serve here.
         self._access_log = app.config.ACCESS_LOG
         request_class = app.request_class or Request
@@ -785,7 +803,8 @@ class NativeApplication:
             request = self._make_request(native, self.app)
         except OldmanServerException as error:
             return await self._error_response(native, error)
-        exchange = _BufferedExchange(native.body, self.max_response_bytes, native, native.more_body)
+        exchange = _BufferedExchange(native.body, self.max_response_bytes, native, native.more_body,
+                                     self.request_max_size)
         request.stream = exchange
         request_class = self._request_class
         token = request_class._current.set(request)
@@ -824,7 +843,8 @@ class NativeApplication:
             request = Request._from_native_fields(target, version, method, app, native)
         except OldmanServerException as error:
             return await self._error_response(native, error)
-        exchange = _BufferedExchange(body, self.max_response_bytes, native, more_body)
+        exchange = _BufferedExchange(body, self.max_response_bytes, native, more_body,
+                                     self.request_max_size)
         request.stream = exchange
         token = Request._current.set(request)
         try:
@@ -858,7 +878,7 @@ class NativeApplication:
                 extra = route.extra
                 if exchange.request_body and not extra.ignore_body:
                     if hasattr(handler, "is_stream"):
-                        # The handler reads request.stream itself (one buffered chunk).
+                        # The handler reads request.stream itself, without a size limit.
                         exchange.request_max_size = float("inf")
                     elif not request.body:
                         if exchange.more_body:
@@ -866,8 +886,10 @@ class NativeApplication:
                             request.body = b"".join([data async for data in exchange])
                         else:
                             # Request.receive_body() over the one buffered chunk.
-                            request.body = exchange.body
+                            body = request.body = exchange.body
                             exchange.body, exchange.request_body = b"", False
+                            if len(body) > self.request_max_size:
+                                raise PayloadTooLarge("Request body exceeds the size limit")
 
                 run_middleware = False
                 response = None
@@ -1003,9 +1025,11 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
     """
     config = app.config
     shards = _shard_cpus(config)
-    max_body = min(int(config.REQUEST_MAX_SIZE), 128 * 1024 * 1024)
+    # Python checks the body size as the handler reads it (Http.read); the host
+    # reads no further than this after a response (as Sanic).
+    max_body = int(min(float(config.REQUEST_MAX_SIZE), 1 << 62))
     memory = int(config.get("NATIVE_MAX_MEMORY") or
-                 max(1 << 30, len(shards) * (2 * max_body + (1 << 20))))
+                 max(1 << 30, len(shards) * (2 * min(max_body, 128 << 20) + (1 << 20))))
     if listen_sock is None:
         listener = dict(http_port=int(port), http_host=str(host))
     elif listen_sock.family == socket.AF_UNIX:
@@ -1020,6 +1044,8 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
         **listener, **(accept or {}), application_dispatch_all=True,
         max_requests=int(config.get("NATIVE_MAX_REQUESTS") or 4096), max_bytes=memory,
         max_body_bytes=max_body,
+        # Sanic pauses reading at REQUEST_BUFFER_SIZE.
+        body_window_bytes=max(1, min(int(config.REQUEST_BUFFER_SIZE), 1 << 30)),
         max_response_bytes=int(config.get("NATIVE_MAX_RESPONSE_SIZE") or 128 * 1024 * 1024),
         decision_timeout_ms=min(86_400_000, max(1, int(float(config.RESPONSE_TIMEOUT) * 1000))),
         # Sanic writes no Date header.
@@ -1027,7 +1053,7 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
         # Http.set_header_max_size (Config._configure_header_size).
         max_header_bytes=max(1, min(int(config.REQUEST_MAX_HEADER_SIZE),
                                       int(config.REQUEST_BUFFER_SIZE) - 4096,
-                                      int(config.REQUEST_MAX_SIZE), _http1.Http.HEADER_CEILING)),
+                                      max_body, _http1.Http.HEADER_CEILING)),
         keep_alive=bool(config.KEEP_ALIVE), framework_errors=True,
         keep_alive_timeout_ms=int(float(config.KEEP_ALIVE_TIMEOUT) * 1000),
         # Sanic hands a response to its transport and closes an idle connection

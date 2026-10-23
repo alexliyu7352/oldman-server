@@ -544,6 +544,21 @@ class Service {
     }
     ss::gate app_connections;
     std::map<uint64_t, std::unique_ptr<AppConnection>> app_peers;
+    // A request body forwarded to Python while its handler runs (forward_body):
+    // what was published and the handler has not read yet (body_read decisions).
+    struct BodyFlow {
+        size_t unread = 0;
+        bool publishing = true;  // until the response is out
+        bool stopped = false;    // the connection closes after the response
+        std::optional<ss::promise<>> room;
+        void wake() {
+            if (room) {
+                room->set_value();
+                room.reset();
+            }
+        }
+    };
+    std::map<uint64_t, BodyFlow*> body_flows;  // by request id
     http1::DateLine date_line;
     std::string probe_lines;  // configured diagnostic header lines, fixed per shard
 
@@ -840,13 +855,6 @@ class Service {
                 const size_t start = consumed + head.size;
                 const bool chunked = head.chunked;
                 const size_t length = head.content_length;
-                // A body Sanic would reject while reading it (Http.read): the request
-                // still runs and its read raises; the connection closes afterwards.
-                const char* body_error = nullptr;
-                auto chunk_error = [](http1::Chunked state) {
-                    return state == http1::Chunked::too_large ? "413:Request body exceeds the size limit"
-                                                              : "400:Bad chunked encoding";
-                };
                 // What of the body has arrived. A complete body goes with the
                 // request; otherwise the request goes now with this prefix and the
                 // rest follows as application_data events while Python runs.
@@ -859,7 +867,10 @@ class Service {
                         http1::append_error(output, 413, true, date(), probe_lines);
                         break;
                     }
-                    body_error = "413:Request body exceeds the size limit";
+                    // Python checks the size as the handler reads (Http.read: a
+                    // stream handler has no limit). Too large to be read past
+                    // after the response, as in Sanic: the connection ends then.
+                    close = true;
                 } else if (chunked && framework_errors) {
                     // Decoded while the handler runs, one event per chunk: a Sanic
                     // stream handler reads each chunk on its own.
@@ -908,28 +919,27 @@ class Service {
                     keep = !close && !connection.peer_gone;
                     continue;
                 }
-                // Sanic stops keep-alive once a body fails to read.
-                if (body_error) close = true;
-                if (head.expect_continue && http11 && !body_error)
-                    output.append("HTTP/1.1 100 Continue\r\n\r\n");
+                if (head.expect_continue && http11) output.append("HTTP/1.1 100 Continue\r\n\r\n");
                 co_await flush_output(connection, output);
                 const uint64_t root = (++next_id << 16) | ss::this_shard_id();
-                size_t delivered = body.size(), remaining = chunked || body_error ? 0 : length - body.size();
+                size_t remaining = chunked ? 0 : length - body.size();
                 bool body_ok = true;
+                bool over = false;  // a chunked body declared more than max_body_bytes
+                // At most body_window_bytes ahead of the handler (Sanic pauses
+                // reading at REQUEST_BUFFER_SIZE); none once the response is out.
+                BodyFlow flow;
+                body_flows.emplace(root, &flow);
+                auto unregister = ss::defer([&]() noexcept { body_flows.erase(root); });
                 auto publish_data = [&](std::string piece, std::string parameter) {
                     RequestEvent data{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
                                       method, "application_data", piece.size(), true, std::move(piece),
                                       std::move(parameter)};
                     data.parent = root;
                     counts.body_bytes_to_python += data.body.size();
+                    flow.unread += data.body.size();
                     shared.publish(std::move(data), true);
                 };
                 auto forward_body = [&]() -> ss::future<> {
-                    if (body_error) {
-                        body_ok = false;
-                        publish_data({}, std::string("error:") + body_error);
-                        co_return;
-                    }
                     for (;;) {
                         std::string piece;
                         bool end = false;
@@ -937,18 +947,24 @@ class Service {
                         if (chunked) {
                             size_t pos = start;
                             const auto state = decoder.feed(buffer, pos, piece,
-                                                            config.max_body_bytes - delivered,
-                                                            framework_errors);
+                                                            std::numeric_limits<size_t>::max(), true);
                             buffer.erase(start, pos - start);
-                            if (state == http1::Chunked::bad_request || state == http1::Chunked::too_large) {
-                                body_ok = false;
-                                if (!framework_errors) {
-                                    abort_request(root, state == http1::Chunked::too_large ? 413 : 400);
-                                    co_return;
-                                }
-                                if (!piece.empty()) publish_data(std::move(piece), "");
-                                publish_data({}, std::string("error:") + chunk_error(state));
+                            if (!over && decoder.declared() > config.max_body_bytes) {
+                                // Past REQUEST_MAX_SIZE (Http.read checks each chunk's
+                                // size): Python raises 413 unless the handler streams
+                                // the body. Either way the connection ends after the
+                                // response: Sanic does not read past the limit then.
+                                over = true;
                                 close = true;  // read by the response head if not yet written
+                                if (flow.publishing) publish_data({}, "over");
+                            }
+                            if (state == http1::Chunked::bad_request) {
+                                body_ok = false;
+                                if (flow.publishing) {
+                                    if (!piece.empty()) publish_data(std::move(piece), "");
+                                    publish_data({}, "error:400:Bad chunked encoding");
+                                }
+                                close = true;
                                 co_return;
                             }
                             end = state == http1::Chunked::complete;
@@ -960,16 +976,25 @@ class Service {
                             remaining -= take;
                             end = remaining == 0;
                         }
-                        delivered += piece.size();
-                        if (!piece.empty() || end) publish_data(std::move(piece), end ? "end" : "");
+                        if (flow.publishing && (!piece.empty() || end))
+                            publish_data(std::move(piece), end ? "end" : "");
                         if (end) co_return;
                         if (more_here) continue;
+                        while (flow.publishing && flow.unread >= config.body_window_bytes && !closing) {
+                            flow.room.emplace();
+                            co_await flow.room->get_future();
+                        }
+                        if (flow.stopped || closing) {
+                            body_ok = false;
+                            co_return;
+                        }
                         bool more = false;
                         try {
                             more = co_await read_more(true);
                         } catch (...) {}  // reset by the peer
                         if (!more) {
                             body_ok = false;
+                            if (flow.stopped) co_return;
                             if (expired == Wait::request) {
                                 // A response may have started: its handler's read
                                 // ends with the timeout either way.
@@ -993,6 +1018,15 @@ class Service {
                                                       output, root);
                 auto forwarding = forward_body();
                 co_await std::move(responding);
+                // The handler is done with the body: the rest is read past (as
+                // Sanic does after a response), or not at all if the connection
+                // ends now.
+                flow.publishing = false;
+                if (close && !forwarding.available()) {
+                    flow.stopped = true;
+                    connection.shut_input();
+                }
+                flow.wake();
                 co_await std::move(forwarding);
                 if (!body_ok) {
                     expired = Wait::none;  // the response already reported it
@@ -1719,6 +1753,14 @@ public:
     void resolve(uint64_t id, int code, std::string body, bool retire = false,
                  std::vector<std::pair<std::string, std::string>> headers = {},
                  int kind = DecisionKind::complete, int64_t content_length = -1) {
+        if (kind == DecisionKind::body_read) {
+            if (auto flow = body_flows.find(id); flow != body_flows.end()) {
+                auto& unread = flow->second->unread;
+                unread -= std::min(unread, size_t(std::max<int64_t>(content_length, 0)));
+                flow->second->wake();
+            }
+            return;
+        }
         auto it = waiters.find(id);
         if (it == waiters.end() || closing) return;
         auto& waiter = *it->second;
@@ -1787,6 +1829,7 @@ public:
         for (auto& [id, peer] : app_peers) {
             peer->shut_input(); peer->socket.shutdown_output();
         }
+        for (auto& [id, flow] : body_flows) flow->wake();
         for (auto& [id, waiter] : waiters) {
             if (!waiter->replied) {
                 waiter->replied = true;

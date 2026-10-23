@@ -228,6 +228,8 @@ Chunked ChunkedDecoder::feed(std::string_view data, size_t& pos, std::string& bo
             if (digits.empty() || ec != std::errc() || ptr != digits.data() + digits.size())
                 return Chunked::bad_request;
             if (size > max_body - body.size()) return Chunked::too_large;
+            declared_ = size > std::numeric_limits<size_t>::max() - declared_ ? std::numeric_limits<size_t>::max()
+                                                                        : declared_ + size;
             if (size == 0) {
                 state_ = State::trailer;
             } else {
