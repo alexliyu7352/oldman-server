@@ -283,8 +283,11 @@ def _stop_persistent_runtime():
     runtime = _persistent[0]
     while runtime.stats()["state"] == 0:
         time.sleep(.001)
-    if runtime.stats()["state"] == 1:
-        runtime.stop()
+    while runtime.stats()["state"] == 1:
+        try:
+            runtime.stop()  # drops results nobody took
+        except RuntimeError:
+            time.sleep(.01)  # requests still running end (each is bounded)
     runtime.join()
     runtime.close_fd()
 

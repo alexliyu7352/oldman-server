@@ -38,8 +38,21 @@ struct Runtime::Impl {
     size_t max_pending, max_bytes;
     int notify_fd;
     std::atomic<bool> notify_pending{false};
+    // The current server's settings that any thread reads without the mutex
+    // (start_server replaces server_config under it).
+    std::atomic<bool> coalesce{false}, compress_inline{false}, compress_cooperative{false};
+    void adopt(const ServerConfig& config) {
+        coalesce.store(config.coalesce_notifications, std::memory_order_relaxed);
+        compress_inline.store(config.inline_compression, std::memory_order_relaxed);
+        compress_cooperative.store(config.cooperative_compression, std::memory_order_relaxed);
+    }
     std::atomic<uint64_t> notification_writes{0};
     std::thread thread;
+    const pid_t owner = ::getpid();  // a forked child has a copy, not the threads
+    // Held across each whole start_server / drain_server / stop_server call
+    // and stop(): the server and the alien instance they use do not change
+    // under them (another thread's stop() making Seastar exit, say).
+    std::mutex lifecycle;
     mutable std::mutex mutex;
     std::deque<Completion> completions;
     std::deque<FileResult> file_results;
@@ -80,10 +93,11 @@ struct Runtime::Impl {
           server_config(std::move(config)), max_pending(n), max_bytes(b),
           notify_fd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) {
         if (notify_fd < 0) throw std::runtime_error("eventfd creation failed");
+        adopt(server_config);
     }
     ~Impl() { if (notify_fd >= 0) ::close(notify_fd); }
     void notify() noexcept {
-        if (server_config.coalesce_notifications &&
+        if (coalesce.load(std::memory_order_relaxed) &&
             notify_pending.exchange(true, std::memory_order_acq_rel)) return;
         eventfd_t n = 1;
         int rc;
@@ -167,9 +181,9 @@ struct Runtime::Impl {
     }
     ss::future<WorkResult> network_compress(std::string input, int level) {
         // This frame owns input across every cooperative suspension.
-        if (server_config.inline_compression)
+        if (compress_inline.load(std::memory_order_relaxed))
             co_return compress_native(input, level);
-        if (server_config.cooperative_compression)
+        if (compress_cooperative.load(std::memory_order_relaxed))
             co_return co_await cooperative(input, level);
         co_return co_await pooled(std::move(input), 1, level);
     }
@@ -332,6 +346,7 @@ struct Runtime::Impl {
             std::lock_guard lock(mutex);
             previous = std::move(server);
             server = std::move(network);
+            adopt(config);
             server_config = std::move(config);
             generation = ++server_generation;
         }
@@ -435,6 +450,13 @@ Runtime::Runtime(std::vector<int> cpus, size_t n, size_t b, std::vector<int> wor
     p->thread = std::thread([this] { p->run(); });
 }
 Runtime::~Runtime() {
+    if (p->owner != ::getpid()) {
+        // A forked child's copy: the threads (Seastar's, the worker pool's) are
+        // the parent's. Joining them, or destroying condition variables they
+        // wait on, hangs: the copy is left alone.
+        (void)p.release();
+        return;
+    }
     // Engine.aclose is mandatory. A forgotten live runtime cannot be detached safely.
     if (p->thread.joinable()) p->thread.join();
     close_fd();
@@ -510,15 +532,12 @@ bool Runtime::submit_policy(uint64_t id, NativePolicy policy) {
 void Runtime::submit_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length) {
     if (operation < FileOperation::file_stat || operation > FileOperation::file_open)
         throw std::invalid_argument("unknown file operation");
-    ss::alien::instance* alien = nullptr;
-    unsigned shard;
-    {
-        std::lock_guard lock(p->mutex);
-        if (p->status.state != 1) throw std::runtime_error("runtime not accepting work");
-        alien = p->alien;
-        shard = p->next_shard++ % p->cpus.size();
-    }
-    ss::alien::run_on(*alien, shard,
+    // Posted under the mutex, as submit does: the alien instance is valid while
+    // the state is 1, and run() clears it under the mutex before it goes.
+    std::lock_guard lock(p->mutex);
+    if (p->status.state != 1) throw std::runtime_error("runtime not accepting work");
+    const unsigned shard = p->next_shard++ % p->cpus.size();
+    ss::alien::run_on(*p->alien, shard,
         [impl = p.get(), id, operation, path = std::move(path), offset, length]() mutable noexcept {
             (void)impl->execute_file(id, operation, std::move(path), offset, length);
         });
@@ -542,8 +561,9 @@ std::vector<Completion> Runtime::drain(size_t count) {
     while (::eventfd_read(p->notify_fd, &value) < 0 && errno == EINTR) {}
     // Reset before inspecting either queue: a concurrent producer is either
     // covered by this drain or posts a new wake. Queue mutexes publish its data.
-    if (p->server_config.coalesce_notifications)
-        p->notify_pending.store(false, std::memory_order_release);
+    // Also when not coalescing: a flag left from an earlier coalescing server
+    // would otherwise swallow the next one's first wake.
+    p->notify_pending.store(false, std::memory_order_release);
     std::vector<Completion> out;
     bool more;
     {
@@ -559,7 +579,7 @@ std::vector<Completion> Runtime::drain(size_t count) {
         }
         // In coalesced mode drain_requests() owns metadata rearming. Rearming
         // here, just before Python drains that queue, creates an empty callback.
-        more = !p->completions.empty() || (!p->server_config.coalesce_notifications &&
+        more = !p->completions.empty() || (!p->coalesce.load(std::memory_order_relaxed) &&
                 p->server && p->server->has_events());
     }
     if (more) p->notify();
@@ -609,6 +629,7 @@ uint64_t Runtime::start_server(ServerConfig config) {
         ((!config.http_port && config.listen_fd < 0) || !config.application_routes.empty() ||
          config.native_json))
         throw std::invalid_argument("framework dispatch requires HTTP without exact routes or native JSON");
+    std::lock_guard life(p->lifecycle);
     ss::alien::instance* alien = nullptr;
     {
         std::lock_guard lock(p->mutex);
@@ -622,6 +643,7 @@ uint64_t Runtime::start_server(ServerConfig config) {
     }).get();
 }
 void Runtime::drain_server(uint64_t generation) {
+    std::lock_guard life(p->lifecycle);
     ss::alien::instance* alien = nullptr;
     {
         std::lock_guard lock(p->mutex);
@@ -633,6 +655,7 @@ void Runtime::drain_server(uint64_t generation) {
     }).get();
 }
 void Runtime::stop_server(uint64_t generation) {
+    std::lock_guard life(p->lifecycle);
     ss::alien::instance* alien = nullptr;
     {
         std::lock_guard lock(p->mutex);
@@ -644,10 +667,19 @@ void Runtime::stop_server(uint64_t generation) {
     }).get();
 }
 void Runtime::stop() {
+    std::lock_guard life(p->lifecycle);
     std::lock_guard lock(p->mutex);
     if (p->status.state >= 2) return;
-    if (p->status.state != 1 || p->status.pending_requests)
-        throw std::runtime_error("stop requires ready runtime and drained work");
+    if (p->status.state != 1) throw std::runtime_error("stop requires a ready runtime");
+    // Results nobody will take once stopped are dropped; work still running
+    // must end first (each is bounded), or its shard task would outlive Seastar.
+    for (const auto& item : p->completions) {
+        p->status.pending_bytes -= item.reserved_bytes;
+        --p->status.pending_requests;
+    }
+    p->completions.clear();
+    if (p->status.pending_requests)
+        throw std::runtime_error("stop requires drained work: requests are still running");
     ss::alien::run_on(*p->alien, 0, [impl=p.get()]() noexcept { impl->finish->set_value(); });
     p->status.state = 2;
 }

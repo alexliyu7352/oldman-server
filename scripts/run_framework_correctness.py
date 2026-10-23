@@ -21,7 +21,8 @@ def main():
     rows = []
     files = ["test_framework.py", "test_framework_native.py", "test_native_boundary.py",
              "test_framework_benchmark.py", "test_queue_handoff.py", "test_shard_handoff.py",
-             "test_framework_dispatch.py", "test_native_request_metadata.py", "test_engine_application_tasks.py"]
+             "test_framework_dispatch.py", "test_native_request_metadata.py", "test_engine_application_tasks.py",
+             "test_native_response_codec.py", "test_native_runtime_lifecycle.py"]
     if args.sanic:
         files.extend(["test_sanic_native.py", "test_sanic_touchup.py",
                       "test_sanic_request.py", "test_sanic_response.py", "test_sanic_flat.py", "test_sanic_http1.py", "test_sanic_native_run.py",
