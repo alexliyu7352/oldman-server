@@ -171,6 +171,7 @@ WORKERS_APP = textwrap.dedent('''
     UNIX = os.environ.get("UNIX")
     MARK = os.environ.get("RESTART_MARK")
     HOLD = int(os.environ.get("HOLD", 0))
+    BURST = int(os.environ.get("BURST", 0))
     WORKER_LISTEN = os.environ.get("WORKER_LISTEN")
     if WORKER_LISTEN:
         app.config.NATIVE_WORKER_LISTEN = WORKER_LISTEN
@@ -186,12 +187,16 @@ WORKERS_APP = textwrap.dedent('''
             "loop": f"{loop.__module__}.{loop.__name__}", "location": app.serve_location,
             "server": request.conn_info.server})
 
-    async def ask(address=None):
+    async def connect(address=None):
         address = address or (("unix", UNIX) if UNIX else ("tcp", "127.0.0.1", int(os.environ["PORT"])))
         if address[0] == "unix":
-            reader, writer = await asyncio.open_unix_connection(address[1])
-        else:
-            reader, writer = await asyncio.open_connection(address[1], address[2])
+            return await asyncio.open_unix_connection(address[1])
+        return await asyncio.open_connection(address[1], address[2])
+
+    async def ask(address=None):
+        return await exchange(*await connect(address))
+
+    async def exchange(reader, writer):
         writer.write(b"GET /who HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n")
         head = await reader.readuntil(b"\\r\\n\\r\\n")
         length = int(head.lower().split(b"content-length: ")[1].split(b"\\r\\n")[0])
@@ -213,6 +218,14 @@ WORKERS_APP = textwrap.dedent('''
             writer.close()
         return results
 
+    async def burst():
+        # BURST connections opened at once and kept open, then each asked.
+        streams = await asyncio.gather(*(connect() for _ in range(BURST)))
+        answers = await asyncio.gather(*(exchange(*stream) for stream in streams))
+        for writer, _ in answers:
+            writer.close()
+        return [body for _, body in answers]
+
     async def own():
         # Each worker's own address (NATIVE_WORKER_LISTEN) reaches that worker;
         # the shared address still serves.
@@ -229,7 +242,7 @@ WORKERS_APP = textwrap.dedent('''
         # Once every worker serves (each leaves a file in the working directory).
         while len([n for n in os.listdir() if n.startswith("ready-")]) < 2:
             await asyncio.sleep(0.01)
-        results = await (own() if WORKER_LISTEN else held() if HOLD
+        results = await (own() if WORKER_LISTEN else held() if HOLD else burst() if BURST
                          else asyncio.gather(*(get() for _ in range(64))))
         print("RESULTS " + json.dumps(results), flush=True)
         if MARK and not os.path.exists(MARK):
@@ -349,6 +362,18 @@ def test_workers_sharing_a_unix_socket_take_turns(short_dir):
     split = Counter(result["worker"] for result in results)
     assert split.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
     assert max(split.values()) - min(split.values()) <= 2
+
+
+def test_workers_sharing_a_unix_socket_split_a_burst(short_dir):
+    # Hundreds of connections at once: a worker counts each connection as it
+    # accepts it, so the other worker's turn comes during the burst rather
+    # than after the first has taken all it could.
+    path = short_dir / "app.sock"
+    [results], _ = run_workers(short_dir, {"UNIX": str(path), "BURST": "512",
+                                           "OLDMAN_SERVER_NATIVE_SHARDS": "1"})
+    split = Counter(result["worker"] for result in results)
+    assert split.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
+    assert max(split.values()) - min(split.values()) <= 16, split
 
 
 # A worker replaced while its predecessor still closes connections.

@@ -722,6 +722,12 @@ class Service {
                     continue;
                 }
                 failures = 0;
+                // Counted now, not when its shard takes it: through a burst
+                // this loop accepts without yielding, and with a count that
+                // lags, each process holding the turn took all it could. (One
+                // dropped as this process stops stays counted; its line no
+                // longer counts then.)
+                if (own_slot) count_connection(1);
                 remote.addr_length = length;
                 auto handle = shards.get_handle();
                 const auto shard = handle.cpu();
@@ -746,7 +752,9 @@ class Service {
     }
     // unix_path (a ServerConfig member, so it outlives the connections): what
     // requests over an AF_UNIX listener report as the server address.
-    ss::future<> accept_application(ss::server_socket& listener, const std::string& unix_path) {
+    // counted: accept_shared counted the connections as it accepted them.
+    ss::future<> accept_application(ss::server_socket& listener, const std::string& unix_path,
+                                    bool counted = false) {
         try {
             unsigned failures = 0;
             while (accepts()) {
@@ -771,7 +779,7 @@ class Service {
                 app_peers.emplace(id, std::make_unique<AppConnection>(std::move(accepted.connection)));
                 ++counts.connections_open;
                 // Every open connection counts towards this process's load.
-                if (own_slot) count_connection(1);
+                if (own_slot && !counted) count_connection(1);
                 (void)ss::with_gate(app_connections, [this, id, remote = accepted.remote_address, &unix_path] {
                     return serve_application(id, remote, unix_path);
                 }).handle_exception([this](std::exception_ptr) { ++counts.errors; }).finally([this] {
@@ -1800,7 +1808,7 @@ public:
                     shared_wake = ss::file_desc::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
                     shared_accepting = accept_shared(protocol, address);
                 }
-                app_accepting = accept_application(*app_listener, shared.config.unix_path);
+                app_accepting = accept_application(*app_listener, shared.config.unix_path, true);
             } else if (shared.config.listen_fd >= 0) {
                 app_listener.emplace(adopt_listener(shared.config.listen_fd));
                 app_accepting = accept_application(*app_listener, shared.config.unix_path);
