@@ -1054,9 +1054,18 @@ class Service {
                 // Sanic does after a response), or not at all if the connection
                 // ends now.
                 flow.publishing = false;
-                if (close && !forwarding.available()) {
-                    flow.stopped = true;
-                    connection.shut_input();
+                if (!forwarding.available()) {
+                    // The response goes out now, as Sanic sends it, not once the
+                    // rest of the body has come (forward_body does not write).
+                    try {
+                        co_await flush_output(connection, output);
+                    } catch (...) {
+                        close = true;
+                    }
+                    if (close) {
+                        flow.stopped = true;
+                        connection.shut_input();
+                    }
                 }
                 flow.wake();
                 co_await std::move(forwarding);

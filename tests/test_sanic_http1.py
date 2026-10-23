@@ -1009,6 +1009,10 @@ def body_app(name):
             total += len(body)
         return text(str(total))
 
+    @app.post("/early", stream=True)
+    async def early(request):
+        return text("early")  # without reading the body
+
     @app.post("/count", stream=True)
     async def count(request):
         total = 0
@@ -1256,3 +1260,20 @@ def _settable(locale, name):
         return False
     finally:
         locale.setlocale(locale.LC_TIME, previous)
+
+
+def test_a_response_goes_out_before_the_rest_of_its_body():
+    # A handler that answers without reading the body: Sanic sends the
+    # response at once (and reads the body's rest after it); the host held it
+    # until the whole body had come, so a client waiting for the answer
+    # before sending more waited until the keep-alive deadline.
+    async def scenario(reader, writer):
+        writer.write(b"POST /early HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n" + b"x" * 10)
+        status, _, body = await asyncio.wait_for(read_response(reader), 3)
+        writer.write(b"x" * 990)  # the rest: read past, the connection stays usable
+        writer.write(b"POST /early HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+        again = await asyncio.wait_for(read_response(reader), 3)
+        return (status, body), again[0::2]
+
+    assert run("http1_early_response", scenario, app_factory=body_app) == [
+        ((200, b"early"), (200, b"early"))]
