@@ -1,6 +1,7 @@
 #include "http1.hh"
 
 #include <algorithm>
+#include <cstdio>
 #include <charconv>
 #include <limits>
 
@@ -56,10 +57,13 @@ std::string_view reason(int status) {
 }
 
 void append_status_line(std::string& out, int status) {
-    char digits[8];
-    auto [end, ec] = std::to_chars(digits, digits + sizeof(digits), status);
+    // A status line has three digits: callers validate the status, and one that
+    // did not would get 500 rather than a malformed line.
+    if (status < 100 || status > 999) status = 500;
+    char digits[3];
+    std::to_chars(digits, digits + sizeof(digits), status);
     out.append("HTTP/1.1 ");
-    out.append(digits, end);
+    out.append(digits, sizeof(digits));
     out.push_back(' ');
     out.append(reason(status));
     out.append("\r\n");
@@ -264,9 +268,17 @@ Chunked ChunkedDecoder::feed(std::string_view data, size_t& pos, std::string& bo
 std::string_view DateLine::get() {
     const auto now = std::time(nullptr);
     if (now != second_) {
+        // IMF-fixdate's English names: strftime's %a and %b follow LC_TIME,
+        // which the application may have set.
+        static constexpr const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        static constexpr const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
         std::tm parts{};
         gmtime_r(&now, &parts);
-        size_ = std::strftime(line_, sizeof(line_), "Date: %a, %d %b %Y %H:%M:%S GMT\r\n", &parts);
+        const int written = std::snprintf(line_, sizeof(line_), "Date: %s, %02d %s %04d %02d:%02d:%02d GMT\r\n",
+                                          days[parts.tm_wday], parts.tm_mday, months[parts.tm_mon],
+                                          parts.tm_year + 1900, parts.tm_hour, parts.tm_min, parts.tm_sec);
+        size_ = written > 0 ? std::min(size_t(written), sizeof(line_) - 1) : 0;
         second_ = now;
     }
     return {line_, size_};

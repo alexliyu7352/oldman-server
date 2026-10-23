@@ -1220,3 +1220,39 @@ def test_events_of_admitted_requests_do_not_fill_the_queue():
         return await asyncio.to_thread(blocking_steps, port)
 
     assert run("http1_admitted_events", scenario, app_factory=blocking_app, max_requests=4) == [200]
+
+
+def test_the_date_header_is_english_whatever_the_locale():
+    # The host formatted Date with strftime, which follows LC_TIME: with a
+    # German locale an engine that writes Date sent "Date: Do, 22 Okt 2026".
+    import locale
+    import re
+    available = [name for name in ("de_DE.UTF-8", "de_DE.utf8", "zh_TW.UTF-8", "zh_TW.utf8")
+                 if _settable(locale, name)]
+    if not available:
+        pytest.skip("no non-English locale installed")
+    previous = locale.setlocale(locale.LC_TIME)
+    locale.setlocale(locale.LC_TIME, available[0])
+
+    async def scenario(reader, writer):
+        writer.write(b"GET /small HTTP/1.1\r\nHost: x\r\n\r\n")
+        _, headers, _ = await read_response(reader)
+        return dict(headers)["Date"]
+
+    try:
+        date, = run("http1_date_locale", scenario, generate_date_header=True)
+    finally:
+        locale.setlocale(locale.LC_TIME, previous)
+    assert re.fullmatch(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d\d (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|"
+                        r"Nov|Dec) \d{4} \d\d:\d\d:\d\d GMT", date), date
+
+
+def _settable(locale, name):
+    previous = locale.setlocale(locale.LC_TIME)
+    try:
+        locale.setlocale(locale.LC_TIME, name)
+        return True
+    except locale.Error:
+        return False
+    finally:
+        locale.setlocale(locale.LC_TIME, previous)
