@@ -130,7 +130,10 @@ def test_keep_alive_client_timeout(port):
                 assert response.text == "OK"
                 assert request.protocol.state["requests_count"] == 1
 
-                loop.run_until_complete(aio_sleep(2))
+                # Past the server's KEEP_ALIVE_TIMEOUT (2 s), not at it: at
+                # exactly 2 s the request could go out on the connection the
+                # server was closing, and get no response.
+                loop.run_until_complete(aio_sleep(3))
                 request, response = client.get("/1", timeout=1)
                 assert request.protocol.state["requests_count"] == 1
         except OSError:
