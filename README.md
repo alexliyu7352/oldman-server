@@ -124,6 +124,7 @@ server {
 - worker 退出时删除自己的 socket 文件；重启的 worker 绑定同一地址。重启期间连接不上的那个地址被 nginx 暂时标记为失败（`max_fails`、`fail_timeout`，默认 1 次、10 秒），请求改走其他 worker。
 - worker 数改变时，nginx 的 `upstream` 要同时增减。
 - 监听 socket 的 backlog 默认 2048：nginx 同时打开上百条上游连接时，unix socket 不会因队列满而让 nginx 回 502（Sanic 的 100 会）。
+- 原生主机（`NATIVE_SERVER`）时，Sanic 绑定的 TCP 监听 socket 不可继承（原版设为可继承）：应用经 exec 启动的程序（`os.system` 等）不会在服务器退出后还占着这个端口的监听，让客户端连上却没人应答。worker 进程经 multiprocessing 收到这个 socket，不受影响；unix socket 在两边都不可继承。
 
 ## 与 Sanic 的差异
 
