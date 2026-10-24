@@ -1,7 +1,7 @@
 """In-process Python main-thread cost per request: real Engine and framework,
 stub native runtime.
 
-No sockets, Seastar shards or native drain/resolve work run here, so absolute
+No sockets, native shards or native drain/resolve work run here, so absolute
 values are lower than a served window. Use it to compare framework changes
 before and after; the phase gate uses probes/sanic_comparison/run.py.
 """
@@ -78,6 +78,9 @@ class StubRuntime:
     # Methods used by Engine.
     def fd(self):
         return self._fd
+
+    def fallback(self):
+        return ""
 
     def clear_notification(self):
         try:

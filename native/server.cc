@@ -1,40 +1,29 @@
 #include "server.hh"
 #include "http1.hh"
-#include <seastar/core/coroutine.hh>
-#include <seastar/core/fstream.hh>
-#include <seastar/core/gate.hh>
-#include <seastar/core/reactor.hh>
-#include <seastar/core/sharded.hh>
-#include <seastar/core/shared_future.hh>
-#include <seastar/core/sleep.hh>
-#include <seastar/core/timer.hh>
-#include <seastar/core/abort_source.hh>
-#include <seastar/core/with_timeout.hh>
-#include <seastar/util/defer.hh>
-#include <seastar/net/inet_address.hh>
-#include <seastar/net/posix-stack.hh>
-#include <seastar/net/unix_address.hh>
+#include <asio.hpp>
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <cstring>
+#include <deque>
+#include <format>
+#include <latch>
+#include <limits>
 #include <mutex>
 #include <optional>
-#include <limits>
-#include <deque>
-#include <time.h>
-#include <poll.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
-#include <sys/syscall.h>
-#include <unistd.h>
+#include <set>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
 
 namespace probe {
-namespace ss = seastar;
 bool valid_http_response(int status,
     const std::vector<std::pair<std::string, std::string>>& headers, bool no_body_statuses,
     bool upgrade) {
@@ -76,11 +65,173 @@ bool valid_http_response(int status,
     return true;
 }
 namespace {
+using Socket = asio::generic::stream_protocol::socket;
+using Acceptor = asio::basic_socket_acceptor<asio::generic::stream_protocol>;
+using Endpoint = asio::generic::stream_protocol::endpoint;
+// Completion without exceptions: (error_code, result...).
+constexpr auto use_tuple = asio::as_tuple(asio::use_awaitable);
+
 uint64_t clock_ns() {
     timespec t{};
     ::clock_gettime(CLOCK_MONOTONIC, &t);
     return uint64_t(t.tv_sec) * 1000000000 + t.tv_nsec;
 }
+uint64_t monotonic_ms() {
+    timespec t{};
+    ::clock_gettime(CLOCK_MONOTONIC, &t);
+    return uint64_t(t.tv_sec) * 1000 + uint64_t(t.tv_nsec) / 1000000;
+}
+
+// Runs `f` when the scope ends.
+template <typename F>
+struct Defer {
+    F f;
+    ~Defer() { f(); }
+};
+template <typename F>
+Defer(F) -> Defer<F>;
+
+// One coroutine at a time waits until set(): the waiter is resumed through
+// the io_context, never inside set() (whose caller may be in the middle of
+// changing what the waiter looks at). A set() with nobody waiting is kept for
+// the next wait(); every waiter rechecks what it waits for.
+class Event {
+    asio::io_context* io_;
+    asio::any_completion_handler<void()> waiter_;
+    bool set_ = false;
+public:
+    explicit Event(asio::io_context& io) : io_(&io) {}
+    asio::awaitable<void> wait() {
+        if (!set_) {
+            co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
+                [this](asio::any_completion_handler<void()> handler) { waiter_ = std::move(handler); },
+                asio::use_awaitable);
+        }
+        set_ = false;
+    }
+    void set() {
+        if (waiter_) asio::post(*io_, std::move(waiter_));
+        else set_ = true;
+    }
+};
+
+// Coroutines still running: close() waits for them.
+struct Gate {
+    explicit Gate(asio::io_context& io) : idle(io) {}
+    size_t count = 0;
+    Event idle;
+    void enter() { ++count; }
+    void leave() {
+        if (--count == 0) idle.set();
+    }
+    asio::awaitable<void> close() {
+        while (count) co_await idle.wait();
+    }
+};
+
+// A timer of the shard's wheel: arming and cancelling are list operations, and
+// it fires within one 10 ms tick of its time. Every request arms several
+// (read, write and response deadlines); an asio::steady_timer for each cost
+// about 0.26 us per request apiece.
+class Wheel;
+struct WheelEntry {
+    WheelEntry *prev = nullptr, *next = nullptr;
+    uint64_t due_ms = 0;
+    std::function<void()> fire;
+    Wheel* wheel = nullptr;
+    bool armed() const { return prev != nullptr; }
+    WheelEntry() = default;
+    WheelEntry(const WheelEntry&) = delete;
+    WheelEntry& operator=(const WheelEntry&) = delete;
+    ~WheelEntry();
+};
+// 1024 slots of 10 ms and one ticker while any entry is armed. A slot is
+// visited once all of its 10 ms have passed; an entry there fires if its time
+// has come, or waits for the wheel's next turn.
+class Wheel {
+public:
+    static constexpr uint64_t slot_ms = 10, slots = 1024;
+    explicit Wheel(asio::io_context& io) : ticker_(io) {
+        for (auto& head : heads_) head.prev = head.next = &head;
+        due_.prev = due_.next = &due_;
+    }
+    ~Wheel() { ticker_.cancel(); }
+    void arm(WheelEntry& entry, uint64_t delay_ms) { arm_at(entry, monotonic_ms() + delay_ms); }
+    void arm_at(WheelEntry& entry, uint64_t due_ms) {
+        cancel(entry);
+        if (!ticking_) {
+            ticking_ = true;
+            visited_ms_ = monotonic_ms() / slot_ms * slot_ms;
+            schedule();
+        }
+        entry.wheel = this;
+        entry.due_ms = due_ms;
+        // Never into a slot already visited on this turn.
+        link(heads_[(std::max(due_ms, visited_ms_) / slot_ms) % slots], entry);
+        ++count_;
+    }
+    void cancel(WheelEntry& entry) {
+        if (!entry.armed()) return;
+        unlink(entry);
+        --count_;
+    }
+private:
+    static void link(WheelEntry& head, WheelEntry& entry) {
+        entry.next = &head;
+        entry.prev = head.prev;
+        head.prev->next = &entry;
+        head.prev = &entry;
+    }
+    static void unlink(WheelEntry& entry) {
+        entry.prev->next = entry.next;
+        entry.next->prev = entry.prev;
+        entry.prev = entry.next = nullptr;
+    }
+    void collect(WheelEntry& head, uint64_t now) {
+        for (auto* entry = head.next; entry != &head;) {
+            auto* next = entry->next;
+            if (entry->due_ms <= now) {
+                unlink(*entry);
+                link(due_, *entry);
+            }
+            entry = next;
+        }
+    }
+    void schedule() {
+        ticker_.expires_after(std::chrono::milliseconds(slot_ms));
+        // Destroying the wheel cancels this: an aborted wait touches nothing.
+        ticker_.async_wait([this](asio::error_code ec) {
+            if (ec) return;
+            const auto now = monotonic_ms();
+            if (now >= visited_ms_ + slot_ms * slots) {  // the thread was held up a whole turn
+                for (auto& head : heads_) collect(head, now);
+                visited_ms_ = now / slot_ms * slot_ms;
+            }
+            for (; visited_ms_ + slot_ms - 1 <= now; visited_ms_ += slot_ms)
+                collect(heads_[(visited_ms_ / slot_ms) % slots], now);
+            // The due entries are on their own list: firing one may cancel,
+            // re-arm or destroy others.
+            while (due_.next != &due_) {
+                auto& entry = *due_.next;
+                unlink(entry);
+                --count_;
+                entry.fire();
+            }
+            if (count_) schedule();
+            else ticking_ = false;
+        });
+    }
+    asio::steady_timer ticker_;
+    std::array<WheelEntry, slots> heads_;
+    WheelEntry due_;
+    size_t count_ = 0;
+    uint64_t visited_ms_ = 0;
+    bool ticking_ = false;
+};
+WheelEntry::~WheelEntry() {
+    if (armed() && wheel) wheel->cancel(*this);  // the wheel's own list heads have none
+}
+
 struct alignas(64) Counts {
     std::atomic<uint64_t> active_requests{0}, reserved_bytes{0}, peak_requests{0}, peak_bytes{0};
     std::atomic<uint64_t> accepted{0}, rejected{0}, responses{0}, errors{0}, pending_decisions{0};
@@ -88,6 +239,9 @@ struct alignas(64) Counts {
     std::atomic<uint64_t> python_terminal_events{0};
     std::atomic<uint64_t> body_bytes_to_python{0}, body_bytes_from_python{0}, response_bytes{0};
     std::atomic<uint64_t> connections_open{0};  // framework host connections
+    // Connections handed to this shard and not closed yet (the accepting
+    // shard's choice of the least loaded one).
+    std::atomic<uint64_t> connections_assigned{0};
     size_t limit_count = 0, limit_bytes = 0;
     std::map<std::string,uint64_t> snapshot() const {
         std::map<std::string,uint64_t> d;
@@ -185,18 +339,20 @@ struct Decision {
     bool timed_out = false;   // answered after the response deadline was reported
 };
 struct Waiter {
-    ss::promise<Decision> promise;
+    explicit Waiter(asio::io_context& io) : decided(io), more(io), resumed(io) {}
+    std::optional<Decision> decision;
+    Event decided;
     bool replied = false;
     // A streamed response keeps its waiter: later decisions queue here.
     std::deque<Decision> chunks;
-    std::optional<ss::promise<>> more;
+    Event more;
     // A tunnel's reading of the peer is paused by Python (backpressure).
     bool paused = false;
-    std::optional<ss::promise<>> resumed;
+    Event resumed;
     // The response deadline (decide) until it is reported: request body data
     // arriving restarts it, as Sanic's RESPONSE_TIMEOUT counts from the last
     // data received.
-    ss::timer<ss::lowres_clock>* response_deadline = nullptr;
+    WheelEntry* response_deadline = nullptr;
 };
 // Request fields a framework handler receives, owned and independent of the
 // HTTP implementation that parsed them.
@@ -208,57 +364,104 @@ struct ApplicationInput {
     unsigned sequence = 0;
     bool unix_socket = false;
 };
-// The protocol and address of a listening socket (TCP or AF_UNIX).
-std::pair<int, ss::socket_address> listener_address(int fd) {
+// The protocol of a listening socket (TCP or AF_UNIX) another owner bound.
+asio::generic::stream_protocol listener_protocol(int fd) {
     sockaddr_storage storage{};
     socklen_t length = sizeof(storage);
     if (::getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &length) < 0)
         throw std::system_error(errno, std::system_category(), "read the listening socket's address");
-    ss::socket_address address;
-    if (storage.ss_family == AF_INET) {
-        address = ss::socket_address(reinterpret_cast<const sockaddr_in&>(storage));
-    } else if (storage.ss_family == AF_INET6) {
-        address = ss::socket_address(reinterpret_cast<const sockaddr_in6&>(storage));
-    } else if (storage.ss_family == AF_UNIX) {
-        const auto& unix_address = reinterpret_cast<const sockaddr_un&>(storage);
-        address = ss::socket_address(ss::unix_domain_addr(std::string(
-            unix_address.sun_path, strnlen(unix_address.sun_path, sizeof(unix_address.sun_path)))));
-    } else {
+    const int family = storage.ss_family;
+    if (family != AF_INET && family != AF_INET6 && family != AF_UNIX)
         throw std::invalid_argument("the listening socket is neither TCP nor AF_UNIX");
-    }
-    return {address.is_af_unix() ? 0 : IPPROTO_TCP, address};
+    return asio::generic::stream_protocol(family, family == AF_UNIX ? 0 : IPPROTO_TCP);
 }
 // A non-blocking duplicate of a listening socket another owner keeps.
-ss::file_desc listener_copy(int fd) {
+int listener_copy(int fd) {
     const int copy = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);  // the owner closes its own
     if (copy < 0) throw std::system_error(errno, std::system_category(), "duplicate the listening socket");
-    auto owned = ss::file_desc::from_fd(copy);
     // Accepted without blocking (the flag is shared with the owner's fd).
-    if (::fcntl(copy, F_SETFL, ::fcntl(copy, F_GETFL) | O_NONBLOCK) < 0)
+    if (::fcntl(copy, F_SETFL, ::fcntl(copy, F_GETFL) | O_NONBLOCK) < 0) {
+        ::close(copy);
         throw std::system_error(errno, std::system_category(), "make the listening socket non-blocking");
-    return owned;
+    }
+    return copy;
 }
-// Accepts on a listening socket (TCP or AF_UNIX) another owner bound, as
-// Seastar's posix stack does with sockets it binds without SO_REUSEPORT:
-// shard 0 accepts on a duplicate of it and hands connections to the others.
-ss::server_socket adopt_listener(int fd) {
-    const auto [protocol, address] = listener_address(fd);
-    if (ss::this_shard_id() != 0)
-        return ss::server_socket(std::make_unique<ss::net::posix_ap_server_socket_impl>(protocol, address));
-    auto owned = listener_copy(fd);
-    return ss::server_socket(std::make_unique<ss::net::posix_server_socket_impl>(
-        protocol, address, ss::pollable_fd(std::move(owned)),
-        ss::server_socket::load_balancing_algorithm::connection_distribution, 0, false));
+// http_host:http_port, bound here (tests and probes; app.run passes a socket).
+int bind_listener(const std::string& host, unsigned port) {
+    sockaddr_storage storage{};
+    socklen_t length;
+    auto* v4 = reinterpret_cast<sockaddr_in*>(&storage);
+    auto* v6 = reinterpret_cast<sockaddr_in6*>(&storage);
+    if (::inet_pton(AF_INET, host.c_str(), &v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET;
+        v4->sin_port = htons(uint16_t(port));
+        length = sizeof(sockaddr_in);
+    } else if (::inet_pton(AF_INET6, host.c_str(), &v6->sin6_addr) == 1) {
+        v6->sin6_family = AF_INET6;
+        v6->sin6_port = htons(uint16_t(port));
+        length = sizeof(sockaddr_in6);
+    } else {
+        throw std::invalid_argument("http_host must be an IP address");
+    }
+    const int fd = ::socket(storage.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) throw std::system_error(errno, std::system_category(), "socket");
+    const int one = 1;
+    if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0 ||
+        ::bind(fd, reinterpret_cast<sockaddr*>(&storage), length) < 0 || ::listen(fd, 100) < 0) {
+        const int error = errno;
+        ::close(fd);
+        throw std::system_error(error, std::system_category(), "listen on " + host + ":" + std::to_string(port));
+    }
+    return fd;
 }
-// Addresses as Python's socket module gives them: no IPv6 scope suffix for scope 0.
-std::string address_text(const ss::socket_address& address) {
-    auto text = fmt::format("{}", address.addr());
-    if (text.ends_with("%0")) text.resize(text.size() - 2);
-    return text;
+// An address as Python's socket module gives it: no IPv6 scope suffix for
+// scope 0, and its port.
+std::pair<std::string, unsigned> address_of(const Endpoint& endpoint) {
+    const auto* address = endpoint.data();
+    char text[INET6_ADDRSTRLEN] = {};
+    if (address->sa_family == AF_INET) {
+        const auto& v4 = *reinterpret_cast<const sockaddr_in*>(address);
+        ::inet_ntop(AF_INET, &v4.sin_addr, text, sizeof(text));
+        return {text, ntohs(v4.sin_port)};
+    }
+    if (address->sa_family == AF_INET6) {
+        const auto& v6 = *reinterpret_cast<const sockaddr_in6*>(address);
+        ::inet_ntop(AF_INET6, &v6.sin6_addr, text, sizeof(text));
+        std::string result(text);
+        if (v6.sin6_scope_id) result += "%" + std::to_string(v6.sin6_scope_id);
+        return {result, ntohs(v6.sin6_port)};
+    }
+    return {};
 }
+class Service;
+}  // namespace
+
+struct NetworkServer::Impl : std::enable_shared_from_this<NetworkServer::Impl> {
+    Shared shared;
+    std::vector<asio::io_context*> contexts;
+    Offload offload;
+    std::vector<std::unique_ptr<Service>> services;  // services[i] lives on shard i
+    bool started = false, stopped = false;
+    std::mutex lifecycle;
+    Impl(ServerConfig c, std::vector<asio::io_context*> shards, std::function<void()> wake, Offload files)
+        : shared(std::move(c), unsigned(shards.size()), std::move(wake)), contexts(std::move(shards)),
+          offload(std::move(files)), services(contexts.size()) {}
+    // Runs fn(shard) on every shard and waits for all; the first failure is
+    // rethrown once all have run.
+    void on_all(const std::function<void(unsigned)>& fn);
+    void on_all_async(const std::function<asio::awaitable<void>(unsigned)>& fn);
+    unsigned least_loaded_shard() const;
+    void hand_off(unsigned shard, Socket socket, Endpoint remote, const std::string* unix_path, bool counted);
+};
+
+namespace {
 class Service {
+    NetworkServer::Impl& owner;
     Shared& shared;
     Counts& counts;
+    const unsigned shard;
+    asio::io_context& io;
+    Wheel wheel;  // first in, last out: every entry of it goes before it
     std::map<uint64_t, std::unique_ptr<Waiter>> waiters;
     // Request and connection ids count on per shard across the servers a
     // process runs one after another: a late answer to a replaced server's
@@ -267,20 +470,21 @@ class Service {
         static thread_local uint64_t counters[2] = {0, 0};
         return counters[which];
     }
-    uint64_t& next_id = shard_counter(0);
+    uint64_t& next_id;
     bool closing = false;
     // Stopping gracefully (drain): no new connections, idle ones closed, the
     // others closed after their response.
     bool draining = false;
     bool accepts() const { return !closing && !draining; }
-    uint64_t& next_peer = shard_counter(1);
+    uint64_t& next_peer;
     // ---- HTTP/1.1 host for framework dispatch (application_dispatch_all) ----
-    // Parses and writes HTTP/1.1 directly on Seastar sockets: one buffered write
+    // Parses and writes HTTP/1.1 directly on the sockets: one buffered write
     // per batch of responses, Content-Length framing, repeated header names.
     struct AppConnection {
-        ss::connected_socket socket;
-        ss::input_stream<char> input;
-        ss::output_stream<char> output;
+        explicit AppConnection(Socket s) : socket(std::move(s)) {}
+        Socket socket;
+        uint64_t key = 0;  // (id << 16) | shard
+        char chunk[16384];  // each read lands here first
         // serve_application's read buffer and parse position: bytes the peer
         // sent after a request that switches protocols belong to the tunnel.
         std::string* buffer = nullptr;
@@ -294,14 +498,18 @@ class Service {
         bool shut_here = false;  // this side shut the input (deadline, stop, the end)
         // Armed while a write waits for the peer to take it (write_timeout_ms):
         // a peer that stops reading has the connection shut, failing the write.
-        ss::timer<ss::lowres_clock> write_timer;
+        WheelEntry write_timer;
         bool idle = false;  // waiting for a request, nothing of it received
         bool body_arriving = false;  // forward_body reads the connection
-        explicit AppConnection(ss::connected_socket s)
-            : socket(std::move(s)), input(socket.input()), output(socket.output()) {}
+        // Shutting the input ends a pending read (it returns EOF).
         void shut_input() {
             shut_here = true;
-            try { socket.shutdown_input(); } catch (...) {}  // ENOTCONN after a reset
+            asio::error_code ignored;
+            socket.shutdown(Socket::shutdown_receive, ignored);  // ENOTCONN after a reset
+        }
+        void shut_output() {
+            asio::error_code ignored;
+            socket.shutdown(Socket::shutdown_send, ignored);
         }
     };
     // The peer of a connection left: as Sanic's connection_lost, the request
@@ -311,51 +519,82 @@ class Service {
         if (connection.peer_gone) return;
         connection.peer_gone = true;
         if (!connection.handling || connection.tunnel || closing) return;
-        RequestEvent lost{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                          {}, "application_lost", connection_key};
+        RequestEvent lost{(++next_id << 16) | shard, shard, {}, "application_lost", connection_key};
         lost.parent = connection.handling;
         shared.publish(std::move(lost), true);
     }
-    std::optional<ss::server_socket> app_listener, worker_listener;
-    ss::future<> app_accepting = ss::make_ready_future<>(), worker_accepting = ss::make_ready_future<>();
-    // Shared listen_fd: shard 0's accept loop (accept_shared) and the eventfd
-    // stop() writes to end it.
-    ss::future<> shared_accepting = ss::make_ready_future<>();
-    std::optional<ss::file_desc> shared_wake;
+    // The peer leaving (FIN or RST) while Python handles a request on a
+    // connection: one epoll set of the shard holds every connection, once,
+    // for EPOLLRDHUP, from its accept to its close. A connection leaves it
+    // when it fires; closing the socket takes it out too. This side's own
+    // input shutdowns fire it as well, and are not the peer leaving.
+    int rdhup_set = -1;
+    std::optional<asio::posix::stream_descriptor> rdhup_fd;
+    // The set's wait, which stop() ends before the set closes: the io_uring
+    // backend can complete a cancelled wait as ready, after the service.
+    bool watching = true;
+    Gate peer_watch;
+    void watch_peers() {
+        // Asio's registration of the set's fd is edge-triggered and a wait
+        // never completes on readiness that came before it: the set is
+        // drained after the wait is armed.
+        peer_watch.enter();
+        rdhup_fd->async_wait(asio::posix::stream_descriptor::wait_read, [this](asio::error_code ec) {
+            peer_watch.leave();
+            if (!ec && watching) watch_peers();
+        });
+        epoll_event events[64];
+        int n;
+        do {
+            n = ::epoll_wait(rdhup_set, events, 64, 0);
+            for (int i = 0; i < n; ++i) {
+                auto it = app_peers.find(events[i].data.u64);
+                if (it == app_peers.end()) continue;
+                auto& connection = *it->second;
+                ::epoll_ctl(rdhup_set, EPOLL_CTL_DEL, connection.socket.native_handle(), nullptr);
+                if (!connection.shut_here) peer_left(connection, connection.key);
+            }
+        } while (n == 64);
+    }
+    // Shard 0's listeners: their acceptors (so stopping can end their
+    // accepts), and whether stopping shuts the socket down for everyone (a
+    // listener of this process's own).
+    struct Listener {
+        Acceptor acceptor;
+        const std::string* unix_path;
+        bool own;
+    };
+    std::vector<std::unique_ptr<Listener>> listeners;
+    Gate accepting;
     // Shared listen_fd: the worker processes' accept counts, and this one's.
     AcceptSlot* accept_slots = nullptr;
     AcceptSlot* own_slot = nullptr;
     uint64_t own_pid = 0;
-    ss::timer<ss::lowres_clock> accept_heartbeat;
-    // Ends the pauses of the accept loops after a failed accept (stop()).
-    ss::abort_source accept_pause;
+    std::optional<asio::steady_timer> accept_heartbeat;
+    // The pauses of the accept loops after a failed accept (stop() ends them).
+    std::set<asio::steady_timer*> accept_pauses;
     // After a failed accept: wait before accepting again, longer while the
     // failures go on (from 10 ms to 1 s; asyncio waits 1 s after EMFILE).
     // False when the server stops meanwhile.
-    ss::future<bool> pause_accepting(unsigned failures) {
+    asio::awaitable<bool> pause_accepting(unsigned failures) {
         const auto pause = std::chrono::milliseconds(10 << std::min(failures, 6u));
-        try {
-            co_await ss::sleep_abortable(std::min(pause, std::chrono::milliseconds(1000)), accept_pause);
-        } catch (const ss::sleep_aborted&) {
-            co_return false;
-        }
-        co_return accepts();
+        asio::steady_timer timer(io, std::min(pause, std::chrono::milliseconds(1000)));
+        accept_pauses.insert(&timer);
+        auto [ec] = co_await timer.async_wait(use_tuple);
+        accept_pauses.erase(&timer);
+        co_return !ec && accepts();
     }
-    ss::gate app_connections;
+    Gate app_connections;
     std::map<uint64_t, std::unique_ptr<AppConnection>> app_peers;
     // A request body forwarded to Python while its handler runs (forward_body):
     // what was published and the handler has not read yet (body_read decisions).
     struct BodyFlow {
+        explicit BodyFlow(asio::io_context& io) : room(io) {}
         size_t unread = 0;
         bool publishing = true;  // until the response is out
         bool stopped = false;    // the connection closes after the response
-        std::optional<ss::promise<>> room;
-        void wake() {
-            if (room) {
-                room->set_value();
-                room.reset();
-            }
-        }
+        Event room;
+        void wake() { room.set(); }
     };
     std::map<uint64_t, BodyFlow*> body_flows;  // by request id
     http1::DateLine date_line;
@@ -364,32 +603,37 @@ class Service {
     std::string_view date() {
         return shared.config.generate_date_header ? date_line.get() : std::string_view{};
     }
+    // What the peer sent next, appended to `buffer`: false at its end (EOF,
+    // or this side shut the input). A failure (a reset) throws.
+    asio::awaitable<bool> read_into(AppConnection& connection, std::string& buffer) {
+        auto [ec, n] = co_await connection.socket.async_read_some(
+            asio::buffer(connection.chunk, sizeof(connection.chunk)), use_tuple);
+        if (ec == asio::error::eof) co_return false;
+        if (ec) throw std::system_error(ec);
+        buffer.append(connection.chunk, n);
+        co_return true;
+    }
+    asio::awaitable<void> write_all(AppConnection& connection, std::string_view data) {
+        auto [ec, n] = co_await asio::async_write(connection.socket, asio::buffer(data.data(), data.size()),
+                                                  use_tuple);
+        if (ec) throw std::system_error(ec);
+    }
     // One write the peer must take within write_timeout_ms (see AppConnection).
-    template <typename Write>
-    ss::future<> timed_write(AppConnection& connection, Write write) {
-        if (const auto timeout = shared.config.write_timeout_ms)
-            connection.write_timer.arm(ss::lowres_clock::now() + std::chrono::milliseconds(timeout));
+    asio::awaitable<void> timed_write(AppConnection& connection, std::string_view data) {
+        if (const auto timeout = shared.config.write_timeout_ms) wheel.arm(connection.write_timer, timeout);
         std::exception_ptr failure;
         try {
-            co_await write();
+            co_await write_all(connection, data);
         } catch (...) {
             failure = std::current_exception();
         }
-        connection.write_timer.cancel();
+        wheel.cancel(connection.write_timer);
         if (failure) std::rethrow_exception(failure);
     }
-    ss::future<> flush_output(AppConnection& connection, std::string& output) {
+    asio::awaitable<void> flush_output(AppConnection& connection, std::string& output) {
         if (output.empty()) co_return;
-        co_await timed_write(connection, [&]() -> ss::future<> {
-            co_await connection.output.write(output.data(), output.size());
-            co_await connection.output.flush();
-        });
+        co_await timed_write(connection, output);
         output.clear();
-    }
-    static uint64_t monotonic_ms() {
-        timespec now{};
-        ::clock_gettime(CLOCK_MONOTONIC, &now);
-        return uint64_t(now.tv_sec) * 1000 + uint64_t(now.tv_nsec) / 1000000;
     }
     // A sibling counts while its heartbeat (every 50 ms) is this recent: one
     // that crashed or hangs holds the others back for at most this long.
@@ -430,146 +674,153 @@ class Service {
         pollfd ready{shared.config.listen_fd, POLLIN, 0};
         return ::poll(&ready, 1, 0) > 0 && (ready.revents & POLLIN);
     }
-    // Shard 0 of a worker process that shares listen_fd with others. Seastar's
-    // accept can only be stopped by shutting the socket down, which stops it
-    // for every process (a restarted worker's siblings then refused all
-    // connections). This loop waits on a process-local epoll set holding the
-    // socket and the eventfd stop() writes, accepts without blocking, and
-    // hands each connection to the shard with the fewest, as Seastar's
-    // connection_distribution does; every shard takes them from its ap socket.
+    void stop_heartbeat() {
+        if (accept_heartbeat) accept_heartbeat->cancel();
+        if (own_slot && owns_slot()) own_slot->heartbeat_ms.store(0, std::memory_order_release);
+    }
+    asio::awaitable<void> beat_heartbeat() {
+        while (accepts()) {
+            accept_heartbeat->expires_after(std::chrono::milliseconds(50));
+            auto [ec] = co_await accept_heartbeat->async_wait(use_tuple);
+            if (ec || !accepts()) break;
+            if (owns_slot()) own_slot->heartbeat_ms.store(monotonic_ms(), std::memory_order_release);
+        }
+    }
+    // Shard 0 of a worker process that shares listen_fd with others: accepts
+    // on its own duplicate (cancelling an accept leaves the shared socket
+    // alone, while shutting it down would stop it for every process) and
+    // hands each connection to its least loaded shard.
     //
-    // Without taking turns, the process whose shard is busy (polling instead
-    // of sleeping) wins nearly every accept. Shard 0 accepts while it is least
-    // loaded. Holding back, it checks again after 50 us, then less often (up
-    // to every 1 ms): two processes that both accept quickly keep passing the
-    // turn, and one that has fallen behind only notices at its next check
-    // (checking every 200 us left connections queued, a median latency of
-    // 15 ms at 20k connections/s). After 1 ms it takes a connection still
-    // waiting: the others are not accepting (an idle shard wakes well within).
-    ss::future<> accept_shared(int protocol, ss::socket_address address) {
+    // Without taking turns, the process whose shard is busy wins nearly every
+    // accept. Shard 0 accepts while it is least loaded. Holding back, it
+    // checks again after 50 us, then less often (up to every 1 ms): two
+    // processes that both accept quickly keep passing the turn, and one that
+    // has fallen behind only notices at its next check (checking every 200 us
+    // left connections queued, a median latency of 15 ms at 20k
+    // connections/s). After 1 ms it takes a connection still waiting: the
+    // others are not accepting (an idle shard wakes well within).
+    asio::awaitable<void> accept_shared(Listener& listener) {
         try {
-            auto socket = listener_copy(shared.config.listen_fd);
-            const int epoll = ::epoll_create1(EPOLL_CLOEXEC);
-            if (epoll < 0) throw std::system_error(errno, std::system_category(), "epoll_create1");
-            auto watched = ss::file_desc::from_fd(epoll);
-            for (int fd : {socket.get(), shared_wake->get()}) {
-                epoll_event event{};
-                event.events = EPOLLIN;
-                event.data.fd = fd;
-                if (::epoll_ctl(epoll, EPOLL_CTL_ADD, fd, &event) < 0)
-                    throw std::system_error(errno, std::system_category(), "epoll_ctl");
-            }
-            ss::pollable_fd ready(std::move(watched));
-            ss::net::conntrack shards;
             unsigned failures = 0;
             while (accepts()) {
                 if (own_slot) {
                     auto pause = std::chrono::microseconds(50);
-                    const auto give_up = ss::steady_clock_type::now() + std::chrono::milliseconds(1);
+                    const auto give_up = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
+                    asio::steady_timer timer(io);
                     while (accepts() && !least_loaded()) {
-                        co_await ss::sleep(pause);
+                        timer.expires_after(pause);
+                        co_await timer.async_wait(use_tuple);
                         pause = std::min(pause * 2, std::chrono::microseconds(1000));
-                        if (ss::steady_clock_type::now() >= give_up && connection_waiting()) break;
+                        if (std::chrono::steady_clock::now() >= give_up && connection_waiting()) break;
                     }
                 }
                 if (!accepts()) break;
-                ss::socket_address remote;
-                socklen_t length = sizeof(remote.u);
-                const int fd = ::accept4(socket.get(), &remote.u.sa, &length, SOCK_NONBLOCK | SOCK_CLOEXEC);
-                if (fd < 0) {
-                    const int error = errno;
-                    if (error == EAGAIN || error == EWOULDBLOCK || error == EINTR || error == ECONNABORTED) {
-                        co_await ready.readable();  // a connection, or stop()
-                    } else if (error == EBADF || error == EINVAL || error == ENOTSOCK || error == EFAULT) {
-                        // The listening socket itself is unusable.
-                        throw std::system_error(error, std::system_category(), "accept4");
-                    } else {
-                        // Out of descriptors or memory (EMFILE, ENFILE, ENOBUFS,
-                        // ENOMEM), or what accept(2) says to retry on a TCP
-                        // socket (EPROTO, ENETDOWN, EHOSTUNREACH, ..., EPERM from
-                        // a firewall): this connection failed, the next may not.
-                        ++counts.errors;
-                        if (!co_await pause_accepting(failures++)) break;
-                    }
-                    continue;
-                }
-                failures = 0;
-                // Counted now, not when its shard takes it: through a burst
-                // this loop accepts without yielding, and with a count that
-                // lags, each process holding the turn took all it could. (One
-                // dropped as this process stops stays counted; its line no
-                // longer counts then.)
-                if (own_slot) count_connection(1);
-                remote.addr_length = length;
-                auto handle = shards.get_handle();
-                const auto shard = handle.cpu();
-                (void)ss::smp::submit_to(shard, [protocol, address, connection = ss::file_desc::from_fd(fd),
-                                                 remote, handle = std::move(handle)]() mutable {
-                    ss::net::posix_ap_server_socket_impl::move_connected_socket(
-                        protocol, address, ss::pollable_fd(std::move(connection)), remote, std::move(handle),
-                        std::nullopt, ss::memory::malloc_allocator);
-                });
+                if (!co_await accept_one(listener, true, failures)) break;
             }
         } catch (...) {
             if (accepts()) {
                 ++counts.errors;
                 // This process no longer accepts: its siblings stop waiting
                 // for its turn (its heartbeat would say it still does).
-                if (own_slot) {
-                    accept_heartbeat.cancel();
-                    if (owns_slot()) own_slot->heartbeat_ms.store(0, std::memory_order_release);
-                }
+                if (own_slot) stop_heartbeat();
             }
         }
     }
-    // unix_path (a ServerConfig member, so it outlives the connections): what
-    // requests over an AF_UNIX listener report as the server address.
-    // counted: accept_shared counted the connections as it accepted them.
-    ss::future<> accept_application(ss::server_socket& listener, const std::string& unix_path,
-                                    bool counted = false) {
+    // A listener of this process's own (listen_fd, NATIVE_WORKER_LISTEN, or
+    // http_host:http_port): shard 0 accepts and hands each connection to its
+    // least loaded shard.
+    asio::awaitable<void> accept_own(Listener& listener) {
         try {
             unsigned failures = 0;
-            while (accepts()) {
-                std::optional<ss::accept_result> result;
-                try {
-                    result = co_await listener.accept();
-                } catch (...) {}
-                if (!result) {
-                    // Seastar's listener throws for every accept error: out of
-                    // descriptors (EMFILE under load), a connection reset before
-                    // it was accepted. The listener is still usable: the loop
-                    // ended here, and the process never accepted again.
-                    if (!accepts()) break;
-                    ++counts.errors;
-                    if (!co_await pause_accepting(failures++)) break;
-                    continue;
-                }
-                failures = 0;
-                auto accepted = std::move(*result);
-                if (!accepts()) break;
-                auto id = ++next_peer;
-                app_peers.emplace(id, std::make_unique<AppConnection>(std::move(accepted.connection)));
-                ++counts.connections_open;
-                // Every open connection counts towards this process's load.
-                if (own_slot && !counted) count_connection(1);
-                (void)ss::with_gate(app_connections, [this, id, remote = accepted.remote_address, &unix_path] {
-                    return serve_application(id, remote, unix_path);
-                }).handle_exception([this](std::exception_ptr) { ++counts.errors; }).finally([this] {
-                    if (own_slot) count_connection(-1);
-                });
-            }
+            while (accepts())
+                if (!co_await accept_one(listener, false, failures)) break;
         } catch (...) { if (accepts()) ++counts.errors; }
     }
-    ss::future<> serve_application(uint64_t id, ss::socket_address remote, const std::string& unix_path) {
+    // One accept: false when accepting ends. counted: the connection counts
+    // towards this process's load now, not when its shard takes it (through
+    // a burst the loop accepts without yielding, and with a count that lags,
+    // each process holding the turn took all it could; one dropped as this
+    // process stops stays counted: its line no longer counts then).
+    // With none queued it waits for one and the loop accepts again: a wait,
+    // not an asynchronous accept, which the io_uring backend retries while
+    // the socket polls ready and has none (another process took it, or an
+    // AF_UNIX listener was shut down) and loses a cancel that came meanwhile.
+    asio::awaitable<bool> accept_one(Listener& listener, bool counted, unsigned& failures) {
+        const auto target = owner.least_loaded_shard();
+        Endpoint remote;
+        asio::error_code ec;
+        Socket socket = listener.acceptor.accept(*owner.contexts[target], remote, ec);
+        if (ec == asio::error::would_block || ec == asio::error::try_again) {
+            auto [waited] = co_await listener.acceptor.async_wait(Acceptor::wait_read, use_tuple);
+            co_return waited != asio::error::operation_aborted && accepts();
+        }
+        if (ec) {
+            if (!accepts()) co_return false;
+            const int error = ec.value();
+            if (error == EBADF || error == EINVAL || error == ENOTSOCK || error == EFAULT)
+                throw std::system_error(ec, "accept");  // the listening socket itself is unusable
+            // Out of descriptors or memory (EMFILE, ENFILE, ENOBUFS, ENOMEM),
+            // or what accept(2) says to retry on a TCP socket (EPROTO,
+            // ENETDOWN, EHOSTUNREACH, ..., EPERM from a firewall): this
+            // connection failed, the next may not.
+            ++counts.errors;
+            co_return co_await pause_accepting(failures++);
+        }
+        failures = 0;
+        if (!accepts()) co_return false;
+        if (counted && own_slot) count_connection(1);
+        owner.hand_off(target, std::move(socket), remote, listener.unix_path, counted);
+        co_return true;
+    }
+public:
+    Service(NetworkServer::Impl& server, unsigned id, asio::io_context& context)
+        : owner(server), shared(server.shared), counts(*server.shared.counts[id]), shard(id), io(context),
+          wheel(context), next_id(shard_counter(0)), next_peer(shard_counter(1)), peer_watch(context),
+          accepting(context), app_connections(context) {}
+    ~Service() {
+        if (rdhup_set >= 0) {
+            rdhup_fd.reset();  // closes the set
+        }
+    }
+    // A connection accepted for this shard (by shard 0); unix_path (a
+    // ServerConfig member, so it outlives the connections): what requests over
+    // an AF_UNIX listener report as the server address. counted: shard 0
+    // counted it towards this process's load as it accepted it.
+    void adopt(Socket socket, Endpoint remote, const std::string& unix_path, bool counted) {
+        if (!accepts()) {
+            --counts.connections_assigned;
+            return;
+        }
+        auto id = ++next_peer;
+        auto [it, added] = app_peers.emplace(id, std::make_unique<AppConnection>(std::move(socket)));
+        auto& connection = *it->second;
+        connection.key = (id << 16) | shard;
+        epoll_event event{};
+        event.events = EPOLLRDHUP;
+        event.data.u64 = id;
+        ::epoll_ctl(rdhup_set, EPOLL_CTL_ADD, connection.socket.native_handle(), &event);
+        ++counts.connections_open;
+        // Every open connection counts towards this process's load.
+        if (own_slot && !counted) count_connection(1);
+        app_connections.enter();
+        asio::co_spawn(io, serve_application(id, remote, unix_path), [this](std::exception_ptr failure) {
+            if (failure) ++counts.errors;
+            if (own_slot) count_connection(-1);
+            --counts.connections_assigned;
+            app_connections.leave();
+        });
+    }
+    asio::awaitable<void> serve_application(uint64_t id, Endpoint remote, const std::string& unix_path) {
         auto& connection = *app_peers.at(id);
         const auto& config = shared.config;
-        const auto local = connection.socket.local_address();
+        asio::error_code ignored;
+        const auto local = connection.socket.local_endpoint(ignored);
         // Over a unix socket Sanic reports no client address and the socket path.
-        const bool unix_socket = local.is_af_unix();
+        const bool unix_socket = local.data()->sa_family == AF_UNIX;
         using Address = std::pair<std::string, unsigned>;
-        const Address client = unix_socket ? Address{} : Address{address_text(remote), remote.port()};
-        const Address server = unix_socket ? Address{unix_path, 0} : Address{address_text(local), local.port()};
-        const uint64_t connection_key = (id << 16) | ss::this_shard_id();
+        const Address client = unix_socket ? Address{} : address_of(remote);
+        const Address server = unix_socket ? Address{unix_path, 0} : address_of(local);
+        const uint64_t connection_key = connection.key;
         unsigned sequence = 0;
         std::string buffer, output;
         size_t consumed = 0;
@@ -578,24 +829,17 @@ class Service {
         // Keep-alive idle and request-receive deadlines: the timer shuts the input
         // down, which ends the pending read; `expired` says which deadline it was.
         enum class Wait { none, idle, request, response } expired = Wait::none, waiting = Wait::none;
-        ss::lowres_clock::time_point request_started{};
-        ss::timer<ss::lowres_clock> deadline([&] {
+        uint64_t request_started = 0;
+        WheelEntry deadline;
+        deadline.fire = [&] {
             expired = waiting;
             connection.shut_input();
-        });
-        connection.write_timer.set_callback([&connection, this] {
+        };
+        connection.write_timer.fire = [&connection, this] {
             ++counts.errors;
             connection.shut_input();
-            try { connection.socket.shutdown_output(); } catch (...) {}
-        });
-        // The peer leaving (FIN or RST) while Python handles a request here.
-        // One watch for the connection's life, which ends when either side
-        // shuts the input; this side's own shutdowns are not the peer leaving.
-        auto watching = connection.socket.wait_input_shutdown().then_wrapped(
-            [this, &connection, connection_key](ss::future<> done) {
-                done.ignore_ready_future();
-                if (!connection.shut_here) peer_left(connection, connection_key);
-            });
+            connection.shut_output();
+        };
         // What a read waits for, and so its deadline. Sanic times each stage
         // from the last data received: KEEP_ALIVE_TIMEOUT between requests;
         // REQUEST_TIMEOUT while a head arrives (here from its first byte, which
@@ -605,7 +849,7 @@ class Service {
         // not answered; a streamed response has none); after the response,
         // the rest of the body as KEEP_ALIVE_TIMEOUT.
         enum class Reading { next, request, body, rest };
-        auto read_more = [&](Reading reading = Reading::next) -> ss::future<bool> {
+        auto read_more = [&](Reading reading = Reading::next) -> asio::awaitable<bool> {
             const bool idle = reading == Reading::rest ||
                               (reading == Reading::next && buffer.size() == consumed);
             if (idle && draining) co_return false;  // Sanic's close_if_idle
@@ -614,16 +858,22 @@ class Service {
             const auto timeout = body ? config.decision_timeout_ms
                                  : idle ? config.keep_alive_timeout_ms : config.request_timeout_ms;
             if (timeout) {
-                deadline.arm(idle || body ? ss::lowres_clock::now() + std::chrono::milliseconds(timeout)
-                                          : request_started + std::chrono::milliseconds(timeout));
+                if (idle || body) wheel.arm(deadline, timeout);
+                else wheel.arm_at(deadline, request_started + timeout);
             }
             connection.idle = idle && reading == Reading::next;
-            auto chunk = co_await connection.input.read();
+            std::exception_ptr failure;
+            bool more = false;
+            try {
+                more = co_await read_into(connection, buffer);
+            } catch (...) {
+                failure = std::current_exception();
+            }
             connection.idle = false;
-            deadline.cancel();
-            if (chunk.empty()) co_return false;
-            if (idle && reading == Reading::next) request_started = ss::lowres_clock::now();
-            buffer.append(chunk.get(), chunk.size());
+            wheel.cancel(deadline);
+            if (failure) std::rethrow_exception(failure);
+            if (!more) co_return false;
+            if (idle && reading == Reading::next) request_started = monotonic_ms();
             co_return true;
         };
         try {
@@ -657,7 +907,7 @@ class Service {
                     bool close = true;
                     co_await respond_application(connection, "NONE", std::move(input), {}, false, true,
                                                  close, output, 0,
-                                                 fmt::format("error:{}:{}", head.error_status, head.error),
+                                                 std::format("error:{}:{}", head.error_status, head.error),
                                                  head.error_status);
                     break;
                 }
@@ -730,7 +980,7 @@ class Service {
                     complete = available == length;
                 }
                 consumed = start;
-                request_started = ss::lowres_clock::now();  // for a pipelined successor
+                request_started = monotonic_ms();  // for a pipelined successor
                 if (complete) {
                     co_await respond_application(connection, method, std::move(input), std::move(body),
                                                  head_request, http11, close, output, 0);
@@ -739,26 +989,25 @@ class Service {
                 }
                 if (head.expect_continue && http11) output.append("HTTP/1.1 100 Continue\r\n\r\n");
                 co_await flush_output(connection, output);
-                const uint64_t root = (++next_id << 16) | ss::this_shard_id();
+                const uint64_t root = (++next_id << 16) | shard;
                 size_t remaining = chunked ? 0 : length - body.size();
                 bool body_ok = true;
                 bool over = false;  // a chunked body declared more than max_body_bytes
                 // At most body_window_bytes ahead of the handler (Sanic pauses
                 // reading at REQUEST_BUFFER_SIZE); none once the response is out.
-                BodyFlow flow;
+                BodyFlow flow(io);
                 body_flows.emplace(root, &flow);
-                auto unregister = ss::defer([&]() noexcept { body_flows.erase(root); });
+                Defer unregister{[&]() noexcept { body_flows.erase(root); }};
                 auto publish_data = [&](std::string piece, std::string parameter) {
-                    RequestEvent data{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                                      method, "application_data", piece.size(), true, std::move(piece),
-                                      std::move(parameter)};
+                    RequestEvent data{(++next_id << 16) | shard, shard, method, "application_data",
+                                      piece.size(), true, std::move(piece), std::move(parameter)};
                     data.parent = root;
                     counts.body_bytes_to_python += data.body.size();
                     flow.unread += data.body.size();
                     shared.publish(std::move(data), true);
                 };
-                auto forward_body = [&]() -> ss::future<> {
-                    auto arrived = ss::defer([&]() noexcept { connection.body_arriving = false; });
+                auto forward_body = [&]() -> asio::awaitable<void> {
+                    Defer arrived{[&]() noexcept { connection.body_arriving = false; }};
                     for (;;) {
                         std::string piece;
                         bool end = false;
@@ -799,10 +1048,8 @@ class Service {
                             publish_data(std::move(piece), end ? "end" : "");
                         if (end) co_return;
                         if (more_here) continue;
-                        while (flow.publishing && flow.unread >= config.body_window_bytes && !closing) {
-                            flow.room.emplace();
-                            co_await flow.room->get_future();
-                        }
+                        while (flow.publishing && flow.unread >= config.body_window_bytes && !closing)
+                            co_await flow.room.wait();
                         if (flow.stopped || closing) {
                             body_ok = false;
                             co_return;
@@ -822,8 +1069,8 @@ class Service {
                                 // restarted with the same piece, reports it.
                                 auto response = waiters.find(root);
                                 if (response == waiters.end() || !response->second->response_deadline) {
-                                    RequestEvent timeout{(++next_id << 16) | ss::this_shard_id(),
-                                                         ss::this_shard_id(), method, "application_timeout", 0};
+                                    RequestEvent timeout{(++next_id << 16) | shard, shard, method,
+                                                         "application_timeout", 0};
                                     timeout.parent = root;
                                     shared.publish(std::move(timeout), true);
                                 }
@@ -836,24 +1083,40 @@ class Service {
                             co_return;
                         }
                         if (auto it = waiters.find(root); it != waiters.end() && it->second->response_deadline)
-                            it->second->response_deadline->rearm(
-                                ss::lowres_clock::now() + std::chrono::milliseconds(config.decision_timeout_ms));
+                            wheel.arm(*it->second->response_deadline, config.decision_timeout_ms);
                     }
                 };
-                // Seastar coroutines run eagerly: respond_application publishes the
-                // request before its first suspension, so the data events that
-                // forward_body publishes afterwards always follow it.
+                // respond_application publishes the request (with its id, root)
+                // before it waits for Python: the data events forward_body
+                // publishes start only after that, and so follow it.
                 connection.body_arriving = true;
-                auto responding = respond_application(connection, method, std::move(input),
-                                                      std::move(body), head_request, http11, close,
-                                                      output, root);
-                auto forwarding = forward_body();
-                co_await std::move(responding);
+                Event published(io), responded(io), forwarded(io);
+                bool responding_done = false, forwarding_done = false;
+                std::exception_ptr responding_failure;
+                asio::co_spawn(io, respond_application(connection, method, std::move(input), std::move(body),
+                                                       head_request, http11, close, output, root, {}, 0,
+                                                       &published),
+                               [&](std::exception_ptr failure) {
+                                   responding_failure = failure;
+                                   responding_done = true;
+                                   published.set();
+                                   responded.set();
+                               });
+                co_await published.wait();
+                asio::co_spawn(io, forward_body(), [&](std::exception_ptr) {
+                    forwarding_done = true;
+                    forwarded.set();
+                });
+                while (!responding_done) co_await responded.wait();
+                if (responding_failure) {
+                    while (!forwarding_done) co_await forwarded.wait();
+                    std::rethrow_exception(responding_failure);
+                }
                 // The handler is done with the body: the rest is read past (as
                 // Sanic does after a response), or not at all if the connection
                 // ends now.
                 flow.publishing = false;
-                if (!forwarding.available()) {
+                if (!forwarding_done) {
                     // The response goes out now, as Sanic sends it, not once the
                     // rest of the body has come (forward_body does not write).
                     try {
@@ -867,7 +1130,7 @@ class Service {
                     }
                 }
                 flow.wake();
-                co_await std::move(forwarding);
+                while (!forwarding_done) co_await forwarded.wait();
                 if (!body_ok) {
                     expired = Wait::none;  // the response already reported it
                     close = true;
@@ -890,31 +1153,27 @@ class Service {
         if (sequence) {
             // Python keeps per-connection state (ConnInfo, protocol) until this,
             // however the connection ended (a reset or a failed write included).
-            RequestEvent closed{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                                {}, "application_closed", 0};
+            RequestEvent closed{(++next_id << 16) | shard, shard, {}, "application_closed", 0};
             closed.parent = connection_key;
             shared.publish(std::move(closed), true);
         }
-        deadline.cancel();
+        wheel.cancel(deadline);
         if (!connection.shut_here) connection.shut_input();
-        co_await std::move(watching);  // it refers to the connection
-        // Closing flushes what is left: within the write deadline too.
-        try {
-            co_await timed_write(connection, [&] { return connection.output.close(); });
-        } catch (...) {}
-        try { co_await connection.input.close(); } catch (...) {}
-        app_peers.erase(id);
+        // The peer gets this side's FIN before the socket closes.
+        connection.shut_output();
+        app_peers.erase(id);  // closes the socket
         --counts.connections_open;
     }
     // streamed_id: nonzero when the body is still arriving; the request is
     // published under that id (application_data events refer to it).
     // parameter/error_status: a protocol error Python renders ("error:<status>:<message>");
-    // the native fallback answers with that status.
-    ss::future<> respond_application(AppConnection& connection, const std::string& method,
-                                     ApplicationInput input, std::string body, bool head_request,
-                                     bool http11, bool& close, std::string& output,
-                                     uint64_t streamed_id, std::string parameter = {},
-                                     int error_status = 0) {
+    // the native fallback answers with that status. published: set once the
+    // request is published (or will not be).
+    asio::awaitable<void> respond_application(AppConnection& connection, const std::string& method,
+                                              ApplicationInput input, std::string body, bool head_request,
+                                              bool http11, bool& close, std::string& output,
+                                              uint64_t streamed_id, std::string parameter = {},
+                                              int error_status = 0, Event* published = nullptr) {
         const auto size = body.size();
         // Admission covers the request (input twice) and the response head; response
         // bodies are bounded by max_response_bytes, not reserved up front.
@@ -923,17 +1182,22 @@ class Service {
         unsigned terminal_status = 500;
         bool retired = false;
         const auto connection_key = input.connection;
-        auto finished = ss::defer([&] () noexcept {
+        Defer finished{[&]() noexcept {
             connection.handling = 0;
             if (!root || retired) return;
-            RequestEvent event{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                               method, "application_done", terminal_status};
+            RequestEvent event{(++next_id << 16) | shard, shard, method, "application_done", terminal_status};
             event.parent = root;
             event.reservation = lease;
             ++counts.python_terminal_events;
             // Admitted: the framework host's in-request events may fill the queue.
             shared.publish(std::move(event), true);
-        });
+        }};
+        bool announced = false;
+        auto announce = [&] {
+            if (published && !announced) published->set();
+            announced = true;
+        };
+        Defer announced_anyway{[&]() noexcept { announce(); }};
         auto reject = [&](int status) {
             terminal_status = status;
             http1::append_error(output, status, close, date(), probe_lines);
@@ -943,10 +1207,10 @@ class Service {
         std::optional<Decision> answer;
         try {
             if (closing) { reject(error_status ? error_status : 503); co_return; }
-            // decide publishes the request (and sets root) before it waits.
-            auto deciding = decide("application", method, size, &body,
-                                   streamed_id ? "more" : std::move(parameter), 0, &root, &input,
-                                   streamed_id, true);
+            // Publishes the request (and sets root) before it waits.
+            root = streamed_id ? streamed_id : (++next_id << 16) | shard;
+            ask(root, method, size, &body, streamed_id ? "more" : std::move(parameter), &input);
+            announce();
             connection.handling = root;
             if (connection.peer_gone) {
                 // Gone before the request reached Python (a reset while the
@@ -954,7 +1218,7 @@ class Service {
                 connection.peer_gone = false;
                 peer_left(connection, connection_key);
             }
-            answer = co_await std::move(deciding);
+            answer = co_await decide(root, method);
         } catch (const QueueFull&) {
             // Overloaded: Python has max_requests new requests to take first.
             ++counts.rejected;
@@ -1019,20 +1283,12 @@ class Service {
         http1::append_head(output, answer->code, answer->body.size(), answer->headers, close,
                            date(), probe_lines);
         co_await flush_output(connection, output);
-        auto owned = std::make_unique<std::string>(std::move(answer->body));
-        // Read the pointer and size before the deleter takes ownership: argument
-        // evaluation order is unspecified.
-        char* data = owned->data();
-        const size_t length = owned->size();
-        ss::temporary_buffer<char> whole(data, length, ss::make_object_deleter(std::move(owned)));
-        // In pieces that share the body, each one write within the write
-        // deadline: a slow peer that keeps reading gets all of it, one that
-        // stops reading is cut off.
+        // In pieces, each one write within the write deadline: a slow peer
+        // that keeps reading gets all of it, one that stops reading is cut off.
         constexpr size_t piece = 1 << 20;
-        for (size_t at = 0; at < length; at += piece) {
-            auto view = whole.share(at, std::min(piece, length - at));
-            co_await timed_write(connection, [&]() { return connection.output.write(std::move(view)); });
-        }
+        const std::string_view whole(answer->body);
+        for (size_t at = 0; at < whole.size(); at += piece)
+            co_await timed_write(connection, whole.substr(at, piece));
     }
     // Writes a streamed response: the start decision's head and data, then the
     // chunks Python queues on the waiter until stream_end or stream_abort.
@@ -1046,9 +1302,9 @@ class Service {
     // until EOF ("end"); Python pauses and resumes that reading. Without
     // timeouts, as Sanic's WebSocket connections. The connection closes after
     // the tunnel, which Python is told of with "lost".
-    ss::future<> stream_application(AppConnection& connection, Decision& start, uint64_t root,
-                                    const std::string& method, bool head_request, bool http11,
-                                    bool& close, std::string& output, bool& retired) {
+    asio::awaitable<void> stream_application(AppConnection& connection, Decision& start, uint64_t root,
+                                             const std::string& method, bool head_request, bool http11,
+                                             bool& close, std::string& output, bool& retired) {
         auto found = waiters.find(root);
         if (found == waiters.end()) { close = true; retired = false; co_return; }
         auto& waiter = *found->second;
@@ -1065,49 +1321,51 @@ class Service {
         } else {
             std::string framing_line;
             if (has_body && framing == Framing::length)
-                framing_line = fmt::format("Content-Length: {}\r\n", start.content_length);
+                framing_line = std::format("Content-Length: {}\r\n", start.content_length);
             else if (has_body && framing == Framing::chunked)
                 framing_line = "Transfer-Encoding: chunked\r\n";
             http1::append_stream_head(output, start.code, start.headers, close, date(), probe_lines,
                                       framing_line);
         }
         auto publish = [&](std::string data, const char* parameter) {
-            RequestEvent event{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                               method, "application_data", data.size(), true, std::move(data), parameter};
+            RequestEvent event{(++next_id << 16) | shard, shard, method, "application_data",
+                               data.size(), true, std::move(data), parameter};
             event.parent = root;
             counts.body_bytes_to_python += event.body.size();
             shared.publish(std::move(event), true);
         };
         bool tunnel_over = false;
-        auto read_peer = [&]() -> ss::future<> {
-            if (!tunnel) co_return;
+        auto read_peer = [&]() -> asio::awaitable<void> {
             std::string early = connection.buffer->substr(*connection.consumed);
             connection.buffer->clear();
             *connection.consumed = 0;
             if (!early.empty()) publish(std::move(early), "");
             try {
+                std::string data;
                 while (!tunnel_over) {
-                    while (waiter.paused && !tunnel_over && !closing) {
-                        waiter.resumed.emplace();
-                        co_await waiter.resumed->get_future();
-                        waiter.resumed.reset();
-                    }
+                    while (waiter.paused && !tunnel_over && !closing) co_await waiter.resumed.wait();
                     if (tunnel_over || closing) break;
-                    auto chunk = co_await connection.input.read();
-                    if (chunk.empty()) break;
-                    publish(std::string(chunk.get(), chunk.size()), "");
+                    data.clear();
+                    if (!co_await read_into(connection, data)) break;
+                    publish(std::move(data), "");
                 }
             } catch (...) {}
             if (!tunnel_over) publish({}, "end");
         };
-        auto reading = read_peer();
+        Event read_ended(io);
+        bool reading_done = !tunnel;
+        if (tunnel)
+            asio::co_spawn(io, read_peer(), [&](std::exception_ptr) {
+                reading_done = true;
+                read_ended.set();
+            });
         int64_t sent = 0;
         uint64_t unacked = 0;  // bytes Python queued and has not been told are written
         bool overrun = false;  // data past the declared Content-Length came
         auto frame = [&](std::string_view data) {
             if (!send_body || data.empty()) return;
             if (framing == Framing::chunked) {
-                output.append(fmt::format("{:x}\r\n", data.size()));
+                output.append(std::format("{:x}\r\n", data.size()));
                 output.append(data);
                 output.append("\r\n");
             } else {
@@ -1130,7 +1388,7 @@ class Service {
         // Sanic's file_stream would make; Python learns the outcome from
         // application_file (bytes written, or "error:<errno>:<message>").
         // False when the connection failed or the stream was aborted meanwhile.
-        auto send_file = [&](const Decision& order) -> ss::future<bool> {
+        auto send_file = [&](const Decision& order) -> asio::awaitable<bool> {
             uint64_t offset = 0, length = 0, chunk = 0;
             std::string_view spec(order.body);
             for (auto* field : {&offset, &length, &chunk}) {
@@ -1148,67 +1406,61 @@ class Service {
             uint64_t written = 0;
             std::string error;
             bool connected = true;
+            const size_t read_size = std::max<uint64_t>(65536, std::min<uint64_t>(chunk, 1 << 20));
+            File file{owner.offload, io};
             try {
                 // As a C string the path would end at a NUL (Engine.stream_file refuses one).
                 if (path.find('\0') != std::string::npos)
                     throw std::system_error(EINVAL, std::system_category(), "embedded null byte");
-                auto file = co_await ss::open_file_dma(path, ss::open_flags::ro);
-                ss::file_input_stream_options options;
-                options.buffer_size = std::max<uint64_t>(65536, std::min<uint64_t>(chunk, 1 << 20));
-                options.read_ahead = 1;
-                auto input = ss::make_file_input_stream(file, offset, length, options);
-                std::exception_ptr failure;
-                try {
-                    std::string pending;
-                    while (written + pending.size() < length && !aborted()) {
-                        auto data = co_await input.read();
-                        if (data.empty()) break;  // the file became shorter
-                        pending.append(data.get(), data.size());
-                        size_t at = 0;
-                        for (; pending.size() - at >= chunk; at += chunk) frame(std::string_view(pending).substr(at, chunk));
-                        written += at;
-                        pending.erase(0, at);
-                        if (output.size() >= 65536) {
-                            try {
-                                co_await flush_output(connection, output);
-                            } catch (...) {
-                                connected = false;
-                                break;
-                            }
+                co_await file.open(path);
+                std::string pending;
+                uint64_t at = offset;
+                while (written + pending.size() < length && !aborted()) {
+                    const auto want = std::min<uint64_t>(read_size, offset + length - at);
+                    auto data = co_await file.read(at, want);
+                    if (data.empty()) break;  // the file became shorter
+                    at += data.size();
+                    pending.append(data);
+                    size_t done = 0;
+                    for (; pending.size() - done >= chunk; done += chunk)
+                        frame(std::string_view(pending).substr(done, chunk));
+                    written += done;
+                    pending.erase(0, done);
+                    if (output.size() >= 65536) {
+                        try {
+                            co_await flush_output(connection, output);
+                        } catch (...) {
+                            connected = false;
+                            break;
                         }
                     }
-                    if (connected && !pending.empty() && !aborted()) {
-                        frame(pending);
-                        written += pending.size();
-                    }
-                } catch (...) {
-                    failure = std::current_exception();
                 }
-                co_await input.close();  // the stream does not close the file
-                co_await file.close();
-                if (failure) std::rethrow_exception(failure);
+                if (connected && !pending.empty() && !aborted()) {
+                    frame(pending);
+                    written += pending.size();
+                }
             } catch (const std::system_error& e) {
-                error = fmt::format("error:{}:{}", e.code().value(), e.code().message());
+                error = std::format("error:{}:{}", e.code().value(), e.code().message());
             } catch (const std::exception& e) {
-                error = fmt::format("error:{}:{}", EIO, e.what());
+                error = std::format("error:{}:{}", EIO, e.what());
             }
-            RequestEvent done{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                              method, "application_file", written, false, {}, std::move(error)};
+            co_await file.close();
+            RequestEvent done{(++next_id << 16) | shard, shard, method, "application_file", written,
+                              false, {}, std::move(error)};
             done.parent = root;
             shared.publish(std::move(done), true);
             co_return connected && !aborted();
         };
         // Writes what is buffered and tells Python how much of what it queued
         // is written; false when the connection failed.
-        auto flush_and_acknowledge = [&]() -> ss::future<bool> {
+        auto flush_and_acknowledge = [&]() -> asio::awaitable<bool> {
             try {
                 co_await flush_output(connection, output);
             } catch (...) {
                 co_return false;
             }
             if (unacked) {
-                RequestEvent ack{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                                 method, "application_written", unacked};
+                RequestEvent ack{(++next_id << 16) | shard, shard, method, "application_written", unacked};
                 ack.parent = root;
                 shared.publish(std::move(ack), true);
                 unacked = 0;
@@ -1223,11 +1475,7 @@ class Service {
                 break;
             }
             if (ended) break;
-            while (waiter.chunks.empty() && !closing) {
-                waiter.more.emplace();
-                co_await waiter.more->get_future();
-                waiter.more.reset();
-            }
+            while (waiter.chunks.empty() && !closing) co_await waiter.more.wait();
             if (closing) { failed = true; break; }
             while (!waiter.chunks.empty() && !ended && !failed && !overrun) {
                 auto chunk = std::move(waiter.chunks.front());
@@ -1249,12 +1497,9 @@ class Service {
             // Stop reading the peer: the input shutdown ends a pending read.
             tunnel_over = true;
             connection.shut_input();
-            if (waiter.resumed) {
-                waiter.resumed->set_value();
-                waiter.resumed.reset();
-            }
+            waiter.resumed.set();
         }
-        co_await std::move(reading);
+        while (!reading_done) co_await read_ended.wait();
         if (tunnel) publish({}, "lost");
         waiters.erase(root);
         counts.response_bytes += sent;
@@ -1266,6 +1511,52 @@ class Service {
         if (send_body && framing == Framing::chunked) output.append("0\r\n\r\n");
         if (send_body && framing == Framing::length && sent != start.content_length) close = true;
     }
+    // A file a streamed response reads: opened and read by the file threads
+    // (a read that is not in the page cache blocks), each result posted back.
+    struct File {
+        Offload& offload;
+        asio::io_context& io;
+        int fd = -1;
+        asio::awaitable<void> run(std::function<void()> job) {
+            Event done(io);
+            offload([&] {
+                job();
+                asio::post(io, [&] { done.set(); });
+            });
+            co_await done.wait();
+        }
+        asio::awaitable<void> open(const std::string& path) {
+            int error = 0;
+            co_await run([&] {
+                fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+                if (fd < 0) error = errno;
+            });
+            if (error) throw std::system_error(error, std::system_category(), path);
+        }
+        asio::awaitable<std::string> read(uint64_t offset, size_t size) {
+            std::string data;
+            int error = 0;
+            co_await run([&] {
+                data.resize(size);
+                ssize_t got;
+                do { got = ::pread(fd, data.data(), size, off_t(offset)); } while (got < 0 && errno == EINTR);
+                if (got < 0) {
+                    error = errno;
+                    got = 0;
+                }
+                data.resize(size_t(got));
+            });
+            if (error) throw std::system_error(error, std::system_category());
+            co_return data;
+        }
+        asio::awaitable<void> close() {
+            if (fd >= 0) {
+                const int closing_fd = fd;
+                fd = -1;
+                co_await run([closing_fd] { ::close(closing_fd); });
+            }
+        }
+    };
 
     std::shared_ptr<Lease> reserve(size_t bytes) {
         if (closing || counts.active_requests >= counts.limit_count ||
@@ -1279,25 +1570,16 @@ class Service {
         counts.peak_bytes = std::max(counts.peak_bytes.load(), counts.reserved_bytes.load());
         return lease;
     }
-    ss::future<Decision> decide(const std::string& route, const std::string& method,
-                                size_t bytes, const std::string* copied,
-                                std::string parameter = {}, uint64_t parent = 0, uint64_t* published_id = nullptr,
-                                ApplicationInput* input = nullptr, uint64_t preassigned_id = 0,
-                                bool notify_timeout = false) {
-        if (closing) co_return Decision{503, {}};
-        uint64_t id = preassigned_id ? preassigned_id : (++next_id << 16) | ss::this_shard_id();
-        if (published_id) *published_id = id;
-        auto waiter = std::make_unique<Waiter>();
-        auto& promise = waiter->promise;
-        waiters.emplace(id, std::move(waiter));
+    // A request for Python, published under `id` with its waiter; decide()
+    // waits for the answer. QueueFull when Python has max_requests new
+    // requests to take first.
+    void ask(uint64_t id, const std::string& method, size_t bytes, const std::string* copied,
+             std::string parameter, ApplicationInput* input) {
+        waiters.emplace(id, std::make_unique<Waiter>(io));
         ++counts.pending_decisions; ++counts.decisions;
-        auto begin = clock_ns();
-        std::exception_ptr failure;
-        std::optional<Decision> result;
         try {
-            RequestEvent event{id, ss::this_shard_id(), method, route, bytes, copied != nullptr, {}};
+            RequestEvent event{id, shard, method, "application", bytes, copied != nullptr, {}};
             event.parameter = std::move(parameter);
-            event.parent = parent;
             if (input) {
                 event.target = std::move(input->target);
                 event.http_version = std::move(input->http_version);
@@ -1310,115 +1592,125 @@ class Service {
             }
             if (copied) { event.body = *copied; counts.body_bytes_to_python += copied->size(); }
             shared.publish(std::move(event));
-            // Only now: a promise destroyed with its future attached (the
-            // queue was full) would log "Exceptional future ignored".
-            auto future = promise.get_future();
-            const auto deadline = ss::lowres_clock::now() +
-                std::chrono::milliseconds(shared.config.decision_timeout_ms);
-            if (!notify_timeout) {
-                result = co_await ss::with_timeout(deadline, std::move(future));
-            } else {
-                // The response deadline: Python is told and cancels the handler,
-                // which may still answer (Sanic: 503 Response Timeout through its
-                // error handler). Without an answer within the grace period the
-                // host answers 504 itself.
-                bool reported = false;
-                ss::timer<ss::lowres_clock> timer;
-                timer.set_callback([&, id] {
-                    if (reported) {
-                        abort_request(id, 504);
-                        return;
-                    }
-                    if (auto it = waiters.find(id); it != waiters.end()) it->second->response_deadline = nullptr;
-                    ++counts.decision_timeouts;
-                    if (shared.withdraw(id)) {
-                        abort_request(id, 504);  // Python never received it
-                        return;
-                    }
-                    reported = true;
-                    RequestEvent timeout{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                                         method, "application_timeout", 0};
-                    timeout.parent = id;
-                    shared.publish(std::move(timeout), true);
-                    timer.arm(ss::lowres_clock::now() + std::chrono::seconds(2));
-                });
-                timer.arm(deadline);
-                // Until this returns: a streamed response keeps its waiter, not the timer.
-                waiters.at(id)->response_deadline = &timer;
-                auto forget = ss::defer([this, id]() noexcept {
-                    if (auto it = waiters.find(id); it != waiters.end()) it->second->response_deadline = nullptr;
-                });
-                result = co_await std::move(future);
-                result->timed_out = reported;
+        } catch (...) {
+            shared.erase(id);
+            waiters.erase(id);
+            --counts.pending_decisions;
+            throw;
+        }
+    }
+    // The response deadline: Python is told and cancels the handler, which may
+    // still answer (Sanic: 503 Response Timeout through its error handler).
+    // Without an answer within the grace period the host answers 504 itself.
+    asio::awaitable<Decision> decide(uint64_t id, const std::string& method) {
+        auto begin = clock_ns();
+        auto& waiter = *waiters.at(id);
+        bool reported = false;
+        WheelEntry timer;
+        timer.fire = [&, id] {
+            if (reported) {
+                abort_request(id, 504);
+                return;
             }
-        } catch (const ss::timed_out_error&) {
+            if (auto it = waiters.find(id); it != waiters.end()) it->second->response_deadline = nullptr;
             ++counts.decision_timeouts;
-            failure = std::current_exception();
-        } catch (...) { failure = std::current_exception(); }
+            if (shared.withdraw(id)) {
+                abort_request(id, 504);  // Python never received it
+                return;
+            }
+            reported = true;
+            RequestEvent timeout{(++next_id << 16) | shard, shard, method, "application_timeout", 0};
+            timeout.parent = id;
+            shared.publish(std::move(timeout), true);
+            wheel.arm(timer, 2000);
+        };
+        wheel.arm(timer, shared.config.decision_timeout_ms);
+        // Until this returns: a streamed response keeps its waiter, not the timer.
+        waiter.response_deadline = &timer;
+        while (!waiter.decision) co_await waiter.decided.wait();
+        waiter.response_deadline = nullptr;
+        wheel.cancel(timer);
+        Decision result = std::move(*waiter.decision);
+        waiter.decision.reset();
+        result.timed_out = reported;
         counts.decision_wait_ns += clock_ns() - begin;
         shared.erase(id);
         // A streamed response keeps its waiter for later chunks; respond_application
         // erases it when the stream ends.
-        if (failure || !result || result->kind != DecisionKind::stream_start)
-            waiters.erase(id); // destroying a timed-out promise occurs on its own shard
+        if (result.kind != DecisionKind::stream_start) waiters.erase(id);
         --counts.pending_decisions;
-        if (failure) std::rethrow_exception(failure);
-        result->id = id;
-        co_return std::move(*result);
+        result.id = id;
+        co_return result;
+    }
+    void settle(Waiter& waiter, Decision decision) {
+        waiter.decision = std::move(decision);
+        waiter.decided.set();
     }
 public:
-    explicit Service(Shared* state)
-        : shared(*state), counts(*state->counts[ss::this_shard_id()]) {}
-    ss::future<> start() {
-        if (shared.config.application_dispatch_all) {
-            const auto pid = ss::to_sstring(::getpid());
-            if (shared.config.probe_headers == "all") {
-                probe_lines = "X-Probe-Pid: " + std::string(pid) + "\r\nX-Probe-Shard: " +
-                              std::to_string(ss::this_shard_id()) + "\r\nX-Probe-Policy: 0\r\n";
-            } else if (shared.config.probe_headers == "pid") {
-                probe_lines = "X-Probe-Pid: " + std::string(pid) + "\r\n";
+    void start() {
+        rdhup_set = ::epoll_create1(EPOLL_CLOEXEC);
+        if (rdhup_set < 0) throw std::system_error(errno, std::system_category(), "epoll_create1");
+        rdhup_fd.emplace(io, rdhup_set);
+        watch_peers();
+        if (!shared.config.application_dispatch_all) return;
+        const auto pid = std::to_string(::getpid());
+        if (shared.config.probe_headers == "all") {
+            probe_lines = "X-Probe-Pid: " + pid + "\r\nX-Probe-Shard: " + std::to_string(shard) +
+                          "\r\nX-Probe-Policy: 0\r\n";
+        } else if (shared.config.probe_headers == "pid") {
+            probe_lines = "X-Probe-Pid: " + pid + "\r\n";
+        }
+        auto listen = [&](int fd, asio::generic::stream_protocol protocol, const std::string* unix_path, bool own,
+                          bool shared_turns) {
+            auto listener = std::make_unique<Listener>(Listener{Acceptor(io), unix_path, own});
+            asio::error_code ec;
+            listener->acceptor.assign(protocol, fd, ec);
+            if (ec) {
+                ::close(fd);
+                throw std::system_error(ec, "adopt the listening socket");
             }
-            if (shared.config.listen_fd >= 0 && shared.config.listen_shared) {
-                // Every shard, shard 0 included, takes the connections accept_shared hands it.
-                const auto [protocol, address] = listener_address(shared.config.listen_fd);
-                app_listener.emplace(std::make_unique<ss::net::posix_ap_server_socket_impl>(protocol, address));
-                const auto slot = shared.config.accept_slot;
-                if (shared.config.accept_counts && slot >= 0 && unsigned(slot) < shared.config.accept_slots) {
-                    accept_slots = reinterpret_cast<AcceptSlot*>(uintptr_t(shared.config.accept_counts));
-                    own_slot = &accept_slots[slot];
-                    own_pid = uint64_t(::getpid());
-                    if (ss::this_shard_id() == 0) {
-                        // A restarted worker takes over its predecessor's line.
-                        own_slot->connections.store(own_pid << 32, std::memory_order_relaxed);
-                        own_slot->heartbeat_ms.store(monotonic_ms(), std::memory_order_release);
-                        accept_heartbeat.set_callback([this] {
-                            if (owns_slot()) own_slot->heartbeat_ms.store(monotonic_ms(), std::memory_order_release);
-                        });
-                        accept_heartbeat.arm_periodic(std::chrono::milliseconds(50));
-                    }
+            listener->acceptor.non_blocking(true, ec);  // for accept_one's accept
+            if (ec) throw std::system_error(ec, "adopt the listening socket");  // the acceptor closes it
+            auto& adopted = *listener;
+            listeners.push_back(std::move(listener));
+            accepting.enter();
+            asio::co_spawn(io, shared_turns ? accept_shared(adopted) : accept_own(adopted),
+                           [this](std::exception_ptr) { accepting.leave(); });
+        };
+        if (shared.config.listen_fd >= 0 && shared.config.listen_shared) {
+            const auto slot = shared.config.accept_slot;
+            if (shared.config.accept_counts && slot >= 0 && unsigned(slot) < shared.config.accept_slots) {
+                accept_slots = reinterpret_cast<AcceptSlot*>(uintptr_t(shared.config.accept_counts));
+                own_slot = &accept_slots[slot];
+                own_pid = uint64_t(::getpid());
+                if (shard == 0) {
+                    // A restarted worker takes over its predecessor's line.
+                    own_slot->connections.store(own_pid << 32, std::memory_order_relaxed);
+                    own_slot->heartbeat_ms.store(monotonic_ms(), std::memory_order_release);
+                    accept_heartbeat.emplace(io);
+                    accepting.enter();
+                    asio::co_spawn(io, beat_heartbeat(), [this](std::exception_ptr) { accepting.leave(); });
                 }
-                if (ss::this_shard_id() == 0) {
-                    shared_wake = ss::file_desc::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-                    shared_accepting = accept_shared(protocol, address);
-                }
-                app_accepting = accept_application(*app_listener, shared.config.unix_path, true);
-            } else if (shared.config.listen_fd >= 0) {
-                app_listener.emplace(adopt_listener(shared.config.listen_fd));
-                app_accepting = accept_application(*app_listener, shared.config.unix_path);
-            } else if (shared.config.http_port) {
-                ss::listen_options options;
-                options.reuse_address = true;
-                options.lba = ss::server_socket::load_balancing_algorithm::connection_distribution;
-                app_listener.emplace(ss::listen(ss::socket_address(ss::net::inet_address(shared.config.http_host),
-                                                                   uint16_t(shared.config.http_port)), options));
-                app_accepting = accept_application(*app_listener, shared.config.unix_path);
             }
-            if (shared.config.worker_listen_fd >= 0) {
-                worker_listener.emplace(adopt_listener(shared.config.worker_listen_fd));
-                worker_accepting = accept_application(*worker_listener, shared.config.worker_unix_path);
+            if (shard == 0) {
+                const int fd = shared.config.listen_fd;
+                listen(listener_copy(fd), listener_protocol(fd), &shared.config.unix_path, false, true);
+            }
+        } else if (shared.config.listen_fd >= 0) {
+            if (shard == 0) {
+                const int fd = shared.config.listen_fd;
+                listen(listener_copy(fd), listener_protocol(fd), &shared.config.unix_path, true, false);
+            }
+        } else if (shared.config.http_port) {
+            if (shard == 0) {
+                const int fd = bind_listener(shared.config.http_host, shared.config.http_port);
+                listen(fd, listener_protocol(fd), &shared.config.unix_path, true, false);
             }
         }
-        co_return;
+        if (shared.config.worker_listen_fd >= 0 && shard == 0) {
+            const int fd = shared.config.worker_listen_fd;
+            listen(listener_copy(fd), listener_protocol(fd), &shared.config.worker_unix_path, true, false);
+        }
     }
     // The request body can no longer arrive (peer closed, deadline, bad framing):
     // stop waiting for Python; respond_application then answers 503 and its
@@ -1429,7 +1721,7 @@ public:
         it->second->replied = true;
         Decision decision{3, {}};
         decision.reject_status = status;
-        it->second->promise.set_value(std::move(decision));
+        settle(*it->second, std::move(decision));
     }
     void resolve(uint64_t id, int code, std::string body, bool retire = false,
                  std::vector<std::pair<std::string, std::string>> headers = {},
@@ -1448,10 +1740,7 @@ public:
         counts.body_bytes_from_python += body.size();
         if (kind == DecisionKind::tunnel_pause || kind == DecisionKind::tunnel_resume) {
             waiter.paused = kind == DecisionKind::tunnel_pause;
-            if (!waiter.paused && waiter.resumed) {
-                waiter.resumed->set_value();
-                waiter.resumed.reset();
-            }
+            if (!waiter.paused) waiter.resumed.set();
             return;
         }
         if (kind >= DecisionKind::stream_data) {
@@ -1459,16 +1748,12 @@ public:
             if (!waiter.replied) return;
             waiter.chunks.push_back(Decision{code, std::move(body), 0, retire, {}, kind});
             // Several pieces may come in one batch: wake the writer once.
-            if (waiter.more) {
-                waiter.more->set_value();
-                waiter.more.reset();
-            }
+            waiter.more.set();
             return;
         }
         if (waiter.replied) return;
         waiter.replied = true;
-        waiter.promise.set_value(Decision{code, std::move(body), 0, retire, std::move(headers),
-                                          kind, content_length});
+        settle(waiter, Decision{code, std::move(body), 0, retire, std::move(headers), kind, content_length});
     }
     // The framework host's listeners accept no more connections (again: a
     // no-op). A listener of this process's own is shut down, as Sanic's
@@ -1476,17 +1761,15 @@ public:
     // SO_REUSEPORT, gives them to the other processes' sockets. On a socket
     // shared with other processes, this process leaves accepting to them.
     void stop_accepting() {
-        accept_pause.request_abort();
-        if (app_listener) app_listener->abort_accept();  // on a shared socket, this shard's queue only
-        if (worker_listener) worker_listener->abort_accept();
-        if (shared_wake) {
-            const uint64_t one = 1;
-            (void)!::write(shared_wake->get(), &one, sizeof(one));  // ends accept_shared
+        for (auto* pause : accept_pauses) pause->cancel();
+        for (auto& listener : listeners) {
+            asio::error_code ignored;
+            if (listener->own) ::shutdown(listener->acceptor.native_handle(), SHUT_RD);
+            listener->acceptor.cancel(ignored);
         }
-        if (own_slot && ss::this_shard_id() == 0) {
+        if (own_slot && shard == 0) {
             // The siblings stop waiting for this process at once.
-            accept_heartbeat.cancel();
-            if (owns_slot()) own_slot->heartbeat_ms.store(0, std::memory_order_release);
+            stop_heartbeat();
         }
     }
     // A graceful stop's first step (GRACEFUL_SHUTDOWN_TIMEOUT), as Sanic's
@@ -1500,72 +1783,124 @@ public:
         for (auto& [id, peer] : app_peers)
             if (peer->idle) peer->shut_input();
     }
-    ss::future<> stop() {
+    asio::awaitable<void> stop() {
         closing = true;
         stop_accepting();
         for (auto& [id, peer] : app_peers) {
-            peer->shut_input(); peer->socket.shutdown_output();
+            peer->shut_input();
+            peer->shut_output();
         }
         for (auto& [id, flow] : body_flows) flow->wake();
         for (auto& [id, waiter] : waiters) {
             if (!waiter->replied) {
                 waiter->replied = true;
-                waiter->promise.set_value(Decision{3, {}});
+                settle(*waiter, Decision{3, {}});
             } else {
                 // A streamed response or tunnel sees `closing`.
-                if (waiter->more) {
-                    waiter->more->set_value();
-                    waiter->more.reset();
-                }
-                if (waiter->resumed) {
-                    waiter->resumed->set_value();
-                    waiter->resumed.reset();
-                }
+                waiter->more.set();
+                waiter->resumed.set();
             }
         }
-        co_await std::move(app_accepting);
-        co_await std::move(shared_accepting);
-        co_await std::move(worker_accepting);
+        co_await accepting.close();
         co_await app_connections.close();
+        listeners.clear();
+        if (rdhup_fd) {
+            watching = false;
+            asio::error_code ignored;
+            rdhup_fd->cancel(ignored);
+            co_await peer_watch.close();
+            rdhup_fd.reset();
+            rdhup_set = -1;
+        }
     }
 };
+}  // namespace
+
+void NetworkServer::Impl::on_all(const std::function<void(unsigned)>& fn) {
+    std::latch done(std::ptrdiff_t(contexts.size()));
+    std::vector<std::exception_ptr> failures(contexts.size());
+    for (unsigned shard = 0; shard < contexts.size(); ++shard) {
+        asio::post(*contexts[shard], [&, shard] {
+            try { fn(shard); } catch (...) { failures[shard] = std::current_exception(); }
+            done.count_down();
+        });
+    }
+    done.wait();
+    for (auto& failure : failures)
+        if (failure) std::rethrow_exception(failure);
+}
+void NetworkServer::Impl::on_all_async(const std::function<asio::awaitable<void>(unsigned)>& fn) {
+    std::latch done(std::ptrdiff_t(contexts.size()));
+    std::vector<std::exception_ptr> failures(contexts.size());
+    for (unsigned shard = 0; shard < contexts.size(); ++shard) {
+        asio::post(*contexts[shard], [&, shard] {
+            asio::co_spawn(*contexts[shard], fn(shard), [&, shard](std::exception_ptr failure) {
+                failures[shard] = failure;
+                done.count_down();
+            });
+        });
+    }
+    done.wait();
+    for (auto& failure : failures)
+        if (failure) std::rethrow_exception(failure);
+}
+// The shard with the fewest connections handed to it.
+unsigned NetworkServer::Impl::least_loaded_shard() const {
+    unsigned best = 0;
+    uint64_t fewest = std::numeric_limits<uint64_t>::max();
+    for (unsigned shard = 0; shard < contexts.size(); ++shard) {
+        const auto load = shared.counts[shard]->connections_assigned.load(std::memory_order_relaxed);
+        if (load < fewest) {
+            fewest = load;
+            best = shard;
+        }
+    }
+    return best;
+}
+void NetworkServer::Impl::hand_off(unsigned shard, Socket socket, Endpoint remote, const std::string* unix_path,
+                                   bool counted) {
+    ++shared.counts[shard]->connections_assigned;
+    asio::post(*contexts[shard], [impl = shared_from_this(), shard, socket = std::move(socket), remote,
+                                  unix_path, counted]() mutable {
+        if (auto& service = impl->services[shard]) service->adopt(std::move(socket), remote, *unix_path, counted);
+        else --impl->shared.counts[shard]->connections_assigned;
+    });
 }
 
-struct NetworkServer::Impl {
-    Shared shared;
-    ss::sharded<Service> services;
-    ss::alien::instance& alien;
-    bool started = false;
-    std::optional<ss::shared_future<>> stopping;  // stop() may be called again
-    Impl(ServerConfig c, unsigned n, ss::alien::instance& a, std::function<void()> wake)
-        : shared(std::move(c), n, std::move(wake)), alien(a) {}
-};
-NetworkServer::NetworkServer(ServerConfig c, unsigned n, ss::alien::instance& a,
-                              std::function<void()> wake)
-    : p(std::make_unique<Impl>(std::move(c), n, a, std::move(wake))) {}
+NetworkServer::NetworkServer(ServerConfig c, std::vector<asio::io_context*> shards, std::function<void()> wake,
+                             Offload offload)
+    : p(std::make_shared<Impl>(std::move(c), std::move(shards), std::move(wake), std::move(offload))) {}
 NetworkServer::~NetworkServer() = default;
-ss::future<> NetworkServer::start() {
-    co_await p->services.start(&p->shared);
+void NetworkServer::start() {
+    std::lock_guard lock(p->lifecycle);
+    p->on_all([impl = p.get()](unsigned shard) {
+        impl->services[shard] = std::make_unique<Service>(*impl, shard, *impl->contexts[shard]);
+    });
     p->started = true;
     p->shared.running = true;
-    co_await p->services.invoke_on_all(&Service::start);
+    p->on_all([impl = p.get()](unsigned shard) { impl->services[shard]->start(); });
 }
-ss::future<> NetworkServer::stop() {
-    // Later and concurrent calls wait for the first: the services stop once.
-    if (!p->stopping) {
-        p->shared.running = false;
-        p->stopping.emplace([](Impl& impl) -> ss::future<> {
-            if (impl.started) {
-                co_await impl.services.stop();
-                impl.started = false;
-            }
-        }(*p));
-    }
-    return p->stopping->get_future();
+void NetworkServer::stop() {
+    // Later calls find it stopped: the services stop once.
+    std::lock_guard lock(p->lifecycle);
+    if (p->stopped) return;
+    p->stopped = true;
+    p->shared.running = false;
+    if (!p->started) return;
+    std::exception_ptr failure;
+    try {
+        p->on_all_async([impl = p.get()](unsigned shard) -> asio::awaitable<void> {
+            if (impl->services[shard]) co_await impl->services[shard]->stop();
+        });
+    } catch (...) { failure = std::current_exception(); }
+    // Each service goes on its own shard, as its sockets and timers belong there.
+    p->on_all([impl = p.get()](unsigned shard) { impl->services[shard].reset(); });
+    if (failure) std::rethrow_exception(failure);
 }
-ss::future<> NetworkServer::drain() {
-    if (!p->started || p->stopping) return ss::make_ready_future<>();
-    return p->services.invoke_on_all(&Service::drain);
+void NetworkServer::drain() {
+    std::lock_guard lock(p->lifecycle);
+    if (!p->started || p->stopped) return;
+    p->on_all([impl = p.get()](unsigned shard) { impl->services[shard]->drain(); });
 }
 std::vector<RequestEvent> NetworkServer::drain(size_t count) {
     std::vector<RequestEvent> result;
@@ -1579,7 +1914,7 @@ std::vector<RequestEvent> NetworkServer::drain(size_t count) {
         if (application) {
             p->shared.pending_application_nodes.insert(p->shared.events.extract(it));
         } else {
-            // DONE has no reply and must remain drainable after reactor exit.
+            // DONE has no reply and must remain drainable after the shards stop.
             p->shared.events.erase(it);
         }
     }
@@ -1599,12 +1934,12 @@ void NetworkServer::resolve_batch(std::vector<RequestDecision> decisions) {
     for (unsigned shard = 0; shard < groups.size(); ++shard) {
         if (groups[shard].empty()) continue;
         auto count = groups[shard].size();
-        ss::alien::run_on(p->alien, shard, [impl=p.get(), batch=std::move(groups[shard])]() mutable noexcept {
-            if (!impl->shared.running) return;
+        asio::post(*p->contexts[shard], [impl = p, shard, batch = std::move(groups[shard])]() mutable {
+            auto& service = impl->services[shard];
+            if (!impl->shared.running || !service) return;
             for (auto& decision : batch) {
-                impl->services.local().resolve(decision.id, decision.code, std::move(decision.body),
-                                               decision.retire, std::move(decision.headers),
-                                               decision.kind, decision.content_length);
+                service->resolve(decision.id, decision.code, std::move(decision.body), decision.retire,
+                                 std::move(decision.headers), decision.kind, decision.content_length);
             }
         });
         p->shared.decision_return_items.fetch_add(count, std::memory_order_relaxed);

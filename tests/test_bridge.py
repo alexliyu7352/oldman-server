@@ -1,5 +1,5 @@
 """The Engine's own lifecycle: startup, cancellation, shutdown, signals and
-resources. Each case runs in a fresh process (one Seastar per process)."""
+resources. Each case runs in a fresh process (one native runtime per process)."""
 import asyncio
 import ctypes
 import os

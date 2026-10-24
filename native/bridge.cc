@@ -546,6 +546,7 @@ PYBIND11_MODULE(_native, m) {
             return d;
         })
         .def("fd", &probe::Runtime::fd)
+        .def("fallback", &probe::Runtime::fallback)
         .def("clear_notification", &probe::Runtime::clear_notification)
         .def("submit_file", [](probe::Runtime& r, uint64_t id, int operation, std::string path,
                                uint64_t offset, int64_t length) {

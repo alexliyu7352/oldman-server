@@ -1,5 +1,5 @@
 """The native runtime's own lifecycle, used directly (the Engine interface):
-each case runs in a process of its own, as Seastar starts once per process."""
+each case runs in a process of its own, as a process starts one runtime."""
 import subprocess
 import sys
 import textwrap

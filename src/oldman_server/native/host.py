@@ -1146,7 +1146,7 @@ async def open_engine(app, config, *, python_cpu=None):
             os.sched_setaffinity(0, {python_cpu})
 
     # Persistent: the process can serve again (app.run, test clients) because
-    # Seastar keeps running between serves.
+    # the native runtime keeps running between serves.
     try:
         return await Engine.open(
             config, application_handler=handler, application_bytes_headers=True, persistent=True,
@@ -1159,7 +1159,7 @@ async def open_engine(app, config, *, python_cpu=None):
 
 class _NativeFiles:
     """sanic.compat.native_files while an Engine serves: file stat and reads run
-    on its shards (Seastar's file API) instead of aiofiles' thread pool."""
+    on its file threads instead of aiofiles' thread pool."""
     __slots__ = ("_engine",)
 
     def __init__(self, engine):

@@ -1,4 +1,4 @@
-"""The native host tests, each test function in a process of its own (one Seastar per process)."""
+"""The native host tests, each test function in a process of its own (one native runtime per process)."""
 import argparse
 import ast
 import json

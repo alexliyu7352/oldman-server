@@ -1,5 +1,5 @@
 """File responses on the native host: file(), file_stream() and app.static()
-read on the shards (Seastar's file API) with Sanic's headers and errors."""
+read by the native file threads with Sanic's headers and errors."""
 import asyncio
 from email.utils import formatdate
 import json as json_module

@@ -1,4 +1,4 @@
-"""Three unmodified Sanic HTTP workers or one Sanic/Seastar native service."""
+"""Three unmodified Sanic HTTP workers or one Sanic native service."""
 import argparse
 import cProfile
 from dataclasses import asdict

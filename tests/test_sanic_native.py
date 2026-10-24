@@ -1,4 +1,4 @@
-"""Direct Sanic processing over real Seastar sockets, isolated per test."""
+"""Direct Sanic processing over real native sockets, isolated per test."""
 import asyncio
 import contextvars
 import threading

@@ -1,4 +1,4 @@
-"""Native request contracts without starting a Seastar runtime."""
+"""Native request contracts without starting a native runtime."""
 import asyncio
 import cProfile
 from collections import Counter, defaultdict

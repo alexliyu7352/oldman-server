@@ -1,5 +1,5 @@
-"""The framework host: one ordinary CPython asyncio loop and real Seastar
-shards that parse and write HTTP/1.1; no Python object reaches a shard.
+"""The framework host: one ordinary CPython asyncio loop and native shards
+(Asio) that parse and write HTTP/1.1; no Python object reaches a shard.
 
 Use `await engine.aclose()` before loop exit.
 """
@@ -107,17 +107,18 @@ class Config:
     shard_cpus: tuple[int, ...]
     completion_batch: int = 64
     server: ServerConfig | None = None
-    # Seastar's reactor backend: "epoll", "linux-aio" or "io_uring"; "" lets
-    # Seastar take the first available of io_uring, linux-aio and epoll.
+    # The shards' I/O: "epoll" (or "") or "io_uring", which falls back to
+    # epoll, with a warning, where the system refuses it.
     reactor_backend: str = "epoll"
 
 
-# Seastar starts once per process. Engines opened with persistent=True share one
-# runtime and start/stop only its network server: (runtime, shard CPUs, backend).
+# The native runtime starts once per process. Engines opened with
+# persistent=True share one and start/stop only its network server:
+# (runtime, shard CPUs, backend).
 _persistent = None
-# A process forked after Seastar started (Sanic's "fork" start method, say)
-# has the runtime's memory but not its threads, and Seastar does not start
-# twice in a process: such a child cannot serve natively.
+# A process forked after the runtime started (Sanic's "fork" start method, say)
+# has the runtime's memory but not its threads, and a process starts one
+# runtime only: such a child cannot serve natively.
 _started = False
 _forked_after_start = False
 
@@ -148,7 +149,11 @@ def _new_runtime(*args):
         raise RuntimeError("the native host cannot start in a process forked after it "
                            "started; use the spawn start method")
     _started = True
-    return _native.Runtime(*args)
+    runtime = _native.Runtime(*args)
+    if runtime.fallback():
+        logging.getLogger("oldman_server.error").warning(
+            "io_uring is unavailable (%s): the native host uses epoll", runtime.fallback())
+    return runtime
 
 
 def _persistent_runtime(config):
@@ -260,7 +265,7 @@ class Engine:
                    application_bytes_headers=False, persistent=False,
                    application_error_handler=None, application_connections=None,
                    opened=None):
-        """persistent: share the process's Seastar runtime across Engines; this
+        """persistent: share the process's native runtime across Engines; this
         Engine starts and stops only the network server, so the process can
         serve again later (requires an HTTP ServerConfig).
 
@@ -426,7 +431,7 @@ class Engine:
         self._reader_registered = True
         try:
             if created:
-                await self._ready  # Seastar reports running through the notification fd
+                await self._ready  # the runtime reports running through the notification fd
             if self._opened is not None:
                 self._opened(self)
             self._server_generation = await _off_loop(runtime.start_server, server)

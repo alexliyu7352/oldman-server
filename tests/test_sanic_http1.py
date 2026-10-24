@@ -166,8 +166,8 @@ async def read_chunked(reader):
 
 
 def run(name, *scenarios, app_factory=None, backend=None, **overrides):
-    """Each scenario gets its own connection; one Seastar lifecycle per test.
-    backend: Seastar's reactor backend (default epoll)."""
+    """Each scenario gets its own connection; one native runtime per test.
+    backend: the shards' I/O (default epoll)."""
     async def main():
         app = (app_factory or make_app)(name)
         cfg = config(application_dispatch_all=True, **overrides)
@@ -794,22 +794,18 @@ def reset(writer):
 
 def on_backend(backend):
     """For a test of each reactor backend (one per function: a process runs
-    one Seastar, with one backend)."""
+    one native runtime, with one backend)."""
     from oldman_server.native import engine
     from test_sanic_native_run import io_uring_available
     if backend == "io_uring" and not io_uring_available():
         pytest.skip("io_uring_setup is not permitted here")
     if engine._persistent is not None and engine._persistent[2] != backend:
-        pytest.skip(f"this process runs Seastar with {engine._persistent[2]}")
+        pytest.skip(f"this process's native runtime uses {engine._persistent[2]}")
     return backend
 
 
 def test_a_peer_leaving_cancels_its_handler_as_in_sanic():
     peer_leaving(on_backend("epoll"))
-
-
-def test_a_peer_leaving_cancels_its_handler_on_linux_aio():
-    peer_leaving(on_backend("linux-aio"))
 
 
 def test_a_peer_leaving_cancels_its_handler_on_io_uring():
@@ -848,10 +844,6 @@ def peer_leaving(backend):
 
 def test_a_body_that_stops_arriving_ends_its_handler():
     body_stops(on_backend("epoll"))
-
-
-def test_a_body_that_stops_arriving_ends_its_handler_on_linux_aio():
-    body_stops(on_backend("linux-aio"))
 
 
 def test_a_body_that_stops_arriving_ends_its_handler_on_io_uring():

@@ -1,7 +1,7 @@
 """Regression tests for owned request metadata and per-response native validation.
 
 Each runtime lifecycle test must run in a fresh process, as with the other
-Seastar integration tests.
+native runtime tests.
 """
 import asyncio
 

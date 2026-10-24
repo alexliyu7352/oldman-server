@@ -1,4 +1,4 @@
-"""The native host: a C++/Seastar HTTP/1.1 server (the _native extension, built
+"""The native host: a C++ HTTP/1.1 server on Asio (the _native extension, built
 from native/ by scripts/build.sh), its Python side (engine) and the
 application adapter that serves an app through it (host)."""
 

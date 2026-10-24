@@ -1,37 +1,167 @@
 #include "runtime.hh"
-#include <seastar/core/alien.hh>
-#include <seastar/core/app-template.hh>
-#include <seastar/core/coroutine.hh>
-#include <seastar/core/file.hh>
-#include <seastar/core/seastar.hh>
-#include <seastar/core/reactor.hh>
-#include <seastar/core/sleep.hh>
-#include <seastar/core/smp.hh>
+#include <asio.hpp>
 #include <atomic>
 #include <array>
 #include <cerrno>
+#include <condition_variable>
+#include <cstdio>
 #include <deque>
+#include <dlfcn.h>
+#include <latch>
 #include <mutex>
+#include <optional>
+#include <pthread.h>
 #include <sched.h>
-#include <sys/stat.h>
 #include <signal.h>
 #include <stdexcept>
 #include <sys/eventfd.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
+#include <fcntl.h>
 #include <thread>
 #include <unistd.h>
 
 namespace probe {
-namespace ss = seastar;
-static std::atomic<bool> ever_started{false};
-
-struct Runtime::Impl {
+namespace {
+#ifdef OLDMAN_NATIVE_URING
+constexpr const char* backend_name = "io_uring";
+#else
+constexpr const char* backend_name = "epoll";
+#endif
+// Signals go to Python's main thread: the runtime's threads take none.
+void block_signals() {
+    sigset_t all;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, nullptr);
+}
+std::vector<int> thread_affinity() {
+    cpu_set_t set;
+    CPU_ZERO(&set);
     std::vector<int> cpus;
-    std::string reactor_backend;
+    if (::sched_getaffinity(0, sizeof(set), &set) != 0) throw std::runtime_error("sched_getaffinity failed");
+    for (int i = 0; i < CPU_SETSIZE; ++i)
+        if (CPU_ISSET(i, &set)) cpus.push_back(i);
+    return cpus;
+}
+void pin(const std::vector<int>& cpus) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int cpu : cpus) CPU_SET(cpu, &set);
+    if (::sched_setaffinity(0, sizeof(set), &set) != 0)
+        throw std::system_error(errno, std::system_category(), "pin a native thread to its CPUs");
+}
+
+// Blocking file work (open, stat, read): threads on the shards' CPUs, so that
+// the Python thread's CPU stays its own and no shard waits for a disk.
+class FileThreads {
+public:
+    FileThreads(const std::vector<int>& cpus, unsigned count) {
+        for (unsigned i = 0; i < count; ++i)
+            threads_.emplace_back([this, cpus] {
+                block_signals();
+                try { pin(cpus); } catch (...) {}
+                run();
+            });
+    }
+    ~FileThreads() { close(); }
+    void post(std::function<void()> job) {
+        {
+            std::lock_guard lock(mutex_);
+            jobs_.push_back(std::move(job));
+        }
+        ready_.notify_one();
+    }
+    // Runs what is queued, then ends the threads.
+    void close() {
+        {
+            std::lock_guard lock(mutex_);
+            closing_ = true;
+        }
+        ready_.notify_all();
+        for (auto& thread : threads_)
+            if (thread.joinable()) thread.join();
+    }
+private:
+    void run() {
+        for (;;) {
+            std::function<void()> job;
+            {
+                std::unique_lock lock(mutex_);
+                ready_.wait(lock, [this] { return closing_ || !jobs_.empty(); });
+                if (jobs_.empty()) return;
+                job = std::move(jobs_.front());
+                jobs_.pop_front();
+            }
+            job();
+        }
+    }
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::function<void()>> jobs_;
+    bool closing_ = false;
+    std::vector<std::thread> threads_;
+};
+
+uint64_t ns(const timespec& t) { return uint64_t(int64_t(t.tv_sec) * 1'000'000'000 + t.tv_nsec); }
+// os.stat order, the three times in nanoseconds.
+std::array<uint64_t, 13> stat_numbers(const struct stat& st) {
+    return {st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid, uint64_t(st.st_size),
+            ns(st.st_atim), ns(st.st_mtim), ns(st.st_ctim), uint64_t(st.st_blksize), uint64_t(st.st_blocks),
+            st.st_rdev};
+}
+// A FileOperation, as Python's os.stat and open() / read() would do it.
+FileResult execute_file(uint64_t id, int operation, const std::string& path, uint64_t offset, int64_t length) {
+    FileResult result{id, operation};
+    struct stat st{};
+    if (operation == FileOperation::file_stat) {
+        if (::stat(path.c_str(), &st) < 0) result.error = errno;
+        else result.stat = stat_numbers(st);
+        return result;
+    }
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        result.error = errno;
+        return result;
+    }
+    if (::fstat(fd, &st) < 0) {
+        result.error = errno;
+    } else if (S_ISDIR(st.st_mode)) {
+        result.error = EISDIR;  // open() refuses a directory, as Python's does
+    } else {
+        if (operation == FileOperation::file_open) result.stat = stat_numbers(st);
+        const uint64_t size = operation == FileOperation::file_read ? uint64_t(st.st_size) : 0;
+        const uint64_t end = length < 0 ? size : std::min<uint64_t>(size, offset + uint64_t(length));
+        if (offset < end) {
+            result.data.resize(end - offset);
+            size_t got = 0;
+            while (got < result.data.size()) {
+                const auto n = ::pread(fd, result.data.data() + got, result.data.size() - got, off_t(offset + got));
+                if (n < 0 && errno == EINTR) continue;
+                if (n < 0) {
+                    result.error = errno;
+                    break;
+                }
+                if (n == 0) break;  // the file became shorter
+                got += size_t(n);
+            }
+            result.data.resize(got);
+        }
+    }
+    ::close(fd);
+    return result;
+}
+struct Impl {
+    std::vector<int> cpus;
     ServerConfig server_config;
+    // One io_context per shard, each run by its own thread on its CPU.
+    std::vector<std::unique_ptr<asio::io_context>> contexts;
+    std::vector<asio::executor_work_guard<asio::io_context::executor_type>> keep_running;
+    std::vector<std::thread> shard_threads;
+    std::unique_ptr<FileThreads> files;
     std::unique_ptr<NetworkServer> server;
     uint64_t server_generation = 0;  // of `server`; under mutex
-    bool server_running = false;  // shard 0 only
+    bool server_running = false;  // under lifecycle
     int notify_fd;
     std::atomic<bool> notify_pending{false};
     // The current server's setting that any thread reads without the mutex
@@ -41,48 +171,20 @@ struct Runtime::Impl {
         coalesce.store(config.coalesce_notifications, std::memory_order_relaxed);
     }
     std::atomic<uint64_t> notification_writes{0};
-    std::thread thread;
+    std::thread thread;  // starts and stops the shards
     const pid_t owner = ::getpid();  // a forked child has a copy, not the threads
     // Held across each whole start_server / drain_server / stop_server call
-    // and stop(): the server and the alien instance they use do not change
-    // under them (another thread's stop() making Seastar exit, say).
+    // and stop(): the server does not change under them.
     std::mutex lifecycle;
     mutable std::mutex mutex;
     std::deque<FileResult> file_results;
     std::vector<ShardInfo> shard_info;
     Stats status{};
-    ss::alien::instance* alien = nullptr;
-    ss::promise<>* finish = nullptr; // accessed only on shard 0
-    size_t next_shard = 0;  // of the next file operation
-    std::array<struct sigaction, NSIG> original_signals{}, owned_signals{};
-    std::array<bool, NSIG> signal_valid{}, signal_changed{};
-    bool signal_snapshot_taken = false;
+    std::condition_variable stopping;
+    bool stop_requested = false;  // under mutex
 
-    static bool same_action(const struct sigaction& a, const struct sigaction& b) {
-        if (a.sa_sigaction != b.sa_sigaction || a.sa_flags != b.sa_flags) return false;
-        for (int s = 1; s < NSIG; ++s)
-            if (sigismember(&a.sa_mask, s) != sigismember(&b.sa_mask, s)) return false;
-        return true;
-    }
-    void capture_owned_signals() noexcept {
-        for (int s = 1; s < NSIG; ++s) {
-            if (signal_valid[s] && ::sigaction(s, nullptr, &owned_signals[s]) == 0)
-                signal_changed[s] = !same_action(original_signals[s], owned_signals[s]);
-        }
-        signal_snapshot_taken = true;
-    }
-    void restore_signals() noexcept {
-        for (int s = 1; s < NSIG; ++s) {
-            struct sigaction current{};
-            // Do not overwrite a handler the application installed while running.
-            if (signal_changed[s] && ::sigaction(s, nullptr, &current) == 0 &&
-                same_action(current, owned_signals[s]))
-                ::sigaction(s, &original_signals[s], nullptr);
-        }
-    }
-
-    Impl(std::vector<int> c, ServerConfig config, std::string backend)
-        : cpus(std::move(c)), reactor_backend(std::move(backend)), server_config(std::move(config)),
+    Impl(std::vector<int> c, ServerConfig config)
+        : cpus(std::move(c)), server_config(std::move(config)),
           notify_fd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) {
         if (notify_fd < 0) throw std::runtime_error("eventfd creation failed");
         adopt(server_config);
@@ -97,222 +199,141 @@ struct Runtime::Impl {
         if (rc == 0) notification_writes.fetch_add(1, std::memory_order_relaxed);
         // EAGAIN means a notification is already pending.
     }
-    static ss::future<ShardInfo> inspect_shard() {
-        co_await ss::sleep(std::chrono::milliseconds(1));
-        cpu_set_t set;
-        CPU_ZERO(&set);
-        if (::sched_getaffinity(0, sizeof(set), &set) != 0)
-            throw std::runtime_error("sched_getaffinity failed");
-        ShardInfo info{ss::this_shard_id(), int(::syscall(SYS_gettid)), {},
-                       std::string(ss::engine().get_backend_name())};
-        for (int i = 0; i < CPU_SETSIZE; ++i)
-            if (CPU_ISSET(i, &set)) info.affinity.push_back(i);
-        co_return info;
+    std::unique_ptr<NetworkServer> make_server(ServerConfig config) {
+        std::vector<asio::io_context*> shards;
+        for (auto& context : contexts) shards.push_back(context.get());
+        return std::make_unique<NetworkServer>(std::move(config), std::move(shards), [this] { notify(); },
+                                               [this](std::function<void()> job) { files->post(std::move(job)); });
     }
-    ss::future<> execute_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length) {
-        FileResult result{id, operation};
-        try {
-            if (operation == FileOperation::file_stat) {
-                const auto st = co_await ss::engine().file_stat(path, ss::follow_symlink::yes);
-                auto ns = [](std::chrono::system_clock::time_point t) {
-                    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
-                };
-                result.stat = {st.mode, st.inode_number, st.device_id, st.number_of_links, st.uid, st.gid,
-                               st.size, ns(st.time_accessed), ns(st.time_modified), ns(st.time_changed),
-                               st.block_size, st.allocated_size / 512, st.rdev};
-            } else {
-                auto file = co_await ss::open_file_dma(path, ss::open_flags::ro);
-                std::exception_ptr failure;
+    // The shards: each pinned to its CPU and reporting its thread before it runs.
+    void start_shards() {
+        std::latch running(std::ptrdiff_t(cpus.size()));
+        std::vector<std::exception_ptr> failures(cpus.size());
+        shard_info.resize(cpus.size());
+        for (unsigned i = 0; i < cpus.size(); ++i) {
+            contexts.push_back(std::make_unique<asio::io_context>(1));
+            keep_running.push_back(asio::make_work_guard(*contexts.back()));
+        }
+        for (unsigned i = 0; i < cpus.size(); ++i) {
+            shard_threads.emplace_back([this, i, &running, &failures] {
+                block_signals();
                 try {
-                    const auto st = co_await file.stat();
-                    // Seastar opens directories too; Python's open() refuses them.
-                    if (S_ISDIR(st.st_mode)) throw std::system_error(EISDIR, std::system_category());
-                    auto ns = [](const timespec& t) { return uint64_t(int64_t(t.tv_sec) * 1'000'000'000 + t.tv_nsec); };
-                    if (operation == FileOperation::file_open)
-                        result.stat = {st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
-                                       uint64_t(st.st_size), ns(st.st_atim), ns(st.st_mtim), ns(st.st_ctim),
-                                       uint64_t(st.st_blksize), uint64_t(st.st_blocks), st.st_rdev};
-                    const uint64_t size = operation == FileOperation::file_read ? st.st_size : 0;
-                    const uint64_t end = length < 0 ? size : std::min<uint64_t>(size, offset + uint64_t(length));
-                    if (offset < end) {
-                        // An aligned read: the buffer can extend past the range.
-                        auto bytes = co_await file.dma_read_bulk<char>(offset, end - offset);
-                        result.data.assign(bytes.get(), std::min<size_t>(bytes.size(), end - offset));
-                    }
+                    pin({cpus[i]});
+                    auto info = ShardInfo{i, int(::syscall(SYS_gettid)), thread_affinity(), backend_name};
+                    std::lock_guard lock(mutex);
+                    shard_info[i] = std::move(info);
                 } catch (...) {
-                    failure = std::current_exception();
+                    failures[i] = std::current_exception();
                 }
-                co_await file.close();
-                if (failure) std::rethrow_exception(failure);
-            }
-        } catch (const std::system_error& e) {
-            result.error = e.code().value() ? e.code().value() : EIO;
-        } catch (...) {
-            result.error = EIO;
+                auto& context = *contexts[i];
+                running.count_down();
+                context.run();
+            });
         }
-        {
-            std::lock_guard lock(mutex);
-            file_results.push_back(std::move(result));
-        }
-        notify();
+        running.wait();
+        for (auto& failure : failures)
+            if (failure) std::rethrow_exception(failure);
     }
-    ss::future<> main(ss::app_template& app) {
-        ss::promise<> done;
-        finish = &done;
-        std::vector<ShardInfo> info;
-        for (unsigned i = 0; i < cpus.size(); ++i)
-            info.push_back(co_await ss::smp::submit_to(i, inspect_shard));
-        capture_owned_signals();
-        {
-            std::lock_guard lock(mutex);
-            alien = &app.alien();
-            shard_info = std::move(info);
+    void stop_shards() {
+        keep_running.clear();
+        for (auto& context : contexts) context->stop();
+        for (auto& thread : shard_threads)
+            if (thread.joinable()) thread.join();
+        shard_threads.clear();
+        contexts.clear();
+    }
+    void fail(const std::string& error) {
+        if (server) {
+            try { server->stop(); } catch (...) {}
         }
-        if (server_config.enabled()) {
-            auto network = std::make_unique<NetworkServer>(server_config, cpus.size(), app.alien(),
-                [this] { notify(); });
-            {
+        stop_shards();
+        if (files) files->close();
+        std::lock_guard lock(mutex);
+        server.reset();
+        status.state = 4;
+        status.live_workers = 0;
+        status.error = error;
+    }
+    void run() noexcept {
+        block_signals();
+        try {
+            files = std::make_unique<FileThreads>(cpus, unsigned(std::max<size_t>(2, cpus.size())));
+            start_shards();
+            if (server_config.enabled()) {
+                auto network = make_server(server_config);
+                try {
+                    network->start();
+                } catch (...) {
+                    network->stop();
+                    throw;
+                }
                 std::lock_guard lock(mutex);
                 server = std::move(network);
             }
-            std::exception_ptr failure;
-            try { co_await server->start(); } catch (...) { failure = std::current_exception(); }
-            if (failure) {
-                co_await server->stop();
-                finish = nullptr;
-                std::rethrow_exception(failure);
-            }
-        }
-        {
-            std::lock_guard lock(mutex);
-            status.state = 1;
-            status.live_workers = cpus.size();
-        }
-        notify();
-        co_await done.get_future();
-        finish = nullptr;
-        if (server) co_await server->stop();
-        server_running = false;
-    }
-    ss::future<uint64_t> start_server_here(ServerConfig config) {
-        auto network = std::make_unique<NetworkServer>(config, cpus.size(), *alien, [this] { notify(); });
-        std::exception_ptr failure;
-        try { co_await network->start(); } catch (...) { failure = std::current_exception(); }
-        if (failure) {
-            co_await network->stop();
-            std::rethrow_exception(failure);
-        }
-        std::unique_ptr<NetworkServer> previous;  // stopped; destroyed here on shard 0
-        uint64_t generation;
-        {
-            std::lock_guard lock(mutex);
-            previous = std::move(server);
-            server = std::move(network);
-            adopt(config);
-            server_config = std::move(config);
-            generation = ++server_generation;
-        }
-        server_running = true;
-        co_return generation;
-    }
-    ss::future<> drain_server_here(uint64_t generation) {
-        NetworkServer* network;
-        {
-            std::lock_guard lock(mutex);
-            if (generation && generation != server_generation) co_return;
-            network = server.get();
-        }
-        if (network) co_await network->drain();  // a no-op once it stops
-    }
-    ss::future<> stop_server_here(uint64_t generation) {
-        NetworkServer* network;
-        {
-            std::lock_guard lock(mutex);
-            // An Engine stops the server it started, never a later one.
-            if (generation && generation != server_generation) co_return;
-            network = server.get();
-        }
-        server_running = false;
-        if (network) co_await network->stop();
-    }
-    void run() noexcept {
-        for (int s = 1; s < NSIG; ++s)
-            signal_valid[s] = ::sigaction(s, nullptr, &original_signals[s]) == 0;
-        try {
-            ss::app_template::seastar_options opts;
-            opts.name = "oldman-server";
-            opts.auto_handle_sigint_sigterm = false;
-            opts.smp_opts.memory_allocator = ss::memory_allocator::standard;
-            ss::app_template app(std::move(opts));
-            app.set_configuration_reader([] (auto&) {});
-            std::string cpu_text;
-            for (int cpu : cpus) {
-                if (!cpu_text.empty()) cpu_text += ',';
-                cpu_text += std::to_string(cpu);
-            }
-            // --kernel-page-cache: files are read through the page cache (not
-            // O_DIRECT), as Python would; reads not in the cache go to Seastar's
-            // syscall thread instead of blocking the reactor.
-            std::vector<std::string> args{
-                "oldman-server", "--smp", std::to_string(cpus.size()),
-                "--cpuset", cpu_text,
-                "--overprovisioned", "--thread-affinity", "1",
-                "--enable-glibc-exception-scaling-workaround", "0",
-                "--kernel-page-cache", "1", "--default-log-level", "warn"};
-            if (!reactor_backend.empty()) {
-                args.push_back("--reactor-backend");
-                args.push_back(reactor_backend);
-            }
-            std::vector<char*> argv;
-            for (auto& arg : args) argv.push_back(arg.data());
-            // app.run does not retain its callable until its future completes.
-            // This lambda is deliberately NOT a coroutine. The member coroutine
-            // stores the stable Impl pointer and app reference in its own frame.
-            int rc = app.run(int(argv.size()), argv.data(), [&] { return main(app); });
             {
                 std::lock_guard lock(mutex);
-                alien = nullptr;
-                status.live_workers = 0;
-                status.state = rc == 0 ? 3 : 4;
-                if (rc) status.error = "Seastar app.run returned " + std::to_string(rc);
+                status.state = 1;
+                status.live_workers = unsigned(cpus.size());
             }
+            notify();
+            {
+                std::unique_lock lock(mutex);
+                stopping.wait(lock, [this] { return stop_requested; });
+            }
+            if (server) server->stop();
+            server_running = false;
+            stop_shards();
+            files->close();
+            std::lock_guard lock(mutex);
+            status.live_workers = 0;
+            status.state = 3;
         } catch (const std::exception& e) {
-            std::lock_guard lock(mutex);
-            status.state = 4;
-            status.live_workers = 0;
-            status.error = e.what();
+            fail(e.what());
         } catch (...) {
-            std::lock_guard lock(mutex);
-            status.state = 4;
-            status.live_workers = 0;
-            status.error = "unknown Seastar startup exception";
+            fail("unknown native startup exception");
         }
-        if (!signal_snapshot_taken) capture_owned_signals();
-        restore_signals();
         notify();
     }
 };
 
 // The framework host is the only server: a listener needs framework dispatch,
 // and framework dispatch HTTP or a listening socket.
-static void validate_server(const ServerConfig& config) {
+void validate_server(const ServerConfig& config) {
     if (config.enabled() && !config.application_dispatch_all)
         throw std::invalid_argument("a server requires framework dispatch (application_dispatch_all)");
     if (config.application_dispatch_all && !config.http_port && config.listen_fd < 0)
         throw std::invalid_argument("framework dispatch requires an HTTP port or a listening socket");
 }
-Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor_backend) {
-    if (cpus.empty()) throw std::invalid_argument("CPUs required");
-    validate_server(config);
-    if (ever_started.exchange(true)) throw std::runtime_error("one Seastar lifecycle per process");
-    p = std::make_unique<Impl>(std::move(cpus), std::move(config), std::move(reactor_backend));
+class AsioRuntime final : public RuntimeBackend {
+    std::unique_ptr<Impl> p;
+public:
+    AsioRuntime(std::vector<int> cpus, ServerConfig config);
+    ~AsioRuntime() override;
+    int fd() const override;
+    void clear_notification() override;
+    Stats stats() const override;
+    std::vector<ShardInfo> shards() const override;
+    void submit_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length) override;
+    std::vector<FileResult> drain_files(size_t count) override;
+    std::vector<RequestEvent> drain_requests(size_t count) override;
+    void resolve_requests(std::vector<RequestDecision> decisions) override;
+    ServerSnapshot server_stats() const override;
+    uint64_t start_server(ServerConfig server) override;
+    void drain_server(uint64_t generation) override;
+    void stop_server(uint64_t generation) override;
+    void stop() override;
+    void join() override;
+    void close_fd() override;
+};
+AsioRuntime::AsioRuntime(std::vector<int> cpus, ServerConfig config)
+    : p(std::make_unique<Impl>(std::move(cpus), std::move(config))) {
     p->thread = std::thread([this] { p->run(); });
 }
-Runtime::~Runtime() {
+AsioRuntime::~AsioRuntime() {
     if (p->owner != ::getpid()) {
-        // A forked child's copy: the threads (Seastar's) are
-        // the parent's. Joining them, or destroying condition variables they
-        // wait on, hangs: the copy is left alone.
+        // A forked child's copy: the threads are the parent's. Joining them,
+        // or destroying condition variables they wait on, hangs: the copy is
+        // left alone.
         (void)p.release();
         return;
     }
@@ -320,21 +341,22 @@ Runtime::~Runtime() {
     if (p->thread.joinable()) p->thread.join();
     close_fd();
 }
-int Runtime::fd() const { return p->notify_fd; }
-void Runtime::submit_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length) {
+int AsioRuntime::fd() const { return p->notify_fd; }
+void AsioRuntime::submit_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length) {
     if (operation < FileOperation::file_stat || operation > FileOperation::file_open)
         throw std::invalid_argument("unknown file operation");
-    // Posted under the mutex: the alien instance is valid while
-    // the state is 1, and run() clears it under the mutex before it goes.
     std::lock_guard lock(p->mutex);
     if (p->status.state != 1) throw std::runtime_error("runtime not accepting work");
-    const unsigned shard = p->next_shard++ % p->cpus.size();
-    ss::alien::run_on(*p->alien, shard,
-        [impl = p.get(), id, operation, path = std::move(path), offset, length]() mutable noexcept {
-            (void)impl->execute_file(id, operation, std::move(path), offset, length);
-        });
+    p->files->post([impl = p.get(), id, operation, path = std::move(path), offset, length] {
+        auto result = execute_file(id, operation, path, offset, length);
+        {
+            std::lock_guard lock(impl->mutex);
+            impl->file_results.push_back(std::move(result));
+        }
+        impl->notify();
+    });
 }
-std::vector<FileResult> Runtime::drain_files(size_t count) {
+std::vector<FileResult> AsioRuntime::drain_files(size_t count) {
     std::vector<FileResult> out;
     bool more;
     {
@@ -348,7 +370,7 @@ std::vector<FileResult> Runtime::drain_files(size_t count) {
     if (more) p->notify();
     return out;
 }
-void Runtime::clear_notification() {
+void AsioRuntime::clear_notification() {
     eventfd_t value;
     while (::eventfd_read(p->notify_fd, &value) < 0 && errno == EINTR) {}
     // Reset before inspecting either queue: a concurrent producer is either
@@ -365,83 +387,160 @@ void Runtime::clear_notification() {
     }
     if (more) p->notify();
 }
-Stats Runtime::stats() const {
+Stats AsioRuntime::stats() const {
     std::lock_guard lock(p->mutex);
     return p->status;
 }
-std::vector<ShardInfo> Runtime::shards() const {
+std::vector<ShardInfo> AsioRuntime::shards() const {
     std::lock_guard lock(p->mutex);
     return p->shard_info;
 }
-std::vector<RequestEvent> Runtime::drain_requests(size_t count) {
+std::vector<RequestEvent> AsioRuntime::drain_requests(size_t count) {
     std::lock_guard lock(p->mutex);
     if (!p->server) return {};
     auto out = p->server->drain(count);
     if (p->server->has_events()) p->notify();
     return out;
 }
-void Runtime::resolve_requests(std::vector<RequestDecision> decisions) {
+void AsioRuntime::resolve_requests(std::vector<RequestDecision> decisions) {
     std::lock_guard lock(p->mutex);
     if (p->server && p->status.state < 2) p->server->resolve_batch(std::move(decisions));
 }
-ServerSnapshot Runtime::server_stats() const {
+ServerSnapshot AsioRuntime::server_stats() const {
     std::lock_guard lock(p->mutex);
     auto out = p->server ? p->server->snapshot() : ServerSnapshot{};
     out.totals["notification_writes"] = p->notification_writes.load(std::memory_order_relaxed);
     return out;
 }
-uint64_t Runtime::start_server(ServerConfig config) {
+uint64_t AsioRuntime::start_server(ServerConfig config) {
     validate_server(config);
     std::lock_guard life(p->lifecycle);
-    ss::alien::instance* alien = nullptr;
     {
         std::lock_guard lock(p->mutex);
         if (p->status.state != 1) throw std::runtime_error("runtime is not running");
-        alien = p->alien;
     }
-    return ss::alien::submit_to(*alien, 0, [impl = p.get(), config = std::move(config)]() mutable {
-        if (impl->server_running)
-            return ss::make_exception_future<uint64_t>(std::runtime_error("a network server is already running"));
-        return impl->start_server_here(std::move(config));
-    }).get();
+    if (p->server_running) throw std::runtime_error("a network server is already running");
+    auto network = p->make_server(config);
+    try {
+        network->start();
+    } catch (...) {
+        network->stop();
+        throw;
+    }
+    std::unique_ptr<NetworkServer> previous;  // stopped already
+    uint64_t generation;
+    {
+        std::lock_guard lock(p->mutex);
+        previous = std::move(p->server);
+        p->server = std::move(network);
+        p->adopt(config);
+        p->server_config = std::move(config);
+        generation = ++p->server_generation;
+    }
+    p->server_running = true;
+    return generation;
 }
-void Runtime::drain_server(uint64_t generation) {
+void AsioRuntime::drain_server(uint64_t generation) {
     std::lock_guard life(p->lifecycle);
-    ss::alien::instance* alien = nullptr;
+    NetworkServer* network;
     {
         std::lock_guard lock(p->mutex);
         if (p->status.state != 1) return;
-        alien = p->alien;
+        if (generation && generation != p->server_generation) return;
+        network = p->server.get();
     }
-    ss::alien::submit_to(*alien, 0, [impl = p.get(), generation] {
-        return impl->drain_server_here(generation);
-    }).get();
+    if (network) network->drain();  // a no-op once it stops
 }
-void Runtime::stop_server(uint64_t generation) {
+void AsioRuntime::stop_server(uint64_t generation) {
     std::lock_guard life(p->lifecycle);
-    ss::alien::instance* alien = nullptr;
+    NetworkServer* network;
     {
         std::lock_guard lock(p->mutex);
         if (p->status.state != 1) return;
-        alien = p->alien;
+        // An Engine stops the server it started, never a later one.
+        if (generation && generation != p->server_generation) return;
+        network = p->server.get();
     }
-    ss::alien::submit_to(*alien, 0, [impl = p.get(), generation] {
-        return impl->stop_server_here(generation);
-    }).get();
+    p->server_running = false;
+    if (network) network->stop();
 }
-void Runtime::stop() {
+void AsioRuntime::stop() {
     std::lock_guard life(p->lifecycle);
     std::lock_guard lock(p->mutex);
     if (p->status.state >= 2) return;
     if (p->status.state != 1) throw std::runtime_error("stop requires a ready runtime");
-    ss::alien::run_on(*p->alien, 0, [impl=p.get()]() noexcept { impl->finish->set_value(); });
     p->status.state = 2;
+    p->stop_requested = true;
+    p->stopping.notify_all();
 }
-void Runtime::join() { if (p->thread.joinable()) p->thread.join(); }
-void Runtime::close_fd() {
+void AsioRuntime::join() { if (p->thread.joinable()) p->thread.join(); }
+void AsioRuntime::close_fd() {
     if (p->notify_fd >= 0) {
         ::close(p->notify_fd);
         p->notify_fd = -1;
     }
 }
+}  // namespace
+
+#ifdef OLDMAN_NATIVE_URING
+// The io_uring build's entry point, which Runtime finds with dlsym: a
+// running runtime, or nullptr and why not when this system refuses io_uring.
+extern "C" __attribute__((visibility("default")))
+RuntimeBackend* oldman_native_uring_runtime(const std::vector<int>* cpus, const ServerConfig* config,
+                                             std::string* why) {
+    // Asio's io_uring support assumes Linux 5.10 or later.
+    unsigned major = 0, minor = 0;
+    utsname system{};
+    if (::uname(&system) == 0) std::sscanf(system.release, "%u.%u", &major, &minor);
+    if (major < 5 || (major == 5 && minor < 10)) {
+        *why = std::string("Linux ") + system.release + " predates 5.10";
+        return nullptr;
+    }
+    try {
+        asio::io_context probe(1);  // sets up a ring: refused by seccomp, io_uring_disabled, ...
+    } catch (const std::exception& e) {
+        *why = e.what();
+        return nullptr;
+    }
+    return new AsioRuntime(*cpus, *config);
+}
+#else
+static std::atomic<bool> ever_started{false};
+
+// The io_uring build, next to this extension; nullptr (and why) without it.
+static RuntimeBackend* load_uring(const std::vector<int>& cpus, const ServerConfig& config, std::string& why) {
+    Dl_info self{};
+    if (!::dladdr(reinterpret_cast<void*>(&load_uring), &self) || !self.dli_fname) {
+        why = "cannot locate the native extension";
+        return nullptr;
+    }
+    std::string path(self.dli_fname);
+    path = path.substr(0, path.rfind('/') + 1) + "liboldman_native_uring.so";
+    void* library = ::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);  // stays loaded
+    if (!library) {
+        why = ::dlerror();
+        return nullptr;
+    }
+    using Factory = RuntimeBackend* (*)(const std::vector<int>*, const ServerConfig*, std::string*);
+    auto factory = reinterpret_cast<Factory>(::dlsym(library, "oldman_native_uring_runtime"));
+    if (!factory) {
+        why = "the io_uring build has no entry point";
+        return nullptr;
+    }
+    return factory(&cpus, &config, &why);
+}
+Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor_backend) {
+    if (cpus.empty()) throw std::invalid_argument("CPUs required");
+    if (!reactor_backend.empty() && reactor_backend != "epoll" && reactor_backend != "io_uring")
+        throw std::invalid_argument("unknown reactor backend: " + reactor_backend + " (epoll or io_uring)");
+    validate_server(config);
+    if (ever_started.exchange(true)) throw std::runtime_error("one native runtime per process");
+    if (reactor_backend == "io_uring") {
+        p.reset(load_uring(cpus, config, fallback_));
+        if (!p && fallback_.empty()) fallback_ = "io_uring is unavailable";
+    }
+    if (!p) p = std::make_unique<AsioRuntime>(std::move(cpus), std::move(config));
+}
+Runtime::~Runtime() = default;
+#endif
 }

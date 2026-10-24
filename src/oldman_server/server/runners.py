@@ -337,7 +337,7 @@ def _serve_native(
     host, port, app, sock, unix, bound_unix, backlog, loop,
     register_sys_signals, run_multiple, run_async,
 ):
-    """HTTP/1.1 through the native (Seastar) host when NATIVE_SERVER is set.
+    """HTTP/1.1 through the native host when NATIVE_SERVER is set.
 
     Same lifecycle as _serve_http_1: startup, init and shutdown events, system
     signals and app.stop(); only the listener and connection handling differ.

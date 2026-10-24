@@ -1,11 +1,12 @@
 """Sanic's standard entry points serve through the native host (NATIVE_SERVER).
 
-Each scenario runs in its own interpreter: a process starts Seastar once.
+Each scenario runs in its own interpreter: a process starts one native runtime.
 """
 from collections import Counter
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -738,7 +739,7 @@ def test_tcp_run_serves_on_sanics_socket():
 
 
 def test_a_child_forked_after_the_native_host_started_uses_asyncio():
-    # Sanic's "fork" start method from a process where Seastar already ran
+    # Sanic's "fork" start method from a process where the native runtime already ran
     # (a test client's server, say): the child has the runtime's memory but
     # not its threads, so its servers use the asyncio server.
     lines, _ = run('''
@@ -771,11 +772,12 @@ def io_uring_available():
     return True
 
 
-@pytest.mark.parametrize("backend", ["epoll", "linux-aio", "io_uring"])
+@pytest.mark.parametrize("backend", ["epoll", "io_uring"])
 def test_reactor_backend_setting(backend):
     if backend == "io_uring" and not io_uring_available():
         pytest.skip("io_uring_setup is not permitted here")
-    # NATIVE_REACTOR_BACKEND picks Seastar's reactor backend; every shard runs it.
+    # NATIVE_REACTOR_BACKEND picks the shards' I/O (the io_uring build of the
+    # runtime for io_uring); every shard runs it.
     port = free_port()
     lines, _ = run(f'''
         from oldman_server.native import host
@@ -791,6 +793,39 @@ def test_reactor_backend_setting(backend):
     ''')
     assert json.loads(lines["BACKENDS"]) == [backend]
     assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
+
+
+def test_io_uring_falls_back_to_epoll_without_its_build(tmp_path):
+    # Where the io_uring build cannot run (here: it is missing next to the
+    # extension; elsewhere seccomp or an old kernel refuses io_uring), the
+    # runtime serves with epoll and says why.
+    from oldman_server.native import _native
+    extension = tmp_path / os.path.basename(_native.__file__)
+    shutil.copy(_native.__file__, extension)
+    code = textwrap.dedent(f'''
+        import importlib.util, json, os, select
+        spec = importlib.util.spec_from_file_location("_native", {str(extension)!r})
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        runtime = native.Runtime([sorted(os.sched_getaffinity(0))[-1]], native.ServerConfig(), "io_uring")
+        while runtime.stats()["state"] == 0:
+            select.select([runtime.fd()], [], [], 1)
+            runtime.clear_notification()
+        print(json.dumps([runtime.fallback(), [s["backend"] for s in runtime.shards()]]))
+        runtime.stop()
+        runtime.join()
+        runtime.close_fd()
+    ''')
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    fallback, backends = json.loads(done.stdout)
+    assert "liboldman_native_uring.so" in fallback and backends == ["epoll"]
+
+
+def test_unknown_reactor_backend_is_refused():
+    from oldman_server.native import _native
+    with pytest.raises(ValueError, match="epoll or io_uring"):
+        _native.Runtime([sorted(os.sched_getaffinity(0))[-1]], _native.ServerConfig(), "linux-aio")
 
 
 def test_failing_main_process_start_still_runs_main_process_stop():

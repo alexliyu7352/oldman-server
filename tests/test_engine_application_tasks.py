@@ -20,6 +20,7 @@ class FakeRuntime:
         os.eventfd_write(self.fd_, 1)  # Engine startup waits for state 1.
 
     def fd(self): return self.fd_
+    def fallback(self): return ""
     def clear_notification(self):
         try:
             os.eventfd_read(self.fd_)

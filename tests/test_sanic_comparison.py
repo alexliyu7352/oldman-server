@@ -1,4 +1,4 @@
-"""Comparison contracts; Seastar services are exercised as separate processes."""
+"""Comparison contracts; native services are exercised as separate processes."""
 from copy import deepcopy
 import pytest
 

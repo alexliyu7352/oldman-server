@@ -1,10 +1,10 @@
 # oldman-server
 
-`oldman-server`（import 名 `oldman_server`）是带 C++ / Seastar 原生 HTTP/1.1 主机的 Python Web 框架，主要配合 [oldman](https://github.com/alexliyu7352/oldman) 使用，也可单独使用。框架层源自 Sanic 25.12.1 的 fork（MIT，见 `src/oldman_server/LICENSE.sanic`），接口大体沿用 Sanic，差异见下文。开启 `NATIVE_SERVER` 后，网络 IO、HTTP 解析与写出由原生 shard 线程承担，路由、中间件、异常处理、生命周期和业务代码仍在 Python 中执行。Python 端只有一个进程、一个普通 GIL 解释器和一个 uvloop 事件循环。
+`oldman-server`（import 名 `oldman_server`）是带 C++ 原生 HTTP/1.1 主机（基于 Asio）的 Python Web 框架，主要配合 [oldman](https://github.com/alexliyu7352/oldman) 使用，也可单独使用。框架层源自 Sanic 25.12.1 的 fork（MIT，见 `src/oldman_server/LICENSE.sanic`），接口大体沿用 Sanic，差异见下文。开启 `NATIVE_SERVER` 后，网络 IO、HTTP 解析与写出由原生 shard 线程承担，路由、中间件、异常处理、生命周期和业务代码仍在 Python 中执行。Python 端只有一个进程、一个普通 GIL 解释器和一个 uvloop 事件循环。
 
 ## 现状
 
-- **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 Seastar shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 10.6 万对 7.4 万 RPS（1.42 倍），回显请求体约 8.3 万对 6.4 万（1.32 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 8.8 万对 8.0 万（1.10 倍），每请求总 CPU 约为原版的 0.6–0.74 倍，每组配对都领先。
+- **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 10.6 万对 7.4 万 RPS（1.42 倍），回显请求体约 8.3 万对 6.4 万（1.32 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 8.8 万对 8.0 万（1.10 倍），每请求总 CPU 约为原版的 0.6–0.74 倍，每组配对都领先。
 - **多 worker**：同 4 个物理核，2 个 worker 进程（各 1 个 Python 线程 + 1 个 shard）对原版 Sanic 4 个 worker：小 JSON 16.9 万对 9.5 万 RPS（1.80 倍），回显请求体 14.3 万对 8.0 万（1.76 倍），sleep 14.0 万对 10.1 万（1.38 倍），每请求总 CPU 约为原版的 0.51–0.66 倍。（AMD Ryzen 7 3800X，Ubuntu 20.04，2026-10-22；客户端为 Seastar 的 HTTP 压测工具，占另外 3 个核。）
 - **测试**：Sanic 与 sanic-ext 的测试集已并入本项目（`tests/framework`、`tests/ext`），按本包的行为维护，经 asyncio 服务器和经原生主机（`OLDMAN_SERVER_NATIVE_SERVER=true`）两种方式都全部通过。与 Sanic 的差异见下文。
 
@@ -68,19 +68,19 @@ Sanic 的设置照常生效：
 | `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出时由原生层直接回 503，不经错误处理器：这时 Python 已经满载） |
 | `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB） |
 | `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
-| `NATIVE_REACTOR_BACKEND` | Seastar 的 reactor 后端：`epoll`（默认）、`linux-aio`、`io_uring`；空字符串由 Seastar 选第一个可用的（io_uring、linux-aio、epoll 依次）。shard 吃满时 linux-aio 比 epoll 略快（多 worker 对照中 small/body 约 +1–2%，1024 连接的 sleep 约 +8%），但每个 shard 能挂起的连接数受 aio 配额限制（约 2 万，系统 `fs.aio-max-nr` 紧张时更少），超出时进程会中止；io_uring 在 Linux 5.15 上比 epoll 慢约 7% |
+| `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前）改用 epoll 并记一条警告。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
 | `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
 
 ## 原生主机与 asyncio 服务器
 
 原生主机在当前进程内服务明文 HTTP/1.1，监听 TCP 或 unix socket，包括 keep-alive、pipelining、chunked 请求体、流式请求与流式响应、背压、100-continue 和 WebSocket。
 
-- 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由 shard 上的 Seastar 文件 API 完成（走页缓存；不在缓存中的读交给 Seastar 的 syscall 线程，不阻塞 reactor），不再经 aiofiles 线程池；`file_stream()` 的文件内容由 shard 直接读出并写入连接，分块与原版相同（带 Range 时的修正见「行为修正」）。响应头、304/206、错误类型与原版一致。
+- 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由原生主机的文件线程完成（在 shard 的 CPU 上，读盘时不阻塞 shard），不再经 aiofiles 线程池；`file_stream()` 的文件内容由文件线程读出、shard 直接写入连接，分块与原版相同（带 Range 时的修正见「行为修正」）。响应头、304/206、错误类型与原版一致。
 - multipart 表单：`request.form` / `request.files` 的解析由 C++ 完成（`native/multipart.hh`），结果与 Sanic 的 `parse_multipart_form` 相同；遇到需要 Python 编解码或 Unicode 处理的表单（非 ASCII 的段头、非 UTF-8 字段、`filename*`、没有 name 的段、格式错误）则照旧由 Sanic 的解析器处理。
 - 监听 socket：由 Sanic 照原样绑定（unix socket 用临时名、权限默认 0o666（`UNIX_SOCKET_MODE`）、改名替换，退出时删除），原生主机在这个 socket 上接受连接（shard 0 接受后分给各 shard），它在服务期间保持打开、随服务器关闭，所以传入的 `sock`（TCP 或 AF_UNIX）、`app.serve_location` 与原版一致。多 worker 时与原版的 TCP 一样，由主进程绑定并监听一次，各 worker 都在这一个 socket 上接受连接（unix socket 也是，退出时由主进程删除）。主进程从启动到退出一直在监听：还没有 worker 在接受时（启动时、所有 worker 一起重启时）新连接在队列里等，而不是被拒绝，别的程序这时也绑定不了这个地址；一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket，已在队列里的连接由其他 worker 接走。各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。用户传入的共用 socket 同样如此。原版的 unix socket 是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。放在 nginx 之后的部署见下一节。
 - 只服务明文 HTTP/1.1：TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见「与 Sanic 的差异」）。
 - 多 worker：会启动 worker 进程的运行（`workers > 1`、`fast`、`auto_reload`、`dev`）照原版由 Sanic 的 worker manager 管理（重启、扩缩、`app.m` 都相同），每个 worker 进程各自运行原生主机：主进程把 CPU 分成每个 worker 一组，worker 的 Python 线程固定在组内第一个 CPU，shard 用其余的（按 worker 编号取组；编号见 `NATIVE_WORKER_LISTEN`）。`fast=True` 启动能放下的 worker 数（CPU 数 ÷ (1 + `NATIVE_SHARDS`)），而不是每个 CPU 一个。worker 数多于 CPU 组时，多出的 worker 与前面的共用 CPU 组（记一条警告）。
-- 用 `fork` 启动方式、且父进程已经运行过原生主机时（Seastar 不能在 fork 出的子进程里再次启动），子进程改用 asyncio 服务器并记一条警告；默认的 `spawn` 不受影响。
+- 用 `fork` 启动方式、且父进程已经运行过原生主机时（一个进程只启动一次原生运行时，fork 出的子进程有它的状态却没有它的线程），子进程改用 asyncio 服务器并记一条警告；默认的 `spawn` 不受影响。
 - 每个进程只有一个原生服务器：同一进程同一事件循环上的第二个服务器（如第二个应用的服务器）使用 asyncio 服务器（记一条警告），两者都正常服务。
 
 协议错误（如非法请求行、请求头过大、坏的 chunked 编码、请求体超限）与原版报出相同的状态码和消息，并交给应用的错误处理器。
@@ -207,7 +207,7 @@ python probes/sanic_comparison/run.py --python-only --out build/compare-<新目�
 - `src/oldman_server/`：框架（源自 Sanic 25.12.1 的 fork）。
 - `src/oldman_server/native/host.py`：应用与原生主机之间的适配层，包括请求、响应、流、文件、协议错误和 WebSocket。
 - `src/oldman_server/native/engine.py`：原生运行时的 Python 端（事件取出、每请求 Task、回传批次、背压、文件操作）。
-- `native/`：Seastar 服务（`server.cc`）、HTTP/1.1 解析与写出（`http1.cc`）、multipart 解析（`multipart.hh`）、Python 绑定（`bridge.cc`，构建为 `oldman_server.native._native`）。
+- `native/`：原生主机（`server.cc`）与运行时（`runtime.cc`，另有 io_uring 构建 `liboldman_native_uring.so`），基于 Asio；HTTP/1.1 解析与写出（`http1.cc`）、multipart 解析（`multipart.hh`）、Python 绑定（`bridge.cc`，构建为 `oldman_server.native._native`）。
 - `src/oldman_server/ext/`：Sanic Extensions（源自 sanic-ext 25.12.0，许可见 `LICENSE.sanic-ext`）。
 - `src/oldman_server/testing/`：测试客户端（源自 sanic-testing 24.6.0，许可见 `LICENSE.sanic-testing`）。
 - `upstream/`：所依据的上游版本（归档地址、提交）与各文件的 SHA-256。与原版 Sanic 的性能对照要先把 `upstream/sanic.json` 的归档解压到 `build/sanic-upstream/`（得到 `sanic-<提交>/`），对照前逐个文件核对。

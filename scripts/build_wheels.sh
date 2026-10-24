@@ -141,7 +141,9 @@ for tag in "${pythons[@]}"; do
     -DCMAKE_PREFIX_PATH="$prefix;$("$tools/python" -m pybind11 --cmakedir)" \
     -DOPENSSL_ROOT_DIR="$prefix" \
     -Dc-ares_LIBRARY="$prefix/lib/libcares.so" -Dc-ares_INCLUDE_DIR="$prefix/include" \
+    -DASIO_INCLUDE_DIR="$work/sources/asio/include" \
     -DPython_EXECUTABLE="$python"
+  # _native, and the io_uring build of the runtime it depends on.
   cmake --build "$work/build/extension-$tag" --target _native -j "$jobs"
   rm -f "$work/dist"/*.whl
   uv build --wheel --python "$python" --out-dir "$work/dist" "$root"

@@ -1,11 +1,13 @@
 #pragma once
-#include <seastar/core/future.hh>
-#include <seastar/core/alien.hh>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace asio { class io_context; }
 
 namespace probe {
 struct ServerConfig {
@@ -23,13 +25,13 @@ struct ServerConfig {
     std::string http_host = "127.0.0.1";
     // Instead of binding http_host:http_port: a listening socket (TCP or
     // AF_UNIX) that Python bound and keeps open, as Sanic does for its
-    // server. Shard 0 accepts on a duplicate and hands connections to the
-    // other shards. Requests over an AF_UNIX one report unix_path as the
-    // server address.
+    // server. Shard 0 accepts on a duplicate and hands each connection to the
+    // shard with the fewest. Requests over an AF_UNIX one report unix_path as
+    // the server address.
     int listen_fd = -1;
     std::string unix_path;
     // Other worker processes accept on listen_fd too: none may shut it down
-    // (Seastar's abort_accept does) when it stops.
+    // when it stops.
     bool listen_shared = false;
     // Worker processes that accept on one shared listen_fd take turns by load:
     // the address of accept_slots AcceptSlots in shared memory (0: none) and
@@ -123,17 +125,24 @@ struct ServerSnapshot {
     std::map<std::string, uint64_t> totals;
     std::vector<std::map<std::string, uint64_t>> shards;
 };
+// Runs a blocking job (a file read) off the shards; the runtime's file threads.
+using Offload = std::function<void(std::function<void()>)>;
+// The framework HTTP/1.1 host on the runtime's shards: one io_context each,
+// each run by its own thread. start, stop and the graceful drain block until
+// every shard has done its part: call them from a thread that is no shard's.
 class NetworkServer {
-    struct Impl;
-    std::unique_ptr<Impl> p;
 public:
-    NetworkServer(ServerConfig config, unsigned shards, seastar::alien::instance& alien,
-                  std::function<void()> notify);
+    struct Impl;  // server.cc's shards use it
+private:
+    std::shared_ptr<Impl> p;  // the shards' queued calls keep it alive
+public:
+    NetworkServer(ServerConfig config, std::vector<asio::io_context*> shards,
+                  std::function<void()> notify, Offload offload);
     ~NetworkServer();
-    seastar::future<> start();
-    seastar::future<> stop();
+    void start();
+    void stop();
     // A graceful stop's first step: see Service::drain.
-    seastar::future<> drain();
+    void drain();
     std::vector<RequestEvent> drain(size_t count);
     void resolve_batch(std::vector<RequestDecision> decisions);
     bool has_events() const;

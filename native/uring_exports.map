@@ -1,0 +1,7 @@
+/* The io_uring build exports its entry point only: its copy of Asio (static
+   members and the guards of function-local statics included) stays its own,
+   apart from the extension's epoll copy in the same process. */
+{
+  global: oldman_native_uring_runtime;
+  local: *;
+};

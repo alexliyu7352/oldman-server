@@ -1,5 +1,5 @@
 """3.14 migration gate. The native cases share the process's persistent
-runtime (Seastar starts once per process), as the framework host does.
+runtime (a process starts one runtime), as the framework host does.
 
 Strict xfails expose two upstream uvloop API gaps. The framework's real call
 paths below must pass on both loops; xfails do not certify full asyncio parity.

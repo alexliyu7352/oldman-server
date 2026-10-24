@@ -1,5 +1,5 @@
 """CPUs for the native host's threads: each serving process runs Python on one
-CPU and its Seastar shards on others.
+CPU and its native shards on others.
 
 One process takes NATIVE_SHARD_CPUS, or the last NATIVE_SHARDS CPUs of its
 affinity, for the shards. With Sanic's worker processes the main process

@@ -24,6 +24,7 @@ cmake -S "$PROBE_ROOT" -B "$project_build" -G Ninja \
   -DCMAKE_PREFIX_PATH="$PROBE_SEASTAR_BUILD;$PROBE_PREFIX;$("$python" -m pybind11 --cmakedir)" \
   -DSeastar_DIR="$PROBE_SEASTAR_BUILD" \
   -DCMAKE_MODULE_PATH="$PROBE_SEASTAR_SOURCE/cmake" \
+  -DASIO_INCLUDE_DIR="$PROBE_DEPS/sources/asio/include" \
   -DOPENSSL_ROOT_DIR="$PROBE_PREFIX" \
   -Dc-ares_LIBRARY="$PROBE_PREFIX/lib/libcares.so" -Dc-ares_INCLUDE_DIR="$PROBE_PREFIX/include" \
   -DPython_EXECUTABLE="$python"
