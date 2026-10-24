@@ -14,11 +14,11 @@
 pip install oldman-server               # 或 uv add oldman-server
 ```
 
-PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 glibc 2.28 及以上，如 Ubuntu 20.04、Debian 10、RHEL 8 及以后），CPython 3.12–3.14。Seastar 及其依赖的库已在 wheel 里，不需要另装。不提供源码包：从源码构建需要 Seastar 的整套依赖（见下文开发环境与「发布」）。在源码树里构建的源码包只含 `pyproject.toml` 列出的公开源码（`[tool.hatch.build.targets.sdist]`）。
+PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 glibc 2.28 及以上，如 Ubuntu 20.04、Debian 10、RHEL 8 及以后），CPython 3.12–3.14。wheel 只依赖 manylinux 允许的系统库，不需要另装别的库。不提供源码包：源码包不构建原生扩展，从源码构建需要 C++23 编译器、Asio 与 liburing（见下文开发环境与「发布」）。在源码树里构建的源码包只含 `pyproject.toml` 列出的公开源码（`[tool.hatch.build.targets.sdist]`）。
 
 ## 快速开始
 
-开发环境：Ubuntu 20.04 宿主；CPython 3.14.7（普通 GIL 构建；支持 3.12–3.14），由 uv 管理；Seastar 等原生依赖位于 `../seastar_deps`。第一次先运行 `bash scripts/bootstrap.sh`：它按 `dependency-lock.json` 下载编译器与依赖到 `../seastar_deps` 并构建 Seastar，要求宿主的系统包与锁文件 `host_requirements` 的版本逐个相同（不同即拒绝，不会换用别的版本）。其他环境请用发布构建的容器流程（见「发布」，`scripts/build_wheels.sh` 在 manylinux_2_28 容器里从源码构建全部依赖）。
+开发环境：Ubuntu 20.04 宿主；CPython 3.14.7（普通 GIL 构建；支持 3.12–3.14），由 uv 管理；原生依赖（Asio、liburing，以及性能对照的压测客户端与参照服务器所用的 Seastar）位于 `../seastar_deps`。第一次先运行 `bash scripts/bootstrap.sh`：它按 `dependency-lock.json` 下载编译器与依赖到 `../seastar_deps` 并构建 Seastar，要求宿主的系统包与锁文件 `host_requirements` 的版本逐个相同（不同即拒绝，不会换用别的版本）。其他环境请用发布构建的容器流程（见「发布」，`scripts/build_wheels.sh` 在 manylinux_2_28 容器里从源码构建全部依赖）。
 
 ```sh
 bash scripts/bootstrap.sh               # 第一次：锁定的工具链与原生依赖、Seastar、扩展
@@ -196,11 +196,11 @@ python probes/sanic_comparison/run.py --python-only --out build/compare-<新目�
 
 推送 tag `v<版本>`（与 `src/oldman_server/__version__.py` 一致，如 `v0.1.0`）后，`.github/workflows/release.yml`：
 
-1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载依赖源码并校验 SHA-256（`scripts/fetch_sources.py`，Seastar 打上 `patches/` 里的补丁），构建 Boost、OpenSSL、fmt、yaml-cpp、c-ares、protobuf、liburing、hwloc（不带插件）与 Seastar，再为 CPython 3.12–3.14 各构建扩展、打包（`hatch_build.py` 把扩展放进 wheel 并标上解释器与平台；树里没有扩展时拒绝构建 wheel，`OLDMAN_SERVER_PURE_WHEEL=1` 才构建只能用 asyncio 服务器的纯 Python wheel），由 auditwheel 把依赖库复制进 wheel、标为 manylinux_2_28。容器镜像按标签与摘要固定（`wheels.yml`）；lz4 与构建所需的头文件取自镜像的发行版仓库（签名的 RPM，版本不在锁文件里，记入构建日志与缓存键）。依赖与 Seastar 的构建结果按锁文件、补丁、脚本、镜像、编译器与这些 RPM 的版本缓存。
+1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载 liburing 与 Asio 的源码并校验 SHA-256（`scripts/fetch_sources.py`），构建 liburing，再为 CPython 3.12–3.14 各构建扩展与运行时的 io_uring 构建（liburing 静态链入）、打包（`hatch_build.py` 把两者放进 wheel 并标上解释器与平台；树里没有扩展时拒绝构建 wheel，`OLDMAN_SERVER_PURE_WHEEL=1` 才构建只能用 asyncio 服务器的纯 Python wheel），由 auditwheel 核对所链接的库并标为 manylinux_2_28。容器镜像（连同编译器）按标签与摘要固定（`wheels.yml`）。
 2. 核对每个 wheel 所带的库都附有许可证（`scripts/check_wheel_licenses.py`），再把每个 wheel 装进全新环境：只装声明的依赖时能导入，再装上测试依赖，跑经 asyncio 服务器与经原生主机的框架测试、原生主机的运行测试（`scripts/test_wheels.sh`）。auditwheel 只标 manylinux_2_28（`--only-plat`：测试只在 glibc 2.28 的镜像里做，不标更早的 glibc）。另在 `python:3.12/3.13/3.14-slim` 镜像里安装每个 wheel 并加载原生扩展：manylinux 允许 wheel 依赖少数系统库（libstdc++、libgcc_s、libz、libatomic）而不自带，精简镜像未必都有。
 3. 经 PyPI trusted publishing 发布（环境 `pypi`，只接受 `v*` tag 的部署），再用 runner 自带的 `gh` 建 GitHub release，附上 wheel 与 SHA256SUMS。工作流里的 action 都固定到提交。
 
-每次推送与 PR 由 `.github/workflows/ci.yml` 构建并测试同样的 wheel，不发布。wheel 带上所含第三方库的许可证（`LICENSES/`，作为包的 license files）：auditwheel 复制进 wheel 的每个库、编进扩展的 pybind11，都要在上述脚本的清单里并有许可证文件，否则测试失败。Seastar 以 `--as-needed` 链接：它只用到 SCTP 头文件里的常量，所以 wheel 不带 libsctp（LGPL）。
+每次推送与 PR 由 `.github/workflows/ci.yml` 构建并测试同样的 wheel，不发布。wheel 带上所含第三方库的许可证（`LICENSES/`，作为包的 license files）：编进扩展的 pybind11 与 Asio、编进 io_uring 构建的 liburing 都要有许可证文件；auditwheel 若复制了库进 wheel，它也要在上述脚本的清单里并有许可证文件，否则测试失败。
 
 ## 目录
 
@@ -215,4 +215,4 @@ python probes/sanic_comparison/run.py --python-only --out build/compare-<新目�
 
 ## 许可证
 
-MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.ext` 源自 sanic-ext 25.12.0，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方库（Seastar、Boost、OpenSSL、pybind11 等）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0`。wheel 里的 Seastar 打过一个补丁（`patches/`，说明见 `LICENSES/seastar-CHANGES.txt`）。
+MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.ext` 源自 sanic-ext 25.12.0，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方代码（Asio、pybind11、liburing）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND BSD-3-Clause AND BSL-1.0`。

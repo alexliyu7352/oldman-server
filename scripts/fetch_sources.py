@@ -1,14 +1,12 @@
-"""Download, check and unpack the source archives the release build compiles.
+"""Download, check and unpack source archives that dependency-lock.json pins.
 
-dependency-lock.json pins them: its "archives" of the tar format (Seastar with
-its patch, Boost, OpenSSL, fmt, yaml-cpp, c-ares, liburing, Asio) and its
-"release_archives" (hwloc, protobuf, ragel; the development host uses its own
-packages of these). Each archive must match its SHA-256; it is unpacked into
-DIRECTORY/<Name> (the lock's StripComponents applied) and its patches applied.
-An archive already unpacked from the same checksums (archive and patches) is
-left alone.
+The release build names the archives it compiles (liburing and Asio). Each
+must be one of the lock's "archives" of the tar format and match its SHA-256;
+it is unpacked into DIRECTORY/<Name> (the lock's StripComponents applied) and
+its patches applied. An archive already unpacked from the same checksums
+(archive and patches) is left alone.
 
-    python scripts/fetch_sources.py DIRECTORY
+    python scripts/fetch_sources.py DIRECTORY NAME...
 """
 import argparse
 import hashlib
@@ -22,9 +20,12 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def entries(lock):
-    archives = [entry for entry in lock["archives"] if entry["Format"] == "tar"]
-    return archives + lock["release_archives"]
+def entries(lock, names):
+    archives = {entry["Name"]: entry for entry in lock["archives"] if entry["Format"] == "tar"}
+    unknown = [name for name in names if name not in archives]
+    if unknown:
+        raise SystemExit(f"not a source archive of the lock: {', '.join(unknown)}")
+    return [archives[name] for name in names]
 
 
 def download(entry, cache):
@@ -67,11 +68,12 @@ def unpack(entry, archive, directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("names", nargs="+", metavar="NAME")
     args = parser.parse_args()
     lock = json.loads((ROOT / "dependency-lock.json").read_text())
     cache = args.directory / "downloads"
     cache.mkdir(parents=True, exist_ok=True)
-    for entry in entries(lock):
+    for entry in entries(lock, args.names):
         unpack(entry, download(entry, cache), args.directory)
         print(f"{entry['Name']} {entry['Version']}", flush=True)
 

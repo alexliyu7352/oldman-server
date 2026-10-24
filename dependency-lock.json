@@ -245,37 +245,5 @@
       "Destination": "sources/asio",
       "StripComponents": 1
     }
-  ],
-  "release_archives": [
-    {
-      "Name": "hwloc",
-      "Version": "2.11.2",
-      "Filename": "hwloc-2.11.2.tar.bz2",
-      "URL": "https://download.open-mpi.org/release/hwloc/v2.11/hwloc-2.11.2.tar.bz2",
-      "SHA256": "f7f88fecae067100f1a1a915b658add0f4f71561259482910a69baea22fe8409",
-      "Format": "tar",
-      "Destination": "sources/hwloc",
-      "StripComponents": 1
-    },
-    {
-      "Name": "protobuf",
-      "Version": "3.21.12",
-      "Filename": "protobuf-cpp-3.21.12.tar.gz",
-      "URL": "https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protobuf-cpp-3.21.12.tar.gz",
-      "SHA256": "4eab9b524aa5913c6fffb20b2a8abf5ef7f95a80bc0701f3a6dbb4c607f73460",
-      "Format": "tar",
-      "Destination": "sources/protobuf",
-      "StripComponents": 1
-    },
-    {
-      "Name": "ragel",
-      "Version": "6.10",
-      "Filename": "ragel-6.10.tar.gz",
-      "URL": "https://www.colm.net/files/ragel/ragel-6.10.tar.gz",
-      "SHA256": "5f156edb65d20b856d638dd9ee2dfb43285914d9aa2b6ec779dac0270cd56c3f",
-      "Format": "tar",
-      "Destination": "sources/ragel",
-      "StripComponents": 1
-    }
   ]
 }

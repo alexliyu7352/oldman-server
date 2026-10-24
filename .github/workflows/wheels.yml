@@ -16,8 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The image is pinned (tag and digest) and part of the cache key: the
-        # cached prefix is only reused with the compiler that built it.
+        # The image, and with it the compiler, is pinned (tag and digest).
         include:
           - arch: x86_64
             runner: ubuntu-24.04
@@ -27,31 +26,9 @@ jobs:
             image: quay.io/pypa/manylinux_2_28_aarch64:2026.10.22-0@sha256:270a5e59af09f02dfc07fe4bb2cb2c5625c76d085cfa47f87dd93d9026eacc75
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.image }}
-    # Building the dependencies and Seastar takes most of an hour on a fresh
-    # cache; the cached prefix leaves the extension, wheels and tests.
-    timeout-minutes: 240
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-
-      - name: Restore the built dependencies
-        id: cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
-        with:
-          path: /tmp/oldman-server-wheels/prefix
-          key: native-prefix-${{ matrix.arch }}-${{ hashFiles('dependency-lock.json', 'patches/**', 'scripts/fetch_sources.py', 'scripts/build_wheels.sh') }}-${{ matrix.image }}
-
-      - name: Build the dependencies and Seastar
-        id: prepare
-        run: scripts/build_wheels.sh --prepare
-
-      # Saved as soon as they are built, so that a failure in a later step does
-      # not rebuild them on the next run.
-      - name: Save the built dependencies
-        if: always() && steps.prepare.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
-        with:
-          path: /tmp/oldman-server-wheels/prefix
-          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Build the wheels
         run: scripts/build_wheels.sh dist

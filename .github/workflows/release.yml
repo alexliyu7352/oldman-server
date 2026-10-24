@@ -5,8 +5,8 @@ name: Release
 # tests the wheels, publishes them to PyPI through trusted publishing (OIDC, no
 # stored token; the PyPI project trusts this workflow and the environment
 # "pypi", which accepts only deployments from v* tags), then attaches them to a
-# GitHub release. Only wheels are published: building from source needs
-# Seastar and its dependencies. Actions are pinned to commits.
+# GitHub release. Only wheels are published: a source distribution does not
+# build the native extension. Actions are pinned to commits.
 
 on:
   push:
