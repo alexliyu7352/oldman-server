@@ -1,7 +1,7 @@
-"""One ordinary CPython asyncio loop, real Seastar shards, no worker PyObjects.
+"""The framework host: one ordinary CPython asyncio loop and real Seastar
+shards that parse and write HTTP/1.1; no Python object reaches a shard.
 
-Use `await engine.aclose()` before loop exit. A canceled Python request retains
-its native capacity until completion; canceling does not interrupt native work.
+Use `await engine.aclose()` before loop exit.
 """
 import asyncio
 import atexit
@@ -51,21 +51,14 @@ async def _off_loop(func, *args):
 @dataclass(frozen=True)
 class ServerConfig:
     http_port: int = 0
-    tcp_port: int = 0
-    udp_port: int = 0
     max_requests: int = 256
     max_bytes: int = 64 * 1024 * 1024
     max_body_bytes: int = 1024 * 1024
     decision_timeout_ms: int = 1000
-    file_path: str = ""
     coalesce_notifications: bool = False
-    cooperative_compression: bool = False
-    inline_compression: bool = False
-    upstream_ports: tuple[int, ...] = ()
-    application_routes: tuple[tuple[str, str], ...] = ()
     generate_date_header: bool = False
     max_response_bytes: int = 65536
-    native_json: bool = False
+    # The framework owns all HTTP routing; required.
     application_dispatch_all: bool = False
     # Diagnostic headers on the framework host: "all", "pid" or "none".
     probe_headers: str = "all"
@@ -104,27 +97,6 @@ class ServerConfig:
     framework_errors: bool = False
 
 
-@dataclass(frozen=True)
-class NativePolicy:
-    """Rules executed in C++; this does not compile or run a Python callback."""
-    allow_fixed: bool = False
-    allow_file: bool = False
-    allow_compress: bool = False
-    max_payload_bytes: int = 1024 * 1024
-
-
-@dataclass(frozen=True)
-class Request:
-    id: int
-    shard: int
-    method: str
-    route: str
-    body_size: int
-    body: bytes | None = None
-    parameter: str = ""
-    parent: int = 0
-
-
 # Python owns this extension object; its plain native data outlives the request
 # independently of the server. Header/body Python objects are built on access.
 ApplicationRequest = _native.ApplicationRequest
@@ -133,94 +105,15 @@ ApplicationRequest = _native.ApplicationRequest
 @dataclass(frozen=True)
 class Config:
     shard_cpus: tuple[int, ...]
-    max_pending: int = 1024
-    max_pending_bytes: int = 64 * 1024 * 1024
     completion_batch: int = 64
-    worker_cpus: tuple[int, ...] = ()
     server: ServerConfig | None = None
-    batch_decisions: bool = False
-    share_worker_cpus: bool = False
-    retire_http_contexts: bool = False
     # Seastar's reactor backend: "epoll", "linux-aio" or "io_uring"; "" lets
     # Seastar take the first available of io_uring, linux-aio and epoll.
     reactor_backend: str = "epoll"
 
 
-@dataclass(frozen=True)
-class Result:
-    payload: bytes
-    server_pid: int
-    worker_tid: int
-    shard: int
-    metrics: dict | None = None
-
-
-class BusyError(Exception):
-    pass
-
-
-class NativeOperationError(RuntimeError):
-    def __init__(self, status):
-        self.status = status
-        super().__init__(f"native HTTP operation failed with status {status}")
-
-
-@dataclass(frozen=True)
-class NativeBody:
-    """An opaque response body owned by its native HTTP request, not Python bytes."""
-    size: int
-    status: int = 200
-
-
-@dataclass(frozen=True)
-class HttpResponse:
-    status: int = 200
-    body: NativeBody | None = None
-    tag: str = ""
-
-
-class HttpRequest:
-    """Experimental one-operation HTTP context; native storage lasts until response."""
-    def __init__(self, engine, event):
-        self._engine, self._event = engine, event
-        self.method, self.body_size, self.parameter = event.method, event.body_size, event.parameter
-        self._phase = event
-        self._used = self._done = False
-        self._future = self._body = None
-        self._native_finished = False
-        self._terminal_code = 503
-        self._task = None
-
-    async def compress(self, *, level=6):
-        if self._done or self._used:
-            raise RuntimeError("request compression can be awaited only once while active")
-        if type(level) is not int or not 0 <= level <= 9:
-            raise ValueError("level must be an integer in 0..9")
-        if self._event.route != "python_compress":
-            raise ValueError("request is not a compression operation")
-        if not self._engine.config.worker_cpus and not (
-                self._engine.config.server.cooperative_compression or self._engine.config.server.inline_compression):
-            raise ValueError("worker pool is not configured")
-        self._used = True
-        self._future = self._engine._loop.create_future()
-        self._engine._resolve_http(self._event.id, self._event.shard, 100 + level, b"")
-        return await self._future
-
-    async def fetch(self, *, upstream=0):
-        if self._done or self._used:
-            raise RuntimeError("request operation can be awaited only once while active")
-        if self._event.route != "python_fetch":
-            raise ValueError("request is not an upstream operation")
-        if type(upstream) is not int or not 0 <= upstream < len(self._engine.config.server.upstream_ports):
-            raise ValueError("upstream must identify a configured origin")
-        self._used = True
-        self._future = self._engine._loop.create_future()
-        self._engine._resolve_http(self._event.id, self._event.shard, 1000 + upstream, b"")
-        return await self._future
-
-
 # Seastar starts once per process. Engines opened with persistent=True share one
-# runtime and start/stop only its network server: (runtime, shard CPUs, worker CPUs).
+# runtime and start/stop only its network server: (runtime, shard CPUs, backend).
 _persistent = None
 # A process forked after Seastar started (Sanic's "fork" start method, say)
 # has the runtime's memory but not its threads, and Seastar does not start
@@ -262,15 +155,12 @@ def _persistent_runtime(config):
     """The process's persistent runtime, created on first use: (runtime, created)."""
     global _persistent
     if _persistent is None:
-        runtime = _new_runtime(list(config.shard_cpus), config.max_pending,
-                               config.max_pending_bytes, list(config.worker_cpus),
-                               _native.ServerConfig(), config.reactor_backend)
-        _persistent = (runtime, tuple(config.shard_cpus), tuple(config.worker_cpus),
-                       config.reactor_backend)
+        runtime = _new_runtime(list(config.shard_cpus), _native.ServerConfig(), config.reactor_backend)
+        _persistent = (runtime, tuple(config.shard_cpus), config.reactor_backend)
         atexit.register(_stop_persistent_runtime)
         return runtime, True
-    runtime, shards, workers, backend = _persistent
-    if (shards, workers) != (tuple(config.shard_cpus), tuple(config.worker_cpus)):
+    runtime, shards, backend = _persistent
+    if shards != tuple(config.shard_cpus):
         raise ValueError("the persistent native runtime already runs on other CPUs")
     if backend != config.reactor_backend:
         raise ValueError(f"the persistent native runtime already runs the {backend or 'default'} reactor backend")
@@ -283,11 +173,8 @@ def _stop_persistent_runtime():
     runtime = _persistent[0]
     while runtime.stats()["state"] == 0:
         time.sleep(.001)
-    while runtime.stats()["state"] == 1:
-        try:
-            runtime.stop()  # drops results nobody took
-        except RuntimeError:
-            time.sleep(.01)  # requests still running end (each is bounded)
+    if runtime.stats()["state"] == 1:
+        runtime.stop()
     runtime.join()
     runtime.close_fd()
 
@@ -369,8 +256,7 @@ STREAM_WINDOW = 65536
 
 class Engine:
     @classmethod
-    async def open(cls, config: Config, *, decision_handler=None, http_handler=None,
-                   application_handler=None, application_native_results=False,
+    async def open(cls, config: Config, *, application_handler=None,
                    application_bytes_headers=False, persistent=False,
                    application_error_handler=None, application_connections=None,
                    opened=None):
@@ -395,95 +281,69 @@ class Engine:
         if (not config.shard_cpus or len(set(config.shard_cpus)) != len(config.shard_cpus)
                 or not set(config.shard_cpus) <= os.sched_getaffinity(0)):
             raise ValueError("shard_cpus must be distinct available CPUs")
-        if min(config.max_pending, config.max_pending_bytes, config.completion_batch) <= 0:
+        if config.completion_batch <= 0:
             raise ValueError("bounds must be positive")
-        if (len(set(config.worker_cpus)) != len(config.worker_cpus)
-                or not set(config.worker_cpus) <= os.sched_getaffinity(0)
-                or (not config.share_worker_cpus and set(config.worker_cpus) & set(config.shard_cpus))):
-            raise ValueError("worker_cpus must be distinct available CPUs separate from shards")
-        if config.server:
-            s = config.server
-            if s.cooperative_compression and s.inline_compression:
-                raise ValueError("choose one HTTP compression execution mode")
-            if type(s.listen_fd) is not int or s.listen_fd < -1 or type(s.unix_path) is not str:
-                raise ValueError("listen_fd must be an fd or -1 and unix_path a str")
-            if s.listen_fd >= 0 and not s.application_dispatch_all:
-                raise ValueError("a listening socket requires framework dispatch")
-            if (type(s.worker_listen_fd) is not int or s.worker_listen_fd < -1
-                    or type(s.worker_unix_path) is not str
-                    or (s.worker_listen_fd >= 0 and not s.application_dispatch_all)):
-                raise ValueError("worker_listen_fd must be an fd or -1, with framework dispatch")
-            if (any(type(v) is not int for v in (s.accept_counts, s.accept_slots, s.accept_slot))
-                    or s.accept_counts < 0 or not -1 <= s.accept_slot < max(s.accept_slots, 0)
-                    or ((s.accept_counts or s.listen_shared) and s.listen_fd < 0)):
-                raise ValueError("accept turns need a shared listen_fd and a slot of the table")
-            if not any((s.http_port, s.tcp_port, s.udp_port, s.listen_fd >= 0, s.worker_listen_fd >= 0)):
-                raise ValueError("at least one server port is required")
-            if any(not isinstance(p, int) or not 0 <= p <= 65535 for p in (s.http_port, s.tcp_port, s.udp_port)):
-                raise ValueError("ports must be integers in 0..65535")
-            if s.http_port and s.http_port == s.tcp_port:
-                raise ValueError("HTTP and framed TCP require separate ports")
-            # Without framework_errors the host buffers whole request bodies.
-            if (min(s.max_requests, s.max_bytes, s.max_body_bytes, s.decision_timeout_ms) <= 0
-                    or s.max_body_bytes > (1 << 62 if s.framework_errors else 128 * 1024 * 1024)
-                    or s.decision_timeout_ms > 86_400_000):
-                raise ValueError("invalid server bounds")
-            if type(s.body_window_bytes) is not int or not 1 <= s.body_window_bytes <= 1 << 30:
-                raise ValueError("body_window_bytes must be within 1..1 GiB")
-            if s.file_path and not os.path.isfile(s.file_path):
-                raise ValueError("file_path must identify a regular file")
-            if len(s.upstream_ports) > 16 or any(type(p) is not int or not 1 <= p <= 65535 for p in s.upstream_ports):
-                raise ValueError("configure at most 16 valid upstream ports")
-            if type(s.max_response_bytes) is not int or not 0 < s.max_response_bytes <= 128 * 1024 * 1024:
-                raise ValueError("invalid response byte limit")
-            if s.application_routes and not s.http_port:
-                raise ValueError("application routes require an HTTP port")
-            if type(s.application_dispatch_all) is not bool:
-                raise ValueError("application_dispatch_all must be bool")
-            if s.probe_headers not in ("all", "pid", "none"):
-                raise ValueError("probe_headers must be 'all', 'pid' or 'none'")
-            if type(s.http_host) is not str or not s.http_host:
-                raise ValueError("http_host must be a non-empty address")
-            if type(s.max_header_bytes) is not int or not 1 <= s.max_header_bytes <= 65536:
-                raise ValueError("max_header_bytes must be within 1..65536")
-            if type(s.keep_alive) is not bool or type(s.framework_errors) is not bool:
-                raise ValueError("keep_alive and framework_errors must be bool")
-            if any(type(v) is not int or not 0 <= v <= 86_400_000
-                   for v in (s.keep_alive_timeout_ms, s.request_timeout_ms, s.write_timeout_ms)):
-                raise ValueError("timeouts must be milliseconds within 0..86400000")
-            if s.application_dispatch_all:
-                if (not s.http_port and s.listen_fd < 0) or s.application_routes or s.native_json:
-                    raise ValueError("framework dispatch requires HTTP without exact routes or native JSON")
-                if application_handler is None:
-                    raise ValueError("framework dispatch requires an application_handler")
-        if decision_handler is not None and not callable(decision_handler):
-            raise TypeError("decision_handler must be callable")
-        if http_handler is not None and not callable(http_handler):
-            raise TypeError("http_handler must be callable")
-        if application_handler is not None and not callable(application_handler):
+        if config.server is None:
+            raise ValueError("the Engine requires an HTTP ServerConfig")
+        s = config.server
+        if type(s.listen_fd) is not int or s.listen_fd < -1 or type(s.unix_path) is not str:
+            raise ValueError("listen_fd must be an fd or -1 and unix_path a str")
+        if s.listen_fd >= 0 and not s.application_dispatch_all:
+            raise ValueError("a listening socket requires framework dispatch")
+        if (type(s.worker_listen_fd) is not int or s.worker_listen_fd < -1
+                or type(s.worker_unix_path) is not str
+                or (s.worker_listen_fd >= 0 and not s.application_dispatch_all)):
+            raise ValueError("worker_listen_fd must be an fd or -1, with framework dispatch")
+        if (any(type(v) is not int for v in (s.accept_counts, s.accept_slots, s.accept_slot))
+                or s.accept_counts < 0 or not -1 <= s.accept_slot < max(s.accept_slots, 0)
+                or ((s.accept_counts or s.listen_shared) and s.listen_fd < 0)):
+            raise ValueError("accept turns need a shared listen_fd and a slot of the table")
+        if not any((s.http_port, s.listen_fd >= 0, s.worker_listen_fd >= 0)):
+            raise ValueError("at least one server port is required")
+        if not isinstance(s.http_port, int) or not 0 <= s.http_port <= 65535:
+            raise ValueError("ports must be integers in 0..65535")
+        # Without framework_errors the host buffers whole request bodies.
+        if (min(s.max_requests, s.max_bytes, s.max_body_bytes, s.decision_timeout_ms) <= 0
+                or s.max_body_bytes > (1 << 62 if s.framework_errors else 128 * 1024 * 1024)
+                or s.decision_timeout_ms > 86_400_000):
+            raise ValueError("invalid server bounds")
+        if type(s.body_window_bytes) is not int or not 1 <= s.body_window_bytes <= 1 << 30:
+            raise ValueError("body_window_bytes must be within 1..1 GiB")
+        if type(s.max_response_bytes) is not int or not 0 < s.max_response_bytes <= 128 * 1024 * 1024:
+            raise ValueError("invalid response byte limit")
+        if type(s.application_dispatch_all) is not bool:
+            raise ValueError("application_dispatch_all must be bool")
+        if s.probe_headers not in ("all", "pid", "none"):
+            raise ValueError("probe_headers must be 'all', 'pid' or 'none'")
+        if type(s.http_host) is not str or not s.http_host:
+            raise ValueError("http_host must be a non-empty address")
+        if type(s.max_header_bytes) is not int or not 1 <= s.max_header_bytes <= 65536:
+            raise ValueError("max_header_bytes must be within 1..65536")
+        if type(s.keep_alive) is not bool or type(s.framework_errors) is not bool:
+            raise ValueError("keep_alive and framework_errors must be bool")
+        if any(type(v) is not int or not 0 <= v <= 86_400_000
+               for v in (s.keep_alive_timeout_ms, s.request_timeout_ms, s.write_timeout_ms)):
+            raise ValueError("timeouts must be milliseconds within 0..86400000")
+        if not s.application_dispatch_all:
+            raise ValueError("the native host serves framework dispatch only (application_dispatch_all)")
+        if not s.http_port and s.listen_fd < 0:
+            raise ValueError("framework dispatch requires an HTTP port or a listening socket")
+        if application_handler is None:
+            raise ValueError("framework dispatch requires an application_handler")
+        if not callable(application_handler):
             raise TypeError("application_handler must be callable")
         if application_error_handler is not None and not callable(application_error_handler):
             raise TypeError("application_error_handler must be callable")
-        if application_native_results and config.server is None:
-            raise ValueError("native application results require an HTTP ServerConfig")
         if type(application_bytes_headers) is not bool:
             raise TypeError("application_bytes_headers must be bool")
-        if application_bytes_headers and config.server is None:
-            raise ValueError("bytes application headers require an HTTP ServerConfig")
-        if persistent and config.server is None:
-            raise ValueError("a persistent Engine requires an HTTP ServerConfig")
         self = cls()
         self.config = config
         self._persistent = persistent
         self._loop = asyncio.get_running_loop()
-        self._pending = {}
-        self._id = 0
         self._closed = False
         self._close_task = None
         self._ready = self._loop.create_future()
         self._stopped = self._loop.create_future()
-        self._empty = asyncio.Event()
-        self._empty.set()
         self._native = None
         self._files = {}  # native file operations: id -> (future, operation, path)
         self._file_id = 0
@@ -491,8 +351,6 @@ class Engine:
         self._abandoned = False  # its server stopped by abandon(); the runtime may serve another
         self._draining = False
         self._reader_registered = False
-        self._decision_handler = decision_handler
-        self._http_handler = http_handler
         self._application_handler = application_handler
         self._application_error_handler = application_error_handler
         self.application_connections = (application_connections
@@ -501,28 +359,15 @@ class Engine:
         # Requests whose peer left (FIN or RST) while they ran: cancelled,
         # as Sanic's connection_lost cancels the handler.
         self._application_lost = set()
-        self._application_native_results = application_native_results
         self._application_bytes_headers = application_bytes_headers
         self._application_tasks = {}
-        self._application_returns = (
-            _native.ApplicationResponseBatch(
-                config.server.max_response_bytes, bytes_headers=application_bytes_headers,
-                no_body_statuses=config.server.application_dispatch_all)
-            if application_native_results else [])
+        self._application_returns = []
         self._application_flush_scheduled = False
         self._application_terminal = set()
         self._application_streams = {}
         self._application_inbound = {}
         self._application_tunnels = {}
-        self._http_tasks = set()
-        self._http_waiting = {}
-        self._http_returns = []
-        self._http_flush_scheduled = False
-        self._decision_stats = dict(python_decisions=0, python_decision_cpu_ns=0,
-                                    python_decision_wall_ns=0, python_decision_errors=0,
-                                    python_http_started=0, python_http_finished=0,
-                                    python_http_resumed=0, python_http_errors=0,
-                                    python_application_started=0, python_application_finished=0,
+        self._decision_stats = dict(python_application_started=0, python_application_finished=0,
                                     python_application_errors=0)
         self._opened = opened
         # A separate task owns startup and its error cleanup. Caller cancellation
@@ -544,16 +389,14 @@ class Engine:
     async def _start(self):
         c = self.config
         server = _native.ServerConfig()
-        if c.server:
-            for key, value in vars(c.server).items():
-                setattr(server, key, value)
+        for key, value in vars(c.server).items():
+            setattr(server, key, value)
         if self._persistent:
             return await self._start_persistent(server)
         if self._opened is not None:
             self._opened(self)
         try:
-            self._native = _new_runtime(list(c.shard_cpus), c.max_pending, c.max_pending_bytes, list(c.worker_cpus), server,
-                                        c.reactor_backend)
+            self._native = _new_runtime(list(c.shard_cpus), server, c.reactor_backend)
             self.notification_fd = self._native.fd()
             self._loop.add_reader(self.notification_fd, self._drain)
             self._reader_registered = True
@@ -602,129 +445,16 @@ class Engine:
             return  # _start already joined and released a failed runtime.
         await self.aclose()
 
-    async def echo(self, payload: bytes, *, delay_ms: int = 0) -> Result:
-        if asyncio.get_running_loop() is not self._loop:
-            raise RuntimeError("Engine belongs to a different event loop")
-        if self._closed:
-            raise RuntimeError("Engine is closing or closed")
-        if not isinstance(payload, bytes):
-            raise TypeError("first probe accepts immutable bytes only")
-        if not isinstance(delay_ms, int) or not 0 <= delay_ms <= 60_000:
-            raise ValueError("delay_ms must be an integer in 0..60000")
-        # Avoid making an oversized native copy just to reject it.
-        if len(payload) > self.config.max_pending_bytes:
-            raise BusyError("native byte budget exceeded")
-        self._id += 1
-        request_id = self._id
-        fut = self._loop.create_future()
-        if not self._native.submit(request_id, payload, delay_ms):
-            raise BusyError("native request or byte budget exhausted")
-        self._pending[request_id] = fut
-        self._empty.clear()
-        del payload  # native owns its input; no borrowed Python object
-        return await fut
-
-    async def install_policy(self, policy: NativePolicy) -> int:
-        """Await installation on all shards. In-flight requests keep their old version.
-
-        Canceling the await does not roll back an admitted update; shutdown waits
-        for it, just like other native operations. /hybrid retains Python callbacks.
-        """
-        if asyncio.get_running_loop() is not self._loop:
-            raise RuntimeError("Engine belongs to a different event loop")
-        if self._closed:
-            raise RuntimeError("Engine is closing or closed")
-        if not self.config.server:
-            raise RuntimeError("server is not configured")
-        if not isinstance(policy, NativePolicy):
-            raise TypeError("policy must be NativePolicy")
-        if type(policy.max_payload_bytes) is not int or not 0 < policy.max_payload_bytes <= 128*1024*1024:
-            raise ValueError("invalid policy payload bound")
-        native = _native.NativePolicy()
-        for key, value in vars(policy).items():
-            if key != "max_payload_bytes" and type(value) is not bool:
-                raise TypeError("policy permissions must be bool")
-            setattr(native, key, value)
-        self._id += 1
-        request_id = self._id
-        fut = self._loop.create_future()
-        if not self._native.submit_policy(request_id, native):
-            raise BusyError("native request budget exhausted")
-        self._pending[request_id] = fut
-        self._empty.clear()
-        result = await fut
-        return int(result.payload)
-
-    async def compress(self, payload: bytes, *, mode: str = "pool", level: int = 6) -> Result:
-        if mode not in ("pool", "cooperative"):
-            raise ValueError("mode must be pool or cooperative")
-        if not isinstance(level, int) or not -1 <= level <= 9:
-            raise ValueError("zlib level must be -1..9")
-        return await self._work(payload, 1 if mode == "pool" else 2, level)
-
-    async def blocking_wait(self, milliseconds: int = 20) -> Result:
-        if not isinstance(milliseconds, int) or not 0 <= milliseconds <= 60000:
-            raise ValueError("wait must be an integer in 0..60000 ms")
-        return await self._work(b"", 3, milliseconds)
-
-    async def _work(self, payload, operation, parameter):
-        if asyncio.get_running_loop() is not self._loop:
-            raise RuntimeError("Engine belongs to a different event loop")
-        if self._closed:
-            raise RuntimeError("Engine is closing or closed")
-        if not isinstance(payload, bytes):
-            raise TypeError("probe accepts immutable bytes only")
-        if operation != 2 and not self.config.worker_cpus:
-            raise ValueError("worker pool is not configured")
-        reserve = _native.compression_reservation(len(payload)) if operation != 3 else 0
-        if reserve > self.config.max_pending_bytes:
-            raise BusyError("native input/output byte budget exceeded")
-        self._id += 1
-        request_id = self._id
-        fut = self._loop.create_future()
-        if not self._native.submit_work(request_id, payload, operation, parameter):
-            raise BusyError("native request or byte budget exhausted")
-        self._pending[request_id] = fut
-        self._empty.clear()
-        del payload
-        result = await fut
-        result.metrics["python_resume_ns"] = time.monotonic_ns() - result.metrics["python_delivered_ns"]
-        return result
-
-    def _resolve_http(self, request_id, shard, code, body, retire=False):
-        if not self.config.batch_decisions:
-            self._native.resolve_request(request_id, shard, code, body, retire)
-            return
-        item = (request_id, shard, code, body)
-        self._http_returns.append(item + (True,) if retire else item)
-        if not self._http_flush_scheduled:
-            self._http_flush_scheduled = True
-            self._loop.call_soon(self._flush_http)
-
-    def _flush_http(self):
-        self._http_flush_scheduled = False
-        if self._http_returns:
-            batch, self._http_returns = self._http_returns, []
-            self._native.resolve_requests(batch)
-
     def _queue_application(self, request_id, shard, status, body=b"", headers=()):
         self._queue_application_result(request_id, shard, (status, body, headers))
 
     def _queue_application_result(self, request_id, shard, result):
         if request_id in self._application_terminal:
             return
-        try:
-            if self._application_native_results:
-                if not self._application_returns.append_result(request_id, shard, result):
-                    self._decision_stats["python_application_errors"] += 1
-            else:
-                self._application_returns.append((request_id, shard, *result))
-        finally:
-            # The native boundary queues an empty 500 even when a serializer
-            # raises BaseException. It must be flushed before that error escapes.
-            if self._application_returns and not self._application_flush_scheduled:
-                self._application_flush_scheduled = True
-                self._loop.call_soon(self._flush_application)
+        self._application_returns.append((request_id, shard, *result))
+        if not self._application_flush_scheduled:
+            self._application_flush_scheduled = True
+            self._loop.call_soon(self._flush_application)
 
     async def receive(self, request_id, limited=True):
         """The next piece of a request body that is still arriving, or None at its
@@ -748,13 +478,7 @@ class Engine:
         if inbound.chunks:
             data = inbound.chunks.popleft()
             # The shard sends at most body_window_bytes ahead of what was read.
-            if self._application_native_results:
-                self._application_returns.append_body_read(request_id, inbound.shard, len(data))
-                if not self._application_flush_scheduled:
-                    self._application_flush_scheduled = True
-                    self._loop.call_soon(self._flush_application)
-            else:
-                self._queue_stream_item((request_id, inbound.shard, 0, b"", (), BODY_READ, len(data)))
+            self._queue_stream_item((request_id, inbound.shard, 0, b"", (), BODY_READ, len(data)))
             return data
         if inbound.error is not None:
             raise BodyError(*inbound.error)
@@ -775,8 +499,6 @@ class Engine:
         Content-Length (or -1); later pieces carry data. Waits while more than
         STREAM_WINDOW bytes are queued but not yet written by the shard.
         """
-        if self._application_native_results:
-            raise RuntimeError("streamed responses require the checked response path")
         stream = self._application_streams.get(request_id)
         if stream is None:
             stream = self._application_streams[request_id] = _ApplicationStream()
@@ -893,18 +615,15 @@ class Engine:
     def _flush_application(self):
         self._application_flush_scheduled = False
         if self._application_returns:
-            if self._application_native_results:
-                self._application_returns.flush(self._native)
-            else:
-                batch, self._application_returns = self._application_returns, []
-                # User-field validation is per response at the native boundary.
-                # One bad reply becomes an empty 500 without dropping its siblings.
-                # The framework host writes HTTP/1.1 itself, including 204/304.
-                invalid = self._native.resolve_http_responses_checked(
-                    batch, self.config.server.max_response_bytes,
-                    bytes_headers=self._application_bytes_headers,
-                    no_body_statuses=self.config.server.application_dispatch_all)
-                self._decision_stats["python_application_errors"] += invalid
+            batch, self._application_returns = self._application_returns, []
+            # User-field validation is per response at the native boundary.
+            # One bad reply becomes an empty 500 without dropping its siblings.
+            # The framework host writes HTTP/1.1 itself, including 204/304.
+            invalid = self._native.resolve_http_responses_checked(
+                batch, self.config.server.max_response_bytes,
+                bytes_headers=self._application_bytes_headers,
+                no_body_statuses=self.config.server.application_dispatch_all)
+            self._decision_stats["python_application_errors"] += invalid
 
     async def _serve_application(self, request_id, shard, request, handler):
         """Queue a complete owned response while the Task still owns its wrapper."""
@@ -917,8 +636,8 @@ class Engine:
             answer = handler(request)
             if type(answer) is CoroutineType or inspect.isawaitable(answer):
                 answer = await answer
-            if answer is None or self._application_native_results:
-                result = answer  # None: the handler streamed its response
+            if answer is None:
+                result = answer  # the handler streamed its response
             elif len(answer) == 3:
                 # Preserve the legacy Engine handler's tuple-unpacking API.
                 status, body, headers = answer
@@ -948,17 +667,10 @@ class Engine:
                 self._application_timeouts.discard(request_id)
             if self._application_lost:
                 self._application_lost.discard(request_id)
-            try:
-                if result is not None:
-                    self._queue_application_result(request_id, shard, result)
-            except BaseException:
-                # A serializer may raise BaseException after the native batch
-                # already queued an empty 500 for this request.
-                self._decision_stats["python_application_errors"] += 1
-                raise
-            finally:
-                self._application_terminal.discard(request_id)
-                self._decision_stats["python_application_finished"] += 1
+            if result is not None:
+                self._queue_application_result(request_id, shard, result)
+            self._application_terminal.discard(request_id)
+            self._decision_stats["python_application_finished"] += 1
 
     def _lose_application(self, request_id):
         entry = self._application_tasks.get(request_id)
@@ -1076,15 +788,13 @@ class Engine:
                     entry[0].cancel()
                     self._reap_unstarted_application(parent)
                 return
+            return  # no other event reaches Python
         if self._closed or handler is None:
             if self._application_inbound:
                 self._application_inbound.pop(request_id, None)
             self._queue_application(request_id, shard, 503)
             return
         try:
-            if request is None:  # Legacy tuple input remains accepted internally.
-                _, _, _, _, _, body, _, _, target, raw_headers = values
-                request = ApplicationRequest(method, target, raw_headers, body or b"")
             coroutine = self._serve_application(request_id, shard, request, handler)
             try:
                 task = self._loop.create_task(coroutine)
@@ -1107,135 +817,13 @@ class Engine:
             self._decision_stats["python_application_errors"] += 1
             self._queue_application(request_id, shard, 500)
 
-    async def _serve_http(self, context):
-        event = context._event
-        code, tag = 500, b""
-        self._decision_stats["python_http_started"] += 1
-        try:
-            async with asyncio.timeout(self.config.server.decision_timeout_ms / 1000):
-                answer = await self._http_handler(context)
-                if not isinstance(answer, HttpResponse):
-                    raise TypeError("http_handler must return HttpResponse")
-                if type(answer.status) is not int or not (answer.status == 200 or 400 <= answer.status <= 599):
-                    raise ValueError("unsupported HTTP status")
-                if answer.status == 200 and (context._body is None or answer.body is not context._body):
-                    raise ValueError("success must return this request's awaited native body")
-                tag = answer.tag.encode("ascii")
-                if len(tag) > 128 or b"\r" in tag or b"\n" in tag:
-                    raise ValueError("invalid result tag")
-                code = answer.status
-        except asyncio.CancelledError:
-            code = context._terminal_code
-        except TimeoutError:
-            code = 504
-        except NativeOperationError as error:
-            code = error.status
-        except Exception:
-            self._decision_stats["python_http_errors"] += 1
-        finally:
-            context._done = True
-            context._terminal_code = code
-            # Only retire when no native await can still require completion.
-            # A handler that timed out around shield(fetch()) must retain its
-            # correlation until native_done settles that independently-held Task.
-            retire = self.config.retire_http_contexts and (not context._used or (
-                context._phase.route == "python_result" and context._future.done()))
-            if context._native_finished or retire:
-                self._http_waiting.pop(event.id, None)
-            phase = context._phase
-            self._resolve_http(phase.id, phase.shard, code, tag, retire)
-            self._decision_stats["python_http_finished"] += 1
-
-    def _http_event(self, event):
-        if event.route == "python_done":
-            context = self._http_waiting.pop(event.parent, None)
-            if context is not None:
-                context._native_finished = True
-                status = event.body_size or context._terminal_code
-                context._terminal_code = status
-                if context._future is not None and not context._future.done():
-                    context._future.set_exception(NativeOperationError(status))
-                elif not context._done:
-                    context._task.cancel()
-        elif event.route == "python_result":
-            context = self._http_waiting.get(event.parent)
-            if context is None or context._done or context._future.done():
-                code = context._terminal_code if context is not None else 503
-                self._resolve_http(event.id, event.shard, code, b"")
-            else:
-                context._phase = event
-                context._body = NativeBody(event.body_size, int(event.parameter or "200"))
-                self._decision_stats["python_http_resumed"] += 1
-                context._future.set_result(context._body)
-        elif self._closed or self._http_handler is None:
-            self._resolve_http(event.id, event.shard, 503, b"")
-        else:
-            context = HttpRequest(self, event)
-            self._http_waiting[event.id] = context
-            task = self._loop.create_task(self._serve_http(context))
-            context._task = task
-            self._http_tasks.add(task)
-            task.add_done_callback(self._http_tasks.discard)
-
     def _drain(self):
-        for request_id, payload, pid, tid, shard, error, metrics in self._native.drain(self.config.completion_batch):
-            start = time.monotonic_ns()
-            fut = self._pending.pop(request_id)
-            if not fut.done():
-                if error:
-                    fut.set_exception(RuntimeError(error))
-                else:
-                    fut.set_result(Result(payload, pid, tid, shard, metrics))
-            metrics["python_delivered_ns"] = time.monotonic_ns()
-            metrics["python_callback_ns"] = metrics["python_delivered_ns"] - start
+        self._native.clear_notification()
         if self._files:
             self._drain_files()
-        if self.config.server:
-            decisions = [] if self.config.batch_decisions else None
-            for values in self._native.drain_requests_owned(self.config.completion_batch,
-                                                            self.application_connections):
-                if (len(values) <= 4 or (len(values) == 10 and values[3] == "application")
-                        or values[3] in ("application_done", "application_written", "application_data",
-                                         "application_timeout", "application_file",
-                                         "application_lost")):
-                    self._application_event(values)
-                    continue
-                request = Request(*values)
-                if request.route in ("python_compress", "python_fetch", "python_result", "python_done"):
-                    self._http_event(request)
-                    continue
-                start, cpu = time.monotonic_ns(), time.thread_time_ns()
-                code = 3
-                if not self._closed:
-                    try:
-                        if self._decision_handler is None:
-                            answer = (request.route == "file" and request.method == "GET") or (
-                                request.body_size <= self.config.server.max_body_bytes and
-                                ((request.route == "fixed" and request.method == "GET") or
-                                 (request.route == "compress" and request.method == "POST")))
-                        else:
-                            answer = self._decision_handler(request)
-                        if inspect.isawaitable(answer):
-                            if inspect.iscoroutine(answer):
-                                answer.close()
-                            raise TypeError("this probe requires a synchronous decision callback")
-                        if not isinstance(answer, bool):
-                            raise TypeError("decision callback must return bool")
-                        code = int(answer)
-                    except Exception:
-                        code = 2
-                        self._decision_stats["python_decision_errors"] += 1
-                self._decision_stats["python_decisions"] += 1
-                self._decision_stats["python_decision_cpu_ns"] += time.thread_time_ns() - cpu
-                self._decision_stats["python_decision_wall_ns"] += time.monotonic_ns() - start
-                if decisions is None:
-                    self._native.resolve_request(request.id, request.shard, code, request.body or b"")
-                else:
-                    decisions.append((request.id, request.shard, code, request.body or b""))
-            if decisions:
-                self._native.resolve_requests(decisions)
-        if not self._pending:
-            self._empty.set()
+        for values in self._native.drain_requests_owned(self.config.completion_batch,
+                                                        self.application_connections):
+            self._application_event(values)
         status = self._native.stats()
         if status["state"] == 1 and not self._ready.done():
             self._ready.set_result(None)
@@ -1250,16 +838,9 @@ class Engine:
     def shards(self):
         return self._native.shards()
 
-    def workers(self):
-        return self._native.workers()
-
     def server_stats(self):
-        stats = (self._native.server_stats() | self._decision_stats |
-                 {"python_application_active": len(self._application_tasks)})
-        if self._application_native_results:
-            stats.update(("native_response_" + key, value)
-                         for key, value in self._application_returns.stats().items())
-        return stats
+        return (self._native.server_stats() | self._decision_stats |
+                {"python_application_active": len(self._application_tasks)})
 
     def _cancel_applications(self):
         tasks = tuple(task for task, _ in self._application_tasks.values())
@@ -1284,10 +865,6 @@ class Engine:
                 del self._application_tasks[request_id]
                 self._application_terminal.add(request_id)
                 stuck += 1
-        for task in tasks:
-            if not task.done() and task in self._http_tasks:
-                self._http_tasks.discard(task)
-                stuck += 1
         if stuck:
             logging.getLogger("oldman_server.error").warning(
                 "%d request handler(s) kept running after being cancelled; "
@@ -1297,12 +874,6 @@ class Engine:
         await self._finish_cancelled(self._cancel_applications())
         self._reap_applications()
         self._flush_application()
-        tasks = tuple(self._http_tasks)
-        for task in tasks:
-            task.cancel()
-        await self._finish_cancelled(tasks)
-        self._flush_http()
-        await self._empty.wait()
         # After abandon() the runtime (its notification fd, queue and connection
         # registry) may serve another Engine: this one's server already stopped.
         if not self._abandoned:

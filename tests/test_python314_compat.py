@@ -1,4 +1,5 @@
-"""3.14 migration gate: each parametrized native case needs a fresh process.
+"""3.14 migration gate. The native cases share the process's persistent
+runtime (Seastar starts once per process), as the framework host does.
 
 Strict xfails expose two upstream uvloop API gaps. The framework's real call
 paths below must pass on both loops; xfails do not certify full asyncio parity.
@@ -10,8 +11,8 @@ import json
 import pytest
 import uvloop
 
+from oldman_server.native import engine as api
 from test_http import config, request, wait_stat
-import test_native_response_framework as existing
 
 
 def run_on(loop_name, scenario):
@@ -85,21 +86,8 @@ def test_task_factory_receives_name(loop_name):
 
 
 @pytest.mark.parametrize("loop_name", ["asyncio", "uvloop"])
-@pytest.mark.parametrize("case", ["factories", "await", "timeout", "close"])
-def test_actual_native_response_lifecycle_on_selected_loop(loop_name, case, monkeypatch):
-    scenarios = {
-        "factories": existing.test_native_response_eager_failed_and_prestart_cancelled_task_factories,
-        "await": existing.test_native_response_preserves_task_and_context_across_aiohttp_await,
-        "timeout": lambda: existing.test_native_response_timeout_preserves_cancellation_and_late_reply_cleanup(monkeypatch),
-        "close": lambda: existing.test_native_response_close_cancels_pending_and_drains(monkeypatch),
-    }
-    run_on(loop_name, scenarios[case])
-
-
-@pytest.mark.parametrize("loop_name", ["asyncio", "uvloop"])
 def test_real_handler_factory_context_and_nested_timeout(loop_name):
     async def scenario():
-        from seastar_http import App
         loop = asyncio.get_running_loop()
         marker = contextvars.ContextVar("handler-context", default="outside")
         token = marker.set("registered")
@@ -112,9 +100,6 @@ def test_real_handler_factory_context_and_nested_timeout(loop_name):
                 application_tasks.append(task)
             return task
 
-        app = App(native_responses=True)
-
-        @app.get("/nested")
         async def handler(req):
             task = asyncio.current_task()
             assert task in application_tasks
@@ -136,10 +121,10 @@ def test_real_handler_factory_context_and_nested_timeout(loop_name):
                     await asyncio.Event().wait()
             assert asyncio.current_task() is task and task.cancelling() == 0
             assert marker.get() == "registered"
-            return {"value": value, "name": name}
+            return 200, json.dumps({"value": value, "name": name}).encode(), ()
 
-        cfg = config(decision_timeout_ms=2000)
-        engine = await app.start(cfg)
+        cfg = config(application_dispatch_all=True, decision_timeout_ms=2000)
+        engine = await api.Engine.open(cfg, application_handler=handler, persistent=True)
         loop.set_task_factory(factory)
         try:
             for value in ("alpha", "beta"):

@@ -24,7 +24,7 @@ import uvloop
 from oldman_server.native import _native as _seastar_probe
 from oldman_server.native import engine as probe_engine
 from oldman_server.native.engine import ApplicationRequest, Config, ServerConfig
-from probes.sanic_boundary.application import EXPECTED, INPUT, small_body
+from probes.sanic_boundary.application import EXPECTED, INPUT
 
 WIRE = {
     "small": ("GET", b"/small", b""),
@@ -79,12 +79,11 @@ class StubRuntime:
     def fd(self):
         return self._fd
 
-    def drain(self, count):
+    def clear_notification(self):
         try:
             os.eventfd_read(self._fd)
         except BlockingIOError:
             pass
-        return ()
 
     def drain_requests_owned(self, count, connections=None):
         batch = []
@@ -129,31 +128,9 @@ class StubRuntime:
         os.close(self._fd)
 
 
-class NativeBatchProxy:
-    """App native-result batches are encoded for real, then discarded at flush."""
-
-    def __init__(self, stub, max_bytes):
-        self._stub, self._max = stub, max_bytes
-        self._batch = _seastar_probe.ApplicationResponseBatch(max_bytes, bytes_headers=False)
-
-    def append_result(self, request_id, shard, result):
-        return self._batch.append_result(request_id, shard, result)
-
-    def __len__(self):
-        return len(self._batch)
-
-    def flush(self, runtime):
-        count = len(self._batch)
-        self._batch = _seastar_probe.ApplicationResponseBatch(self._max, bytes_headers=False)
-        self._stub.complete(count)
-
-    def stats(self):
-        return self._batch.stats()
-
-
-def server_config(dispatch_all):
+def server_config():
     # Same bounds as probes/sanic_comparison/server.py:native_config.
-    return ServerConfig(http_port=1, application_dispatch_all=dispatch_all, max_requests=1024,
+    return ServerConfig(http_port=1, application_dispatch_all=True, max_requests=1024,
                         max_bytes=64 * 1024 * 1024, max_body_bytes=65536, max_response_bytes=65536,
                         decision_timeout_ms=5000, generate_date_header=True,
                         coalesce_notifications=True)
@@ -174,44 +151,20 @@ def count_middleware(app, counts):
         counts["errors"] += int(response.status != 200)
 
 
-def lightweight_app(native, counts):
-    from seastar_http import App, Response
-    app = App(native_responses=native)
-
-    @app.get("/small")
-    async def small(request):
-        counts["started"] += 1
-        counts["responses"] += 1
-        if native:
-            return {"message": "Hello, World!"}
-        return Response(small_body(), headers=(("Content-Type", "application/json"),))
-    return app
-
-
 async def measure(args, sampler=None):
     stub = StubRuntime(args.workload)
-    # Only the runtime is replaced; config and batch types stay the real binding.
+    # Only the runtime is replaced; the config type stays the real binding.
     binding = {name: getattr(_seastar_probe, name) for name in dir(_seastar_probe)}
     binding["Runtime"] = lambda *unused: stub
     probe_engine._native = SimpleNamespace(**binding)
     counts = dict(started=0, finished=0, responses=0, errors=0, active=0)
-    config = Config(shard_cpus=(sorted(os.sched_getaffinity(0))[0],),
-                    server=server_config(args.mode == "sanic"))
-    host = None
-    if args.mode == "sanic":
-        from probes.sanic_boundary.application import make_app
-        from oldman_server.native.host import serve
-        app = make_app()
-        count_middleware(app, counts)
-        host = serve(app, config)
-        engine = await host.__aenter__()
-    else:
-        if args.workload != "small":
-            raise SystemExit("the lightweight App only serves small")
-        native = args.mode == "app-native"
-        engine = await lightweight_app(native, counts).start(config)
-        if native:
-            engine._application_returns = NativeBatchProxy(stub, config.server.max_response_bytes)
+    config = Config(shard_cpus=(sorted(os.sched_getaffinity(0))[0],), server=server_config())
+    from probes.sanic_boundary.application import make_app
+    from oldman_server.native.host import serve
+    app = make_app()
+    count_middleware(app, counts)
+    host = serve(app, config)
+    await host.__aenter__()
     loop = asyncio.get_running_loop()
     rows = []
     try:
@@ -232,10 +185,7 @@ async def measure(args, sampler=None):
                 rows.append({"cpu_us": cpu / args.requests / 1000,
                              "wall_us": wall / args.requests / 1000})
     finally:
-        if host is not None:
-            await host.__aexit__(None, None, None)
-        else:
-            await engine.aclose()
+        await host.__aexit__(None, None, None)
     return rows
 
 
@@ -288,7 +238,7 @@ class Sampler:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("sanic", "app", "app-native"), default="sanic")
+    parser.add_argument("--mode", choices=("sanic",), default="sanic")
     parser.add_argument("--workload", choices=tuple(WIRE), default="small")
     parser.add_argument("--requests", type=int, default=100_000)
     parser.add_argument("--concurrency", type=int, default=128)

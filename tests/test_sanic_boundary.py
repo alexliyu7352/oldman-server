@@ -141,3 +141,54 @@ def test_actual_module_paths_and_hashes_match_local_sources():
     evidence['sanic_version'] = '25.12.1'
     with pytest.raises(ValueError):
         verify_modules(evidence)
+
+
+def test_cpu_layout_keeps_server_and_client_disjoint():
+    from probes.sanic_boundary.run import cpu_layout
+    topology = [{"cpu": cpu, "package_id": "0", "core_id": str(cpu)} for cpu in range(11, 20)]
+    layout = cpu_layout(tuple(range(11, 20)), topology)
+    assert layout["server"] == [11, 12, 13]
+    assert layout["client"] == [14, 15, 16, 17]
+    assert layout["unused"] == 19
+    assert layout["controller"] == 18
+    with pytest.raises(ValueError):
+        cpu_layout(tuple(range(8)), topology)
+
+
+def test_cpu_layout_keeps_controller_off_server_smt_sibling():
+    from probes.sanic_boundary.run import cpu_layout
+    topology = [{"cpu": cpu, "package_id": "0", "core_id": str(cpu % 8)} for cpu in range(16)]
+    layout = cpu_layout(range(16), topology)
+    assert layout["server"] == [0, 1, 2]
+    assert layout["client"] == [3, 4, 5, 6]
+    assert layout["controller"] == 7
+    assert layout["unused"] == 8
+    # Interleaved logical numbering must not place sibling threads in different roles.
+    topology = [{"cpu": cpu, "package_id": "0", "core_id": str(cpu // 2)} for cpu in range(16)]
+    layout = cpu_layout(range(16), topology)
+    assert layout["server"] == [0, 2, 4]
+    assert layout["client"] == [6, 8, 10, 12]
+    assert layout["controller"] == 14
+
+
+def test_cpu_layout_rejects_insufficient_or_unknown_physical_cores():
+    from probes.sanic_boundary.run import cpu_layout
+    topology = [{"cpu": cpu, "package_id": "0", "core_id": str(cpu % 4)} for cpu in range(16)]
+    with pytest.raises(ValueError, match="physical"):
+        cpu_layout(range(16), topology)
+    with pytest.raises(ValueError, match="topology"):
+        cpu_layout(range(16), topology[:-1])
+
+
+def test_response_parser_reads_chunked_body():
+    import io
+    from probes.sanic_boundary.application import EXPECTED
+    from probes.sanic_boundary.run import read_response
+    body = EXPECTED["small"]
+    response = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Transfer-Encoding: chunked\r\nX-Probe-Pid: 901\r\n\r\n" +
+                b"%x\r\n" % len(body) + body + b"\r\n0\r\n\r\n")
+    status, headers, read = read_response(io.BytesIO(response))
+    assert (status, read, headers["x-probe-pid"]) == (200, body, "901")
+    with pytest.raises(ValueError, match="truncated"):
+        read_response(io.BytesIO(response[:-12]))

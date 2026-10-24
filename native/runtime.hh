@@ -5,20 +5,9 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "work.hh"
 #include "server.hh"
 
 namespace probe {
-struct Completion {
-    uint64_t id;
-    std::string payload;
-    int pid;
-    int tid;
-    unsigned shard;
-    std::string error;
-    size_t reserved_bytes = 0;
-    Metrics metrics{};
-};
 // File operations of the framework host (Sanic's file responses), run on the
 // shards with Seastar's file API: page-cache reads complete on the shard and
 // reads that would block go to Seastar's syscall thread.
@@ -40,15 +29,9 @@ struct ShardInfo {
     std::string backend;
 };
 struct Stats {
-    size_t pending_requests;
-    size_t pending_bytes;
-    size_t queued_completions;
     unsigned live_workers;
     unsigned state; // 0 starting, 1 ready, 2 stopping, 3 stopped, 4 failed
-    uint64_t completed;
-    uint64_t rejected;
     std::string error;
-    size_t pool_queued = 0, pool_active = 0, pool_live = 0;
 };
 class Runtime {
     struct Impl;
@@ -57,26 +40,21 @@ public:
     // reactor_backend: Seastar's --reactor-backend (epoll, linux-aio,
     // io_uring); empty lets Seastar take the first available of io_uring,
     // linux-aio and epoll.
-    Runtime(std::vector<int> cpus, size_t max_pending, size_t max_bytes,
-            std::vector<int> worker_cpus = {}, ServerConfig server = {},
-            std::string reactor_backend = {});
+    explicit Runtime(std::vector<int> cpus, ServerConfig server = {}, std::string reactor_backend = {});
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     int fd() const;
-    bool submit(uint64_t id, std::string payload, uint64_t delay_ms);
-    bool submit_work(uint64_t id, std::string payload, int operation, int parameter, Metrics metrics);
-    bool submit_policy(uint64_t id, NativePolicy policy);
-    std::vector<Completion> drain(size_t max_items);
+    // Reads the notification fd: the first call each time it is readable,
+    // before draining files and requests.
+    void clear_notification();
     Stats stats() const;
     std::vector<ShardInfo> shards() const;
-    std::vector<WorkerInfo> workers() const;
     // A FileOperation on a shard; its FileResult comes from drain_files after
     // the notification. file_read reads `length` bytes from `offset` (-1: to the end).
     void submit_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length);
     std::vector<FileResult> drain_files(size_t count);
     std::vector<RequestEvent> drain_requests(size_t count);
-    void resolve_request(uint64_t id, unsigned shard, int decision, std::string body, bool retire = false);
     void resolve_requests(std::vector<RequestDecision> decisions);
     ServerSnapshot server_stats() const;
     // Persistent use: start or stop the network server while Seastar keeps

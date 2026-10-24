@@ -211,7 +211,7 @@ python probes/sanic_comparison/run.py --python-only --out build/compare-<新目�
 - `src/oldman_server/ext/`：Sanic Extensions（源自 sanic-ext 25.12.0，许可见 `LICENSE.sanic-ext`）。
 - `src/oldman_server/testing/`：测试客户端（源自 sanic-testing 24.6.0，许可见 `LICENSE.sanic-testing`）。
 - `upstream/`：所依据的上游版本（归档地址、提交）与各文件的 SHA-256。与原版 Sanic 的性能对照要先把 `upstream/sanic.json` 的归档解压到 `build/sanic-upstream/`（得到 `sanic-<提交>/`），对照前逐个文件核对。
-- `tests/`：本项目测试，其中 `tests/framework`、`tests/ext` 源自 Sanic 与 sanic-ext 的测试集；`scripts/`：构建、测试与测量工具；`probes/`：对照与诊断用的服务端和驱动；`python/seastar_http.py`：不经框架的轻量 App（研究用）。
+- `tests/`：本项目测试，其中 `tests/framework`、`tests/ext` 源自 Sanic 与 sanic-ext 的测试集；`scripts/`：构建、测试与测量工具；`probes/`：对照与诊断用的服务端和驱动。
 
 ## 许可证
 

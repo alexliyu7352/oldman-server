@@ -1,54 +1,84 @@
+"""build/http_load, the load generator of the comparison, against an aiohttp server."""
 import asyncio
 import json
 import os
 from pathlib import Path
-import random
-import zlib
 
 import pytest
-from oldman_server.native import engine as api
-from test_http import config
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.asyncio
-async def test_load_client_detects_wrong_body_and_reuses_connections(tmp_path):
-    executable = Path("build/http_load").resolve()
-    assert executable.exists(), "native HTTP load generator is missing"
-    cfg = config()
-    engine = await api.Engine.open(cfg)
-    payload = random.Random(92).randbytes(1024)
-    input_file, expected = tmp_path / "input.bin", tmp_path / "expected.bin"
-    input_file.write_bytes(payload)
-    expected.write_bytes(zlib.compress(payload, 6))
-    async def run(policy_version=None, result_tag=None):
-        cpus = ",".join(map(str, sorted(os.sched_getaffinity(0))[:2]))
-        proc = await asyncio.create_subprocess_exec(str(executable), "--smp", "2", "--cpuset", cpus,
-            "--reactor-backend", "epoll", "--overprovisioned", "--default-log-level", "error",
-            "--enable-glibc-exception-scaling-workaround", "0", "--port", str(cfg.server.http_port),
-            "--target-pid", str(os.getpid()), "--path", "/hybrid/compress", "--method", "POST",
-            "--input", str(input_file), "--expected", str(expected), "--concurrency", "8",
-            "--warmup", ".05", "--seconds", ".1",
-            *([] if policy_version is None else ["--policy-version", str(policy_version)]), stdin=asyncio.subprocess.PIPE,
-            *([] if result_tag is None else ["--result-tag", result_tag]),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+@pytest.mark.parametrize("rate,seconds,offered", [("1000", ".12", 120), ("33868.8", ".234375", 7938)])
+async def test_scheduled_client_exposes_overload_and_checks_pid_set(tmp_path, rate, seconds, offered):
+    from aiohttp import web
+    async def delayed(request):
+        await asyncio.sleep(.02)
+        return web.Response(body=b"expected", headers={"X-Probe-Pid": str(os.getpid())})
+    app = web.Application()
+    app.router.add_get("/", delayed)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    expected = tmp_path / "expected.bin"
+    expected.write_bytes(b"expected")
+    cpus = ",".join(map(str, sorted(os.sched_getaffinity(0))[:2]))
+    async def run(pids):
+        proc = await asyncio.create_subprocess_exec(str(ROOT / "build/http_load"),
+            "--smp", "2", "--cpuset", cpus, "--reactor-backend", "epoll", "--overprovisioned",
+            "--default-log-level", "error", "--enable-glibc-exception-scaling-workaround", "0",
+            "--port", str(port), "--target-pids", pids, "--path", "/", "--expected", str(expected),
+            "--rate", rate, "--concurrency", "2", "--warmup", ".02", "--seconds", seconds,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(proc.communicate(b"start\n"), 10)
-        records = [json.loads(line) for line in stdout.decode().splitlines() if line.startswith("{")]
-        assert records, (stdout, stderr)
-        return proc.returncode, records[-1]
+        rows = [json.loads(line) for line in stdout.decode().splitlines() if line.startswith("{")]
+        assert rows, (stdout, stderr)
+        return proc.returncode, rows[-1]
     try:
-        code, result = await run()
-        assert code == 0 and result["requests"] > 0 and result["errors"] == 0
-        assert result["new_connections"] == 0, result
-        assert result["total_connections"] == 8
-        assert len(result["server_shards"]) == 2
-        code, result = await run(0)
-        assert code == 0 and result["requests"] > 0 and result["errors"] == 0
-        code, result = await run(1)
-        assert code == 1 and result["integrity_errors"] > 0 and result["requests"] == 0
-        code, result = await run(result_tag="missing-business-result")
-        assert code == 1 and result["integrity_errors"] > 0 and result["requests"] == 0
-        expected.write_bytes(b"wrong bytes")
-        code, result = await run()
-        assert code == 1 and result["errors"] > 0 and result["requests"] == 0
+        code, row = await run(f"{os.getpid()},9999999")
+        assert code == 0 and row["integrity_errors"] == 0
+        # Second case scales264.6RPS*30s by an exact power of2 to reproduce
+        # the same floating endpoint in a short regression.
+        assert row["scheduled"] == offered and row["dropped"] > 50
+        assert row["requests"] + row["errors"] + row["dropped"] == row["scheduled"]
+        assert row["p99_us"] >= 19000 and row["new_connections"] == 0
+        assert row["server_pids"] == {str(os.getpid()): row["requests"]}
+        code, row = await run("9999999")
+        assert code == 1 and row["integrity_errors"] > 0 and row["requests"] == 0
     finally:
-        await engine.aclose()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_client_uses_free_connection_before_busy_lane(tmp_path):
+    from aiohttp import web
+    delays = {}
+    async def variable(request):
+        peer = request.transport.get_extra_info("peername")
+        if peer not in delays: delays[peer] = .08 if not delays else .001
+        await asyncio.sleep(delays[peer])
+        return web.Response(body=b"ok", headers={"X-Probe-Pid": str(os.getpid())})
+    app = web.Application(); app.router.add_get("/", variable)
+    runner = web.AppRunner(app); await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0); await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    expected = tmp_path/"expected.bin"; expected.write_bytes(b"ok")
+    cpu = str(min(os.sched_getaffinity(0)))
+    try:
+        proc = await asyncio.create_subprocess_exec(str(ROOT/"build/http_load"),
+            "--smp", "1", "--cpuset", cpu, "--reactor-backend", "epoll", "--overprovisioned",
+            "--default-log-level", "error", "--enable-glibc-exception-scaling-workaround", "0",
+            "--port", str(port), "--target-pid", str(os.getpid()), "--path", "/", "--expected", str(expected),
+            "--rate", "50", "--concurrency", "2", "--warmup", ".15", "--seconds", ".4",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(b"start\n"), 5)
+        row = [json.loads(line) for line in out.decode().splitlines() if line.startswith("{")][-1]
+        assert proc.returncode == 0, err
+        assert row["scheduled"] == 20 and row["dropped"] == 0, row
+        assert row["new_connections"] == 0 and len(delays) == 2
+        assert row["requests"] == 20 and row["p99_us"] < 120000
+    finally:
+        await runner.cleanup()

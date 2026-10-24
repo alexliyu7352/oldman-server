@@ -7,7 +7,6 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/smp.hh>
-#include <seastar/util/later.hh>
 #include <atomic>
 #include <array>
 #include <cerrno>
@@ -28,23 +27,18 @@ static std::atomic<bool> ever_started{false};
 
 struct Runtime::Impl {
     std::vector<int> cpus;
-    std::vector<int> worker_cpus;
     std::string reactor_backend;
-    std::unique_ptr<WorkerPool> pool;
     ServerConfig server_config;
     std::unique_ptr<NetworkServer> server;
     uint64_t server_generation = 0;  // of `server`; under mutex
     bool server_running = false;  // shard 0 only
-    size_t max_pending, max_bytes;
     int notify_fd;
     std::atomic<bool> notify_pending{false};
-    // The current server's settings that any thread reads without the mutex
+    // The current server's setting that any thread reads without the mutex
     // (start_server replaces server_config under it).
-    std::atomic<bool> coalesce{false}, compress_inline{false}, compress_cooperative{false};
+    std::atomic<bool> coalesce{false};
     void adopt(const ServerConfig& config) {
         coalesce.store(config.coalesce_notifications, std::memory_order_relaxed);
-        compress_inline.store(config.inline_compression, std::memory_order_relaxed);
-        compress_cooperative.store(config.cooperative_compression, std::memory_order_relaxed);
     }
     std::atomic<uint64_t> notification_writes{0};
     std::thread thread;
@@ -54,13 +48,12 @@ struct Runtime::Impl {
     // under them (another thread's stop() making Seastar exit, say).
     std::mutex lifecycle;
     mutable std::mutex mutex;
-    std::deque<Completion> completions;
     std::deque<FileResult> file_results;
     std::vector<ShardInfo> shard_info;
     Stats status{};
     ss::alien::instance* alien = nullptr;
     ss::promise<>* finish = nullptr; // accessed only on shard 0
-    size_t next_shard = 0;
+    size_t next_shard = 0;  // of the next file operation
     std::array<struct sigaction, NSIG> original_signals{}, owned_signals{};
     std::array<bool, NSIG> signal_valid{}, signal_changed{};
     bool signal_snapshot_taken = false;
@@ -88,9 +81,8 @@ struct Runtime::Impl {
         }
     }
 
-    Impl(std::vector<int> c, size_t n, size_t b, std::vector<int> workers, ServerConfig config, std::string backend)
-        : cpus(std::move(c)), worker_cpus(std::move(workers)), reactor_backend(std::move(backend)),
-          server_config(std::move(config)), max_pending(n), max_bytes(b),
+    Impl(std::vector<int> c, ServerConfig config, std::string backend)
+        : cpus(std::move(c)), reactor_backend(std::move(backend)), server_config(std::move(config)),
           notify_fd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) {
         if (notify_fd < 0) throw std::runtime_error("eventfd creation failed");
         adopt(server_config);
@@ -116,133 +108,6 @@ struct Runtime::Impl {
         for (int i = 0; i < CPU_SETSIZE; ++i)
             if (CPU_ISSET(i, &set)) info.affinity.push_back(i);
         co_return info;
-    }
-    ss::future<> execute(uint64_t id, std::string payload, uint64_t delay_ms) {
-        Completion result{id, std::move(payload), int(::getpid()),
-                          int(::syscall(SYS_gettid)), ss::this_shard_id(), {}};
-        result.reserved_bytes = result.payload.size();
-        try {
-            if (delay_ms) co_await ss::sleep(std::chrono::milliseconds(delay_ms));
-        } catch (const std::exception& e) {
-            result.error = e.what();
-        } catch (...) {
-            result.error = "unknown native task exception";
-        }
-        complete(std::move(result));
-    }
-    void complete(Completion result) {
-        result.metrics.completion_ns = clock_ns();
-        {
-            std::lock_guard lock(mutex);
-            completions.push_back(std::move(result));
-            ++status.completed;
-        }
-        notify();
-    }
-    ss::future<> execute_policy(uint64_t id, NativePolicy policy) {
-        Completion result{id, {}, int(::getpid()), int(::syscall(SYS_gettid)), ss::this_shard_id(), {}};
-        try {
-            co_await server->install_policy(policy);
-            result.payload = std::to_string(policy.version);
-        } catch (const std::exception& e) { result.error = e.what(); }
-        catch (...) { result.error = "native policy update failed"; }
-        complete(std::move(result));
-    }
-    ss::future<WorkResult> cooperative(const std::string& input, int level) {
-        WorkResult result;
-        auto& m = result.metrics;
-        m.work_start_ns = clock_ns();
-        m.work_tid = ::syscall(SYS_gettid);
-        auto begin = clock_ns();
-        auto cpu = thread_cpu_ns();
-        auto compressor = std::make_unique<Compressor>(input, level);
-        m.algorithm_ns += clock_ns() - begin;
-        m.compute_cpu_ns += thread_cpu_ns() - cpu;
-        bool done = false;
-        do {
-            begin = clock_ns();
-            cpu = thread_cpu_ns();
-            done = compressor->step();
-            m.algorithm_ns += clock_ns() - begin;
-            m.compute_cpu_ns += thread_cpu_ns() - cpu;
-            if (!done) {
-                ++m.cooperative_yields;
-                co_await ss::yield();
-            }
-        } while (!done);
-        begin = clock_ns();
-        cpu = thread_cpu_ns();
-        result.payload = compressor->finish();
-        compressor.reset();
-        m.algorithm_ns += clock_ns() - begin;
-        m.compute_cpu_ns += thread_cpu_ns() - cpu;
-        m.work_end_ns = clock_ns();
-        co_return result;
-    }
-    ss::future<WorkResult> network_compress(std::string input, int level) {
-        // This frame owns input across every cooperative suspension.
-        if (compress_inline.load(std::memory_order_relaxed))
-            co_return compress_native(input, level);
-        if (compress_cooperative.load(std::memory_order_relaxed))
-            co_return co_await cooperative(input, level);
-        co_return co_await pooled(std::move(input), 1, level);
-    }
-    ss::future<WorkResult> pooled(std::string input, int operation, int parameter) {
-        if (!pool) return ss::make_exception_future<WorkResult>(std::runtime_error("worker pool is not configured"));
-        auto promise = std::make_unique<ss::promise<WorkResult>>();
-        auto future = promise->get_future();
-        auto origin = ss::this_shard_id();
-        auto queued = clock_ns();
-        try {
-        pool->submit([this, input=std::move(input), operation, parameter, origin, queued,
-                      promise=std::move(promise)]() mutable {
-            WorkResult result;
-            auto begin = clock_ns();
-            try {
-                result = operation == 3 ? wait_native(parameter) : compress_native(input, parameter);
-            } catch (const std::exception& e) {
-                result.error = e.what();
-            } catch (...) {
-                result.error = "unknown worker exception";
-            }
-            result.metrics.queue_ns = begin - queued;
-            // Promise is fulfilled and destroyed on its originating shard only.
-            ss::alien::run_on(*alien, origin,
-                [result=std::move(result), promise=std::move(promise)]() mutable noexcept {
-                    promise->set_value(std::move(result));
-                });
-        });
-        } catch (...) {
-            // Rejected work destroyed its captured promise on this shard.
-            // Consume that broken future; propagate the real admission error.
-            future.ignore_ready_future();
-            throw;
-        }
-        return future;
-    }
-    ss::future<> execute_work(uint64_t id, std::string input, int operation, int parameter,
-                              size_t reservation, Metrics incoming) {
-        Completion c{id, {}, int(::getpid()), int(::syscall(SYS_gettid)), ss::this_shard_id(), {}};
-        c.reserved_bytes = reservation;
-        auto entered = clock_ns();
-        try {
-            WorkResult r;
-            if (operation == 2) r = co_await cooperative(input, parameter);
-            else r = co_await pooled(std::move(input), operation, parameter);
-            c.payload = std::move(r.payload);
-            c.error = std::move(r.error);
-            c.metrics = r.metrics;
-            c.metrics.return_to_shard_ns = r.metrics.work_end_ns ? clock_ns() - r.metrics.work_end_ns : 0;
-        } catch (const std::exception& e) {
-            c.error = e.what();
-        } catch (...) {
-            c.error = "unknown shard operation exception";
-        }
-        c.metrics.input_copy_ns = incoming.input_copy_ns;
-        c.metrics.submitted_ns = incoming.submitted_ns;
-        c.metrics.dispatch_ns = entered - incoming.submitted_ns;
-        c.metrics.shard_tid = ::syscall(SYS_gettid);
-        complete(std::move(c));
     }
     ss::future<> execute_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length) {
         FileResult result{id, operation};
@@ -305,7 +170,7 @@ struct Runtime::Impl {
         }
         if (server_config.enabled()) {
             auto network = std::make_unique<NetworkServer>(server_config, cpus.size(), app.alien(),
-                [this] { notify(); }, [this](std::string body, int level) { return network_compress(std::move(body), level); });
+                [this] { notify(); });
             {
                 std::lock_guard lock(mutex);
                 server = std::move(network);
@@ -328,12 +193,9 @@ struct Runtime::Impl {
         finish = nullptr;
         if (server) co_await server->stop();
         server_running = false;
-        if (pool) pool->close(); // all results have already returned to their shards and Python
     }
     ss::future<uint64_t> start_server_here(ServerConfig config) {
-        auto network = std::make_unique<NetworkServer>(config, cpus.size(), *alien,
-            [this] { notify(); },
-            [this](std::string body, int level) { return network_compress(std::move(body), level); });
+        auto network = std::make_unique<NetworkServer>(config, cpus.size(), *alien, [this] { notify(); });
         std::exception_ptr failure;
         try { co_await network->start(); } catch (...) { failure = std::current_exception(); }
         if (failure) {
@@ -377,11 +239,6 @@ struct Runtime::Impl {
         for (int s = 1; s < NSIG; ++s)
             signal_valid[s] = ::sigaction(s, nullptr, &original_signals[s]) == 0;
         try {
-            if (!worker_cpus.empty()) {
-                auto workers = std::make_unique<WorkerPool>(worker_cpus, max_pending);
-                std::lock_guard lock(mutex);
-                pool = std::move(workers);
-            }
             ss::app_template::seastar_options opts;
             opts.name = "oldman-server";
             opts.auto_handle_sigint_sigterm = false;
@@ -431,27 +288,29 @@ struct Runtime::Impl {
             status.error = "unknown Seastar startup exception";
         }
         if (!signal_snapshot_taken) capture_owned_signals();
-        if (pool) pool->close();
         restore_signals();
         notify();
     }
 };
 
-Runtime::Runtime(std::vector<int> cpus, size_t n, size_t b, std::vector<int> workers, ServerConfig config,
-                 std::string reactor_backend) {
-    if (cpus.empty() || n == 0 || b == 0) throw std::invalid_argument("nonzero bounds and CPUs required");
-    if (config.application_dispatch_all &&
-        ((!config.http_port && config.listen_fd < 0) || !config.application_routes.empty() ||
-         config.native_json))
-        throw std::invalid_argument("framework dispatch requires HTTP without exact routes or native JSON");
+// The framework host is the only server: a listener needs framework dispatch,
+// and framework dispatch HTTP or a listening socket.
+static void validate_server(const ServerConfig& config) {
+    if (config.enabled() && !config.application_dispatch_all)
+        throw std::invalid_argument("a server requires framework dispatch (application_dispatch_all)");
+    if (config.application_dispatch_all && !config.http_port && config.listen_fd < 0)
+        throw std::invalid_argument("framework dispatch requires an HTTP port or a listening socket");
+}
+Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor_backend) {
+    if (cpus.empty()) throw std::invalid_argument("CPUs required");
+    validate_server(config);
     if (ever_started.exchange(true)) throw std::runtime_error("one Seastar lifecycle per process");
-    p = std::make_unique<Impl>(std::move(cpus), n, b, std::move(workers), std::move(config),
-                               std::move(reactor_backend));
+    p = std::make_unique<Impl>(std::move(cpus), std::move(config), std::move(reactor_backend));
     p->thread = std::thread([this] { p->run(); });
 }
 Runtime::~Runtime() {
     if (p->owner != ::getpid()) {
-        // A forked child's copy: the threads (Seastar's, the worker pool's) are
+        // A forked child's copy: the threads (Seastar's) are
         // the parent's. Joining them, or destroying condition variables they
         // wait on, hangs: the copy is left alone.
         (void)p.release();
@@ -462,77 +321,10 @@ Runtime::~Runtime() {
     close_fd();
 }
 int Runtime::fd() const { return p->notify_fd; }
-bool Runtime::submit(uint64_t id, std::string payload, uint64_t delay_ms) {
-    std::lock_guard lock(p->mutex);
-    if (p->status.state != 1) throw std::runtime_error("runtime not accepting work");
-    if (p->status.pending_requests >= p->max_pending ||
-        payload.size() > p->max_bytes - p->status.pending_bytes) {
-        ++p->status.rejected;
-        return false;
-    }
-    auto bytes = payload.size();
-    ++p->status.pending_requests;
-    p->status.pending_bytes += bytes;
-    auto shard = p->next_shard++ % p->cpus.size();
-    try {
-        ss::alien::run_on(*p->alien, shard,
-            [impl=p.get(), id, payload=std::move(payload), delay_ms]() mutable noexcept {
-                (void)impl->execute(id, std::move(payload), delay_ms);
-            });
-    } catch (...) {
-        --p->status.pending_requests;
-        p->status.pending_bytes -= bytes;
-        throw;
-    }
-    return true;
-}
-bool Runtime::submit_work(uint64_t id, std::string input, int operation, int parameter, Metrics metrics) {
-    if (operation < 1 || operation > 3) throw std::invalid_argument("unknown operation");
-    if (operation == 3) {
-        if (parameter < 0 || parameter > 60000) throw std::invalid_argument("wait must be 0..60000 ms");
-    } else validate_level(parameter);
-    auto reservation = operation == 3 ? 0 : compression_reservation(input.size());
-    std::lock_guard lock(p->mutex);
-    if (p->status.state != 1) throw std::runtime_error("runtime not accepting work");
-    if (operation != 2 && !p->pool) throw std::invalid_argument("worker pool is not configured");
-    if (p->status.pending_requests >= p->max_pending || reservation > p->max_bytes - p->status.pending_bytes) {
-        ++p->status.rejected;
-        return false;
-    }
-    ++p->status.pending_requests;
-    p->status.pending_bytes += reservation;
-    auto shard = p->next_shard++ % p->cpus.size();
-    try {
-        ss::alien::run_on(*p->alien, shard,
-            [impl=p.get(), id, input=std::move(input), operation, parameter, reservation, metrics]() mutable noexcept {
-                (void)impl->execute_work(id, std::move(input), operation, parameter, reservation, metrics);
-            });
-    } catch (...) {
-        --p->status.pending_requests;
-        p->status.pending_bytes -= reservation;
-        throw;
-    }
-    return true;
-}
-bool Runtime::submit_policy(uint64_t id, NativePolicy policy) {
-    if (!policy.max_payload_bytes || policy.max_payload_bytes > 128 * 1024 * 1024)
-        throw std::invalid_argument("invalid policy payload bound");
-    std::lock_guard lock(p->mutex);
-    if (p->status.state != 1 || !p->server) throw std::runtime_error("server not accepting updates");
-    if (p->status.pending_requests >= p->max_pending) { ++p->status.rejected; return false; }
-    ++p->status.pending_requests;
-    policy.version = id;
-    try {
-        ss::alien::run_on(*p->alien, 0, [impl=p.get(), id, policy]() noexcept {
-            (void)impl->execute_policy(id, policy);
-        });
-    } catch (...) { --p->status.pending_requests; throw; }
-    return true;
-}
 void Runtime::submit_file(uint64_t id, int operation, std::string path, uint64_t offset, int64_t length) {
     if (operation < FileOperation::file_stat || operation > FileOperation::file_open)
         throw std::invalid_argument("unknown file operation");
-    // Posted under the mutex, as submit does: the alien instance is valid while
+    // Posted under the mutex: the alien instance is valid while
     // the state is 1, and run() clears it under the mutex before it goes.
     std::lock_guard lock(p->mutex);
     if (p->status.state != 1) throw std::runtime_error("runtime not accepting work");
@@ -556,7 +348,7 @@ std::vector<FileResult> Runtime::drain_files(size_t count) {
     if (more) p->notify();
     return out;
 }
-std::vector<Completion> Runtime::drain(size_t count) {
+void Runtime::clear_notification() {
     eventfd_t value;
     while (::eventfd_read(p->notify_fd, &value) < 0 && errno == EINTR) {}
     // Reset before inspecting either queue: a concurrent producer is either
@@ -564,44 +356,22 @@ std::vector<Completion> Runtime::drain(size_t count) {
     // Also when not coalescing: a flag left from an earlier coalescing server
     // would otherwise swallow the next one's first wake.
     p->notify_pending.store(false, std::memory_order_release);
-    std::vector<Completion> out;
     bool more;
     {
         std::lock_guard lock(p->mutex);
-        out.reserve(std::min(count, p->completions.size()));
-        while (out.size() < count && !p->completions.empty()) {
-            auto& item = p->completions.front();
-            p->status.pending_bytes -= item.reserved_bytes;
-            item.metrics.notification_wait_ns = clock_ns() - item.metrics.completion_ns;
-            --p->status.pending_requests;
-            out.push_back(std::move(item));
-            p->completions.pop_front();
-        }
         // In coalesced mode drain_requests() owns metadata rearming. Rearming
         // here, just before Python drains that queue, creates an empty callback.
-        more = !p->completions.empty() || (!p->coalesce.load(std::memory_order_relaxed) &&
-                p->server && p->server->has_events());
+        more = !p->coalesce.load(std::memory_order_relaxed) && p->server && p->server->has_events();
     }
     if (more) p->notify();
-    return out;
 }
 Stats Runtime::stats() const {
     std::lock_guard lock(p->mutex);
-    auto s = p->status;
-    s.queued_completions = p->completions.size();
-    if (p->pool) {
-        auto ps = p->pool->stats();
-        s.pool_queued = ps.queued; s.pool_active = ps.active; s.pool_live = ps.live;
-    }
-    return s;
+    return p->status;
 }
 std::vector<ShardInfo> Runtime::shards() const {
     std::lock_guard lock(p->mutex);
     return p->shard_info;
-}
-std::vector<WorkerInfo> Runtime::workers() const {
-    std::lock_guard lock(p->mutex);
-    return p->pool ? p->pool->workers() : std::vector<WorkerInfo>{};
 }
 std::vector<RequestEvent> Runtime::drain_requests(size_t count) {
     std::lock_guard lock(p->mutex);
@@ -609,10 +379,6 @@ std::vector<RequestEvent> Runtime::drain_requests(size_t count) {
     auto out = p->server->drain(count);
     if (p->server->has_events()) p->notify();
     return out;
-}
-void Runtime::resolve_request(uint64_t id, unsigned shard, int code, std::string body, bool retire) {
-    std::lock_guard lock(p->mutex);
-    if (p->server && p->status.state < 2) p->server->resolve(id, shard, code, std::move(body), retire);
 }
 void Runtime::resolve_requests(std::vector<RequestDecision> decisions) {
     std::lock_guard lock(p->mutex);
@@ -625,10 +391,7 @@ ServerSnapshot Runtime::server_stats() const {
     return out;
 }
 uint64_t Runtime::start_server(ServerConfig config) {
-    if (config.application_dispatch_all &&
-        ((!config.http_port && config.listen_fd < 0) || !config.application_routes.empty() ||
-         config.native_json))
-        throw std::invalid_argument("framework dispatch requires HTTP without exact routes or native JSON");
+    validate_server(config);
     std::lock_guard life(p->lifecycle);
     ss::alien::instance* alien = nullptr;
     {
@@ -671,15 +434,6 @@ void Runtime::stop() {
     std::lock_guard lock(p->mutex);
     if (p->status.state >= 2) return;
     if (p->status.state != 1) throw std::runtime_error("stop requires a ready runtime");
-    // Results nobody will take once stopped are dropped; work still running
-    // must end first (each is bounded), or its shard task would outlive Seastar.
-    for (const auto& item : p->completions) {
-        p->status.pending_bytes -= item.reserved_bytes;
-        --p->status.pending_requests;
-    }
-    p->completions.clear();
-    if (p->status.pending_requests)
-        throw std::runtime_error("stop requires drained work: requests are still running");
     ss::alien::run_on(*p->alien, 0, [impl=p.get()]() noexcept { impl->finish->set_value(); });
     p->status.state = 2;
 }

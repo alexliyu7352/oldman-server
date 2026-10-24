@@ -1,13 +1,25 @@
 """Framework-owned HTTP routing; every test gets a fresh native lifecycle."""
 import asyncio
+import http.client
 from dataclasses import replace
 
 from oldman_server.native import _native as native
 import pytest
 
 from oldman_server.native import engine as api
-from test_framework import exchange
 from test_http import config, request, wait_stat
+
+
+async def exchange(port, method, target, body=None, headers=None):
+    def send():
+        client = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+        try:
+            client.request(method, target, body=body, headers=headers or {})
+            response = client.getresponse()
+            return response.status, dict((k.lower(), v) for k, v in response.getheaders()), response.read()
+        finally:
+            client.close()
+    return await asyncio.to_thread(send)
 
 
 def assert_released(engine):
@@ -21,9 +33,8 @@ def assert_released(engine):
 async def test_dispatch_all_rejects_ambiguous_configs_before_starting_runtime():
     cfg = config(application_dispatch_all=True)
     handler = lambda req: (200, b"ok", ())
-    for changes in ({"application_routes": (("GET", "/x"),)}, {"native_json": True},
-                    {"http_port": 0, "tcp_port": cfg.server.http_port},
-                    {"application_dispatch_all": "yes"}):
+    for changes in ({"http_port": 0}, {"application_dispatch_all": "yes"},
+                    {"application_dispatch_all": False}):
         with pytest.raises(ValueError):
             await api.Engine.open(replace(cfg, server=replace(cfg.server, **changes)),
                                   application_handler=handler)
@@ -31,14 +42,14 @@ async def test_dispatch_all_rejects_ambiguous_configs_before_starting_runtime():
         await api.Engine.open(cfg)
     with pytest.raises(TypeError):
         await api.Engine.open(cfg, application_handler=object())
-    for changes in ({"application_routes": [("GET", "/x")]}, {"native_json": True}, {"http_port": 0}):
+    for changes in ({"http_port": 0}, {"application_dispatch_all": False}):
         server = native.ServerConfig()
         server.http_port = cfg.server.http_port
         server.application_dispatch_all = True
         for key, value in changes.items():
             setattr(server, key, value)
         with pytest.raises(ValueError):
-            native.Runtime(list(cfg.shard_cpus), 1024, 65536, list(cfg.worker_cpus), server)
+            native.Runtime(list(cfg.shard_cpus), server)
     # Invalid combinations must not consume the process's one native lifecycle.
     engine = await api.Engine.open(cfg, application_handler=handler)
     try:
@@ -126,23 +137,6 @@ async def test_dispatch_all_preserves_limits_deadlines_and_response_validation()
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
     assert_released(engine)
-
-
-@pytest.mark.asyncio
-async def test_exact_route_app_refuses_framework_owned_routing():
-    from seastar_http import App
-    app = App()
-    with pytest.raises(ValueError):
-        await app.start(config(application_dispatch_all=True))
-    # A failed configuration leaves this App available for an ordinary start.
-    app.get("/ok")(lambda req: b"ok")
-    cfg = config()
-    engine = await app.start(cfg)
-    try:
-        assert (await request(cfg.server.http_port, "/ok"))[0::2] == (200, b"ok")
-        assert (await request(cfg.server.http_port, "/unlisted"))[0] == 404
-    finally:
-        await engine.aclose()
 
 
 @pytest.mark.asyncio

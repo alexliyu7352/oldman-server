@@ -1104,7 +1104,7 @@ def serving(loop):
     return _engine is not None and not _engine.closed and _engine._loop is loop
 
 
-async def open_engine(app, config, *, native_responses=False, python_cpu=None):
+async def open_engine(app, config, *, python_cpu=None):
     """Start the native host for `app` after its Sanic startup and before
     listeners: lifecycle events stay with the caller. Returns the Engine.
     With python_cpu, this thread runs there from before the server serves."""
@@ -1149,8 +1149,7 @@ async def open_engine(app, config, *, native_responses=False, python_cpu=None):
     # Seastar keeps running between serves.
     try:
         return await Engine.open(
-            config, application_handler=handler, application_native_results=native_responses,
-            application_bytes_headers=True, persistent=True,
+            config, application_handler=handler, application_bytes_headers=True, persistent=True,
             application_error_handler=error_handler,
             application_connections=server_types.native_connections, opened=opened)
     except BaseException:
@@ -1253,12 +1252,8 @@ async def _cancel_tasks(app, owner):
 
 
 @asynccontextmanager
-async def serve(app, config, *, native_responses=False):
-    """Own the native runtime and Sanic listeners, including failure cleanup.
-
-    native_responses opts into the experimental ApplicationResponseBatch path.
-    The checked tuple path with encoded bytes headers remains the default.
-    """
+async def serve(app, config):
+    """Own the native runtime and Sanic listeners, including failure cleanup."""
     if not isinstance(app, OldmanServer):
         raise TypeError("the native host serves an OldmanServer application")
     if app.state.is_started or app.state.native_loop is not None:
@@ -1273,7 +1268,7 @@ async def serve(app, config, *, native_responses=False):
         await app._startup()
         initialized = True
         await app._server_event("init", "before")
-        engine = await open_engine(app, config, native_responses=native_responses)
+        engine = await open_engine(app, config)
         info.stage = ServerStage.SERVING
         app.set_serving(True)
         started = True

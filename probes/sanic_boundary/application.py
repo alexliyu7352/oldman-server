@@ -1,6 +1,5 @@
 """Matched complete-response fixtures, not a general ASGI product adapter."""
 import asyncio
-import json
 from urllib.parse import unquote
 
 INPUT = bytes(range(256)) * 4
@@ -19,10 +18,6 @@ def concurrency(workload):
     """Closed-loop connections: enough that /sleep's wait does not cap the
     throughput (connections / SLEEP_SECONDS = 512k RPS)."""
     return 512 if workload == "sleep" else 128
-
-
-def small_body():
-    return json.dumps({"message": "Hello, World!"}, separators=(",", ":")).encode()
 
 
 def make_app(stock=False):

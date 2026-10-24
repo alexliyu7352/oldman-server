@@ -7,29 +7,21 @@
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/sleep.hh>
-#include <seastar/core/semaphore.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/with_timeout.hh>
 #include <seastar/util/defer.hh>
-#include <seastar/http/httpd.hh>
-#include <seastar/http/handlers.hh>
-#include <seastar/http/reply.hh>
-#include <seastar/http/request.hh>
-#include <seastar/http/client.hh>
-#include <seastar/json/formatter.hh>
 #include <seastar/net/inet_address.hh>
 #include <seastar/net/posix-stack.hh>
 #include <seastar/net/unix_address.hh>
 #include <algorithm>
 #include <atomic>
 #include <charconv>
-#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <limits>
 #include <deque>
-#include <set>
+#include <time.h>
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -46,13 +38,14 @@ namespace ss = seastar;
 bool valid_http_response(int status,
     const std::vector<std::pair<std::string, std::string>>& headers, bool no_body_statuses,
     bool upgrade) {
-    // Pinned Seastar httpd unconditionally adds framing, including to 204/304.
-    // Only the HTTP/1.1 application host (no_body_statuses) writes them correctly.
-    // That host sends the application's fields as Sanic does: any name, with its
-    // own Content-Length / Transfer-Encoding / Connection in place of the
-    // application's (http1::append_head); only the syntax is checked. 101 (a
-    // protocol switch) only starts a framework host stream (upgrade): as the
-    // status of a complete response it would claim a switch that never happens.
+    // Without no_body_statuses, 204/304 and the framing and diagnostic fields
+    // are refused. The HTTP/1.1 application host (no_body_statuses) writes
+    // them correctly and sends the application's fields as Sanic does: any
+    // name, with its own Content-Length / Transfer-Encoding / Connection in
+    // place of the application's (http1::append_head); only the syntax is
+    // checked. 101 (a protocol switch) only starts a framework host stream
+    // (upgrade): as the status of a complete response it would claim a switch
+    // that never happens.
     if ((status < 200 && !(status == 101 && upgrade && no_body_statuses)) || status > 599 ||
         headers.size() > 128) return false;
     if (!no_body_statuses && (status == 204 || status == 304)) return false;
@@ -83,16 +76,17 @@ bool valid_http_response(int status,
     return true;
 }
 namespace {
+uint64_t clock_ns() {
+    timespec t{};
+    ::clock_gettime(CLOCK_MONOTONIC, &t);
+    return uint64_t(t.tv_sec) * 1000000000 + t.tv_nsec;
+}
 struct alignas(64) Counts {
     std::atomic<uint64_t> active_requests{0}, reserved_bytes{0}, peak_requests{0}, peak_bytes{0};
     std::atomic<uint64_t> accepted{0}, rejected{0}, responses{0}, errors{0}, pending_decisions{0};
     std::atomic<uint64_t> decisions{0}, decision_timeouts{0}, decision_wait_ns{0};
     std::atomic<uint64_t> python_terminal_events{0};
-    std::atomic<uint64_t> native_policy_decisions{0}, native_policy_denied{0};
     std::atomic<uint64_t> body_bytes_to_python{0}, body_bytes_from_python{0}, response_bytes{0};
-    std::atomic<uint64_t> compute_ns{0}, compute_cpu_ns{0}, worker_queue_ns{0};
-    std::atomic<uint64_t> upstream_requests{0}, upstream_responses{0}, upstream_bytes{0}, upstream_wait_ns{0};
-    std::atomic<uint64_t> tcp_connections{0}, tcp_frames{0}, udp_received{0}, udp_sent{0}, udp_dropped{0};
     std::atomic<uint64_t> connections_open{0};  // framework host connections
     size_t limit_count = 0, limit_bytes = 0;
     std::map<std::string,uint64_t> snapshot() const {
@@ -102,11 +96,7 @@ struct alignas(64) Counts {
         FIELD(accepted); FIELD(rejected); FIELD(responses); FIELD(errors); FIELD(pending_decisions);
         FIELD(decisions); FIELD(decision_timeouts); FIELD(decision_wait_ns);
         FIELD(python_terminal_events);
-        FIELD(native_policy_decisions); FIELD(native_policy_denied);
         FIELD(body_bytes_to_python); FIELD(body_bytes_from_python); FIELD(response_bytes);
-        FIELD(compute_ns); FIELD(compute_cpu_ns); FIELD(worker_queue_ns);
-        FIELD(upstream_requests); FIELD(upstream_responses); FIELD(upstream_bytes); FIELD(upstream_wait_ns);
-        FIELD(tcp_connections); FIELD(tcp_frames); FIELD(udp_received); FIELD(udp_sent); FIELD(udp_dropped);
         FIELD(connections_open);
 #undef FIELD
         return d;
@@ -134,35 +124,14 @@ struct Shared {
     std::map<uint64_t,RequestEvent> pending_application_nodes;
     std::atomic<bool> running{false};
     std::atomic<uint64_t> decision_return_batches{0}, decision_return_items{0}, decision_return_posts{0};
-    size_t file_size = 0;
-    std::set<std::pair<std::string, std::string>> application_routes;
     Shared(ServerConfig c, unsigned n, std::function<void()> wake)
         : config(std::move(c)), shard_count(n), notify(std::move(wake)) {
-        for (const auto& [method, path] : config.application_routes) {
-            if (method != "GET" && method != "POST" && method != "PUT" && method != "PATCH" &&
-                method != "DELETE" && method != "OPTIONS" && method != "HEAD")
-                throw std::invalid_argument("unsupported application method");
-            if (path.empty() || path.front() != '/' || path.find_first_of("?#") != std::string::npos)
-                throw std::invalid_argument("application route must be an exact path");
-            for (unsigned char ch : path)
-                if (ch <= 32 || ch >= 127) throw std::invalid_argument("invalid application path");
-            for (const auto* prefix : {"/native", "/hybrid", "/copy", "/policy", "/python", "/reference"})
-                if (path == prefix || path.starts_with(std::string(prefix) + "/"))
-                    throw std::invalid_argument("application route collides with experiment prefix");
-            if (config.native_json && path == "/json")
-                throw std::invalid_argument("application route collides with native JSON");
-            if (!application_routes.emplace(method, path).second)
-                throw std::invalid_argument("duplicate application route");
-        }
-        for (const auto& [method, path] : config.application_routes)
-            if (method == "GET") application_routes.emplace("HEAD", path);
         for (unsigned i=0; i<n; ++i) {
             auto x = std::make_unique<Counts>();
             x->limit_count = config.max_requests / n + (i < config.max_requests % n);
             x->limit_bytes = config.max_bytes / n + (i < config.max_bytes % n);
             counts.push_back(std::move(x));
         }
-        if (!config.file_path.empty()) file_size = std::filesystem::file_size(config.file_path);
     }
     // admitted: an event of a request Python already received (body data, write
     // acknowledgements, its deadline, a connection's close). Its memory is
@@ -287,34 +256,9 @@ std::string address_text(const ss::socket_address& address) {
     if (text.ends_with("%0")) text.resize(text.size() - 2);
     return text;
 }
-ApplicationInput application_input(const ss::http::request& request) {
-    ApplicationInput input{std::string(request._url), std::string(request._version), {}, {}, {}};
-    const auto& client = request.get_client_address();
-    const auto& server = request.get_server_address();
-    input.client = {fmt::format("{}", client.addr()), client.port()};
-    input.server = {fmt::format("{}", server.addr()), server.port()};
-    input.headers.reserve(request._headers.size());
-    for (const auto& [name, value] : request._headers)
-        input.headers.emplace_back(std::string(name), std::string(value));
-    return input;
-}
-class Service;
-class Handler : public ss::httpd::handler_base {
-    Service& service;
-    std::string mode, route;
-public:
-    Handler(Service& s, std::string m, std::string r) : service(s), mode(std::move(m)), route(std::move(r)) {}
-    ss::future<std::unique_ptr<ss::http::reply>> handle(const ss::sstring& path,
-        std::unique_ptr<ss::http::request> request, std::unique_ptr<ss::http::reply> reply) override;
-};
-
 class Service {
     Shared& shared;
     Counts& counts;
-    NetworkServer::Compress compress;
-    ss::httpd::http_server http{"python-native-http"};
-    // Pinned routes does not own its default handler.
-    std::unique_ptr<Handler> application_handler;
     std::map<uint64_t, std::unique_ptr<Waiter>> waiters;
     // Request and connection ids count on per shard across the servers a
     // process runs one after another: a late answer to a replaced server's
@@ -329,179 +273,7 @@ class Service {
     // others closed after their response.
     bool draining = false;
     bool accepts() const { return !closing && !draining; }
-    NativePolicy policy;
-    ss::semaphore compression_slot{1};
-    std::vector<std::unique_ptr<ss::http::client>> upstreams;
-    std::set<ss::abort_source*> upstream_active;
-    struct UpstreamFailure { int status; };
-
-    ss::future<int> fetch(unsigned origin, std::string& body) {
-        if (closing) throw UpstreamFailure{503};
-        ss::abort_source abort;
-        bool expired = false;
-        ss::timer<ss::lowres_clock> timeout([&] { expired = true; abort.request_abort(); });
-        timeout.arm(std::chrono::milliseconds(shared.config.decision_timeout_ms));
-        upstream_active.insert(&abort);
-        auto start = clock_ns();
-        auto done = ss::defer([&] () noexcept {
-            timeout.cancel(); upstream_active.erase(&abort);
-            counts.upstream_wait_ns += clock_ns() - start;
-        });
-        ++counts.upstream_requests;
-        int status = 0;
-        auto req = ss::http::request::make("GET", "127.0.0.1", "/native/fixed?size=8192");
-        try {
-            co_await upstreams.at(origin)->make_request(std::move(req),
-                [this, &body, &status](const ss::http::reply& reply, ss::input_stream<char>&& stream) -> ss::future<> {
-                    status = int(reply._status);
-                    auto input = std::move(stream);
-                    if (reply.content_length > shared.config.max_body_bytes) throw UpstreamFailure{502};
-                    for (;;) {
-                        auto chunk = co_await input.read();
-                        if (chunk.empty()) break;
-                        if (chunk.size() > shared.config.max_body_bytes - body.size()) throw UpstreamFailure{502};
-                        body.append(chunk.get(), chunk.size());
-                    }
-                    if (reply.get_header("Content-Length") != "" && body.size() != reply.content_length)
-                        throw UpstreamFailure{502};
-                    // EOF is not sufficient: Seastar's chunk decoder can reach
-                    // it before the final chunk/trailer. Only zero means complete.
-                    if (reply.left_content_length != 0) throw UpstreamFailure{502};
-                    co_await input.close();
-                }, std::nullopt, &abort);
-        } catch (...) {
-            throw UpstreamFailure{closing ? 503 : expired ? 504 : 502};
-        }
-        if (closing || expired) throw UpstreamFailure{closing ? 503 : 504};
-        ++counts.upstream_responses;
-        counts.upstream_bytes += body.size();
-        co_return status;
-    }
-
-    ss::future<std::unique_ptr<ss::http::reply>> handle_fetch(std::string mode,
-        std::unique_ptr<ss::http::request> req, std::unique_ptr<ss::http::reply> rep) {
-        if (upstreams.empty()) co_return error(std::move(rep), 404);
-        if (req->content_length || !req->get_header("Transfer-Encoding").empty())
-            co_return error(std::move(rep), 400);
-        auto lease = reserve(shared.config.max_body_bytes);
-        if (!lease) co_return error(std::move(rep), 503);
-        uint64_t root = 0;
-        unsigned terminal_status = 0;
-        bool retired = false;
-        auto finished = ss::defer([&] () noexcept {
-            if (!root || retired) return;
-            RequestEvent event{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                               "GET", "python_done", terminal_status};
-            event.parent = root; event.reservation = lease;
-            ++counts.python_terminal_events;
-            shared.publish(std::move(event));
-        });
-        try {
-            unsigned origin = 0;
-            auto parameter = req->get_query_param("upstream");
-            if (mode == "python") {
-                auto answer = co_await decide("python_fetch", "GET", 0, nullptr,
-                                             std::string(parameter), 0, &root);
-                if (answer.code < 1000 || unsigned(answer.code - 1000) >= upstreams.size()) {
-                    retired = answer.retire;
-                    co_return error(std::move(rep), answer.code >= 400 && answer.code <= 599 ? answer.code : 503);
-                }
-                origin = answer.code - 1000;
-            } else {
-                if (parameter.empty()) parameter = "0";
-                auto parsed = std::from_chars(parameter.data(), parameter.data()+parameter.size(), origin);
-                if (parsed.ec != std::errc() || parsed.ptr != parameter.data()+parameter.size()
-                    || origin >= upstreams.size()) co_return error(std::move(rep), 400);
-            }
-            auto body = std::make_shared<std::string>();
-            const auto status = co_await fetch(origin, *body);
-            std::string tag;
-            if (mode == "python") {
-                auto answer = co_await decide("python_result", "GET", body->size(), nullptr,
-                                             std::to_string(status), root);
-                retired = answer.retire;
-                if (answer.code != 200)
-                    co_return error(std::move(rep), answer.code >= 400 && answer.code <= 599 ? answer.code : 503);
-                tag = std::move(answer.body);
-            } else {
-                if (status != 200 || body->empty()) co_return error(std::move(rep), 502);
-                tag = std::to_string(status) + ":" + std::to_string(body->size());
-            }
-            if (tag.size() > 128 || tag.find_first_of("\r\n") != std::string::npos)
-                co_return error(std::move(rep), 500);
-            rep->add_header("X-App-Result", ss::sstring(tag));
-            rep->write_body(std::nullopt, [body, lease](ss::output_stream<char>& out) {
-                return write_payload(out, body, lease);
-            });
-            co_return std::move(rep);
-        } catch (const UpstreamFailure& failure) {
-            terminal_status = failure.status; ++counts.errors;
-            co_return error(std::move(rep), failure.status);
-        } catch (const ss::timed_out_error&) {
-            terminal_status = 504; co_return error(std::move(rep), 504);
-        } catch (...) {
-            terminal_status = 500; ++counts.errors;
-            co_return error(std::move(rep), 500);
-        }
-    }
-    struct Peer {
-        ss::connected_socket socket;
-        ss::input_stream<char> input;
-        ss::output_stream<char> output;
-        explicit Peer(ss::connected_socket s)
-            : socket(std::move(s)), input(socket.input()), output(socket.output()) {}
-    };
-    std::optional<ss::server_socket> tcp;
-    // This pinned Seastar disables POSIX reuseport globally for load balance.
-    // A Linux-only UDP adapter opts in explicitly, using its reactor-owned FD.
-    // Flow distribution is measured; no upstream source is patched.
-    std::optional<ss::pollable_fd> udp;
-    ss::future<> accepting = ss::make_ready_future<>(), datagrams = ss::make_ready_future<>();
-    ss::gate connections;
-    std::map<uint64_t, std::unique_ptr<Peer>> peers;
     uint64_t& next_peer = shard_counter(1);
-
-    ss::future<> tcp_flow(uint64_t id) {
-        auto& peer = *peers.at(id);
-        try {
-            while (!closing) {
-                auto header = co_await peer.input.read_exactly(4);
-                if (header.empty()) break;
-                if (header.size() != 4) throw std::runtime_error("partial frame header");
-                uint32_t wire;
-                std::memcpy(&wire, header.get(), 4);
-                auto size = ntohl(wire);
-                if (size > shared.config.max_body_bytes) { ++counts.rejected; break; }
-                auto lease = reserve(size_t(size) * 2 + 8);
-                if (!lease) break;
-                auto body = co_await peer.input.read_exactly(size);
-                if (body.size() != size) throw std::runtime_error("partial frame body");
-                co_await peer.output.write(header.get(), 4);
-                co_await peer.output.write(body.get(), body.size());
-                co_await peer.output.flush();
-                ++counts.tcp_frames;
-                counts.response_bytes += size;
-            }
-        } catch (...) { if (!closing) ++counts.errors; }
-        try { co_await peer.input.close(); } catch (...) {}
-        try { co_await peer.output.close(); } catch (...) {}
-        --counts.tcp_connections;
-        peers.erase(id);
-    }
-    ss::future<> accept_tcp() {
-        try {
-            while (!closing) {
-                auto accepted = co_await tcp->accept();
-                if (closing) break;
-                if (peers.size() >= counts.limit_count) { ++counts.rejected; continue; }
-                auto id = ++next_peer;
-                peers.emplace(id, std::make_unique<Peer>(std::move(accepted.connection)));
-                ++counts.tcp_connections;
-                (void)ss::with_gate(connections, [this, id] { return tcp_flow(id); }).handle_exception(
-                    [this](std::exception_ptr) { ++counts.errors; });
-            }
-        } catch (...) { if (!closing) ++counts.errors; }
-    }
     // ---- HTTP/1.1 host for framework dispatch (application_dispatch_all) ----
     // Parses and writes HTTP/1.1 directly on Seastar sockets: one buffered write
     // per batch of responses, Content-Length framing, repeated header names.
@@ -1494,32 +1266,6 @@ class Service {
         if (send_body && framing == Framing::chunked) output.append("0\r\n\r\n");
         if (send_body && framing == Framing::length && sent != start.content_length) close = true;
     }
-    ss::future<> echo_datagrams() {
-        std::array<char, 65536> buffer;
-        try {
-            while (!closing) {
-                ss::socket_address source;
-                iovec vec{buffer.data(), buffer.size()};
-                msghdr message{};
-                message.msg_name = &source.u.sa;
-                message.msg_namelen = sizeof(source.u);
-                message.msg_iov = &vec;
-                message.msg_iovlen = 1;
-                auto size = co_await udp->recvmsg(&message);
-                source.addr_length = message.msg_namelen;
-                ++counts.udp_received;
-                if ((message.msg_flags & MSG_TRUNC) || size > shared.config.max_body_bytes) {
-                    ++counts.udp_dropped; continue;
-                }
-                auto lease = reserve(size);
-                if (!lease) { ++counts.udp_dropped; continue; }
-                auto sent = co_await udp->sendto(source, buffer.data(), size);
-                if (sent != size) { ++counts.udp_dropped; continue; }
-                ++counts.udp_sent;
-                counts.response_bytes += size;
-            }
-        } catch (...) { if (!closing) ++counts.errors; }
-    }
 
     std::shared_ptr<Lease> reserve(size_t bytes) {
         if (closing || counts.active_requests >= counts.limit_count ||
@@ -1620,163 +1366,10 @@ class Service {
         result->id = id;
         co_return std::move(*result);
     }
-    static ss::future<> write_payload(ss::output_stream<char>& out, std::shared_ptr<std::string> body,
-                                      std::shared_ptr<Lease> lease) {
-        // Forward an owning view; retain both storage and byte reservation until
-        // the output stream releases its final reference (including disconnect).
-        ss::temporary_buffer<char> view(body->data(), body->size(),
-            ss::make_deleter([body, lease] {}));
-        co_await out.write(std::move(view));
-        lease->counts.response_bytes += body->size();
-        ++lease->counts.responses;
-    }
-    static ss::future<> write_file(ss::output_stream<char>& out, std::string path,
-                                   std::shared_ptr<Lease> lease, size_t size) {
-        auto file = co_await ss::open_file_dma(path, ss::open_flags::ro);
-        ss::file_input_stream_options options;
-        options.buffer_size = 65536;
-        options.read_ahead = 1;
-        auto input = ss::make_file_input_stream(std::move(file), options);
-        co_await ss::copy(input, out).finally([&input] { return input.close(); });
-        lease->counts.response_bytes += size;
-        ++lease->counts.responses;
-    }
-    static std::unique_ptr<ss::http::reply> error(std::unique_ptr<ss::http::reply> reply, int status) {
-        reply->set_status(static_cast<ss::http::reply::status_type>(status));
-        reply->write_body("txt", ss::sstring("request rejected\n"));
-        return reply;
-    }
-    ss::future<std::unique_ptr<ss::http::reply>> handle_application(
-        std::unique_ptr<ss::http::request> req, std::unique_ptr<ss::http::reply> rep) {
-        const std::string method(req->_method);
-        const std::string target(req->_url);
-        const auto path = target.substr(0, target.find('?'));
-        const bool native = shared.config.native_json && path == "/json" &&
-                            (method == "GET" || method == "HEAD");
-        if (!native && !shared.config.application_dispatch_all &&
-            !shared.application_routes.contains({method, path}))
-            co_return error(std::move(rep), 404);
-        if (req->_headers.contains("Transfer-Encoding")) co_return error(std::move(rep), 400);
-        // The pinned parser uses strtol. Check its entire Content-Length value,
-        // including sign/trailing junk, before trusting that framing for Python.
-        const auto length = req->get_header("Content-Length");
-        size_t size = 0;
-        if (!length.empty()) {
-            const auto parsed = std::from_chars(length.data(), length.data() + length.size(), size);
-            if (parsed.ec != std::errc() || parsed.ptr != length.data() + length.size() ||
-                size != req->content_length) co_return error(std::move(rep), 400);
-        } else if (req->_headers.contains("Content-Length")) {
-            co_return error(std::move(rep), 400);
-        }
-        if (size > shared.config.max_body_bytes) co_return error(std::move(rep), 413);
-        // Input exists both locally and in the owned event. Error payloads also
-        // fit the output reservation when the configured handler bound is tiny.
-        const auto body_budget = std::max(shared.config.max_response_bytes, size_t(17));
-        if (body_budget > std::numeric_limits<size_t>::max() - 8192)
-            co_return error(std::move(rep), 503);
-        const auto output_budget = body_budget + 8192;
-        if (size > (std::numeric_limits<size_t>::max() - output_budget) / 2)
-            co_return error(std::move(rep), 413);
-        auto lease = reserve(2 * size + output_budget);
-        if (!lease) co_return error(std::move(rep), 503);
-        uint64_t root = 0;
-        unsigned terminal_status = 500;
-        bool retired = false;
-        auto finished = ss::defer([&] () noexcept {
-            if (!root || retired) return;
-            RequestEvent event{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                               method, "application_done", terminal_status};
-            event.parent = root;
-            event.reservation = lease;
-            ++counts.python_terminal_events;
-            shared.publish(std::move(event));
-        });
-        auto respond = [&](int status, std::string payload,
-                           const std::vector<std::pair<std::string, std::string>>& headers = {}) {
-            terminal_status = status;
-            rep->set_status(static_cast<ss::http::reply::status_type>(status));
-            for (const auto& [name, value] : headers)
-                rep->add_header(ss::sstring(name), ss::sstring(value));
-            auto body = std::make_shared<std::string>(std::move(payload));
-            rep->write_body(std::nullopt, [body, lease](ss::output_stream<char>& out) {
-                return write_payload(out, body, lease);
-            });
-            // Seastar retains the writer but deliberately skips calling it
-            // for HEAD. Its captured lease lives until reply destruction.
-            if (method == "HEAD") ++counts.responses;
-            return std::move(rep);
-        };
-        auto reject = [&](int status) { return respond(status, "request rejected\n"); };
-        bool input_complete = false;
-        try {
-            std::string input;
-            input.reserve(size);
-            for (;;) {
-                auto chunk = co_await req->content_stream->read();
-                if (chunk.empty()) break;
-                if (chunk.size() > size - input.size()) co_return reject(400);
-                input.append(chunk.get(), chunk.size());
-            }
-            if (input.size() != size) co_return reject(400);
-            input_complete = true;
-            if (closing) co_return reject(503);
-            Decision answer{200, {}};
-            if (native) {
-                // Fresh object and actual JSON serialization on every request.
-                const std::map<std::string, std::string> object{{"message", "Hello, World!"}};
-                answer.body = std::string(ss::json::formatter::to_json(object));
-                answer.headers.emplace_back("Content-Type", "application/json");
-            } else {
-                auto fields = application_input(*req);
-                answer = co_await decide("application", method, size, &input, {}, 0, &root, &fields);
-                retired = answer.retire;
-                if (answer.code == 3) co_return reject(503);
-            }
-            if (!valid_http_response(answer.code, answer.headers) ||
-                answer.body.size() > shared.config.max_response_bytes) {
-                ++counts.errors;
-                co_return reject(500);
-            }
-            co_return respond(answer.code, std::move(answer.body), answer.headers);
-        } catch (const ss::timed_out_error&) {
-            co_return reject(504);
-        } catch (...) {
-            ++counts.errors;
-            co_return reject(closing ? 503 : input_complete ? 500 : 400);
-        }
-    }
 public:
-    Service(Shared* state, NetworkServer::Compress fn)
-        : shared(*state), counts(*state->counts[ss::this_shard_id()]), compress(std::move(fn)) {}
+    explicit Service(Shared* state)
+        : shared(*state), counts(*state->counts[ss::this_shard_id()]) {}
     ss::future<> start() {
-        http.set_content_length_limit(shared.config.max_body_bytes);
-        http.set_request_size_limit(8192);
-        http.set_content_streaming(true);
-        http.set_generate_date_header(shared.config.generate_date_header);
-        using ss::httpd::operation_type;
-        for (auto port : shared.config.upstream_ports) {
-            auto factory = std::make_unique<ss::http::basic_connection_factory>(
-                ss::socket_address(ss::net::inet_address("127.0.0.1"), uint16_t(port)));
-            upstreams.push_back(std::make_unique<ss::http::client>(
-                std::move(factory), std::max(size_t(1), counts.limit_count)));
-        }
-        if (!shared.config.application_dispatch_all) {
-            for (const auto* mode : {"python", "reference"})
-                http._routes.add(operation_type::GET, ss::httpd::url(ss::sstring("/") + mode + "/fetch"),
-                                 new Handler(*this, mode, "fetch"));
-            for (const auto* mode : {"native", "hybrid", "copy", "policy", "python", "reference"}) {
-                for (const auto* route : {"fixed", "compress", "file"}) {
-                    if ((std::string(mode) == "copy" || std::string(mode) == "python" ||
-                         std::string(mode) == "reference") && std::string(route) != "compress") continue;
-                    auto method = std::string(route) == "compress" ? operation_type::POST : operation_type::GET;
-                    http._routes.add(method, ss::httpd::url(ss::sstring("/") + mode + "/" + route), new Handler(*this, mode, route));
-                }
-            }
-        }
-        if (!shared.application_routes.empty() || shared.config.native_json) {
-            application_handler = std::make_unique<Handler>(*this, "application", "application");
-            http._routes.add_default_handler(application_handler.get());
-        }
         if (shared.config.application_dispatch_all) {
             const auto pid = ss::to_sstring(::getpid());
             if (shared.config.probe_headers == "all") {
@@ -1824,29 +1417,8 @@ public:
                 worker_listener.emplace(adopt_listener(shared.config.worker_listen_fd));
                 worker_accepting = accept_application(*worker_listener, shared.config.worker_unix_path);
             }
-        } else if (shared.config.http_port) {
-            ss::listen_options options;
-            options.reuse_address = true;
-            options.lba = ss::server_socket::load_balancing_algorithm::connection_distribution;
-            // Use the OS default/autotuned HTTP socket send buffer, like aiohttp.
-            co_await http.listen(ss::socket_address(ss::net::inet_address("127.0.0.1"), uint16_t(shared.config.http_port)), options);
         }
-        if (shared.config.tcp_port) {
-            ss::listen_options options;
-            options.reuse_address = true;
-            options.lba = ss::server_socket::load_balancing_algorithm::connection_distribution;
-            options.so_sndbuf = 65536;
-            tcp.emplace(ss::listen(ss::socket_address(ss::net::inet_address("127.0.0.1"), uint16_t(shared.config.tcp_port)), options));
-            accepting = accept_tcp();
-        }
-        if (shared.config.udp_port) {
-            auto fd = ss::file_desc::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            fd.setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-            ss::socket_address address(ss::net::inet_address("127.0.0.1"), uint16_t(shared.config.udp_port));
-            fd.bind(address.u.sa, address.addr_length);
-            udp.emplace(std::move(fd));
-            datagrams = echo_datagrams();
-        }
+        co_return;
     }
     // The request body can no longer arrive (peer closed, deadline, bad framing):
     // stop waiting for Python; respond_application then answers 503 and its
@@ -1898,7 +1470,6 @@ public:
         waiter.promise.set_value(Decision{code, std::move(body), 0, retire, std::move(headers),
                                           kind, content_length});
     }
-    void install_policy(NativePolicy next) noexcept { policy = next; }
     // The framework host's listeners accept no more connections (again: a
     // no-op). A listener of this process's own is shut down, as Sanic's
     // server.close(): the kernel refuses new connections or, with
@@ -1931,17 +1502,7 @@ public:
     }
     ss::future<> stop() {
         closing = true;
-        auto active = std::vector<ss::abort_source*>(upstream_active.begin(), upstream_active.end());
-        for (auto* operation : active) operation->request_abort();
-        if (tcp) tcp->abort_accept();
         stop_accepting();
-        if (udp) {
-            udp->shutdown(SHUT_RD, ss::pollable_fd::shutdown_kernel_only::no);
-            udp->shutdown(SHUT_WR, ss::pollable_fd::shutdown_kernel_only::no);
-        }
-        for (auto& [id, peer] : peers) {
-            peer->socket.shutdown_input(); peer->socket.shutdown_output();
-        }
         for (auto& [id, peer] : app_peers) {
             peer->shut_input(); peer->socket.shutdown_output();
         }
@@ -1962,200 +1523,29 @@ public:
                 }
             }
         }
-        co_await http.stop();
-        for (auto& upstream : upstreams) co_await upstream->close();
-        co_await std::move(accepting);
         co_await std::move(app_accepting);
         co_await std::move(shared_accepting);
         co_await std::move(worker_accepting);
-        co_await connections.close();
         co_await app_connections.close();
-        co_await std::move(datagrams);
-        udp.reset();
-    }
-    ss::future<std::unique_ptr<ss::http::reply>> handle(std::string mode, std::string route,
-        std::unique_ptr<ss::http::request> req, std::unique_ptr<ss::http::reply> rep) {
-        const auto applied = policy; // Request keeps its admission version across awaits.
-        rep->add_header("X-Probe-Pid", ss::to_sstring(::getpid()));
-        rep->add_header("X-Probe-Shard", ss::to_sstring(ss::this_shard_id()));
-        rep->add_header("X-Probe-Policy", ss::to_sstring(mode == "policy" ? applied.version : 0));
-        rep->set_content_type("application/octet-stream");
-        if (mode == "application") co_return co_await handle_application(std::move(req), std::move(rep));
-        if (route == "fetch") co_return co_await handle_fetch(std::move(mode), std::move(req), std::move(rep));
-        size_t size = 0;
-        if (route == "fixed") {
-            auto query = req->get_query_param("size");
-            if (query.empty()) query = "1024";
-            auto parsed = std::from_chars(query.data(), query.data()+query.size(), size);
-            if (parsed.ec != std::errc() || parsed.ptr != query.data()+query.size()) co_return error(std::move(rep), 400);
-        } else if (route == "compress") {
-            size = req->content_length;
-            // Pinned HTTP streaming API does not expose terminal-chunk validity.
-            // Explicitly require a known body length instead of accepting a
-            // truncated chunked request as a complete operation.
-            if (req->get_header("Transfer-Encoding") != "" || req->get_header("Content-Length") == "")
-                co_return error(std::move(rep), 411);
-        } else {
-            if (shared.config.file_path.empty()) co_return error(std::move(rep), 404);
-            size = shared.file_size;
-        }
-        if (route != "file" && size > shared.config.max_body_bytes) co_return error(std::move(rep), 413);
-        if (mode == "policy") {
-            ++counts.native_policy_decisions;
-            bool allowed = (route == "fixed" && applied.allow_fixed) ||
-                           (route == "file" && applied.allow_file) ||
-                           (route == "compress" && applied.allow_compress);
-            if (!allowed || size > applied.max_payload_bytes) {
-                ++counts.native_policy_denied;
-                co_return error(std::move(rep), allowed ? 413 : 403);
-            }
-        }
-        size_t bytes = route == "compress" ? compression_reservation(size) : size;
-        if (mode == "copy") bytes += 2 * size;
-        if (route == "file") bytes = 2 * 65536;
-        auto lease = reserve(bytes);
-        if (!lease) co_return error(std::move(rep), 503);
-        uint64_t python_request = 0;
-        unsigned terminal_status = 0;
-        bool retired = false;
-        auto finished = ss::defer([this, &python_request, &terminal_status, &retired, lease] () noexcept {
-            if (!python_request || retired) return;
-            RequestEvent event{(++next_id << 16) | ss::this_shard_id(), ss::this_shard_id(),
-                "POST", "python_done", terminal_status};
-            event.parent = python_request;
-            event.reservation = lease;
-            ++counts.python_terminal_events;
-            // At most one event per admitted request; reservation remains live
-            // until this event is drained, including on error and timeout paths.
-            shared.publish(std::move(event));
-        });
-        try {
-            int level = 6;
-            if (mode == "python") {
-                auto answer = co_await decide("python_compress", std::string(req->_method), size,
-                    nullptr, std::string(req->get_query_param("level")), 0, &python_request);
-                if (answer.code < 100 || answer.code > 109) {
-                    retired = answer.retire;
-                    co_return error(std::move(rep), answer.code >= 400 && answer.code <= 599 ? answer.code : 503);
-                }
-                level = answer.code - 100;
-                python_request = answer.id;
-            } else if (mode == "reference") {
-                auto query = req->get_query_param("level");
-                if (query.empty()) query = "6";
-                auto parsed = std::from_chars(query.data(), query.data()+query.size(), level);
-                if (parsed.ec != std::errc() || parsed.ptr != query.data()+query.size() || level < 0 || level > 9)
-                    co_return error(std::move(rep), 400);
-            }
-            std::string input;
-            if (route == "compress") {
-                input.reserve(size);
-                for (;;) {
-                    auto buffer = co_await req->content_stream->read();
-                    if (buffer.empty()) break;
-                    if (buffer.size() > shared.config.max_body_bytes - input.size()) {
-                        terminal_status = 413;
-                        co_return error(std::move(rep), 413);
-                    }
-                    input.append(buffer.get(), buffer.size());
-                }
-                if (input.size() != req->content_length) {
-                    terminal_status = 400;
-                    co_return error(std::move(rep), 400);
-                }
-                size = input.size();
-            }
-            if (mode == "hybrid" || mode == "copy") {
-                auto answer = co_await decide(route, std::string(req->_method), size, mode == "copy" ? &input : nullptr);
-                if (answer.code != 1) co_return error(std::move(rep), answer.code == 0 ? 403 : answer.code == 3 ? 503 : 500);
-                if (mode == "copy") {
-                    if (answer.body.size() != input.size()) co_return error(std::move(rep), 500);
-                    input = std::move(answer.body);
-                }
-            }
-            if (route == "file") {
-                rep->write_body(std::nullopt, [path=shared.config.file_path, lease, size](ss::output_stream<char>& out) {
-                    return write_file(out, path, lease, size);
-                });
-            } else {
-                auto body = std::make_shared<std::string>();
-                if (route == "compress") {
-                    // Bound active codec state per reactor; yield between chunks
-                    // for I/O and messages without cycling through many zlib states.
-                    WorkResult result;
-                    if (shared.config.cooperative_compression) {
-                        auto units = co_await ss::get_units(compression_slot, 1);
-                        result = co_await compress(std::move(input), level);
-                    } else {
-                        result = co_await compress(std::move(input), level);
-                    }
-                    if (!result.error.empty()) throw std::runtime_error(result.error);
-                    counts.compute_ns += result.metrics.algorithm_ns;
-                    counts.compute_cpu_ns += result.metrics.compute_cpu_ns;
-                    counts.worker_queue_ns += result.metrics.queue_ns;
-                    rep->add_header("X-Probe-Worker", ss::to_sstring(result.metrics.work_tid));
-                    *body = std::move(result.payload);
-                    if (mode == "python") {
-                        auto answer = co_await decide("python_result", "POST", body->size(), nullptr, {}, python_request);
-                        retired = answer.retire;
-                        if (answer.code != 200)
-                            co_return error(std::move(rep), answer.code >= 400 && answer.code <= 599 ? answer.code : 503);
-                        if (answer.body.size() > 128 || answer.body.find_first_of("\r\n") != std::string::npos)
-                            co_return error(std::move(rep), 500);
-                        rep->add_header("X-App-Result", ss::sstring(answer.body));
-                    } else if (mode == "reference") {
-                        if (body->size() > compression_reservation(size) - size)
-                            co_return error(std::move(rep), 422);
-                        rep->add_header("X-App-Result", ss::to_sstring(body->size()));
-                    }
-                } else body->assign(size, 'x');
-                rep->write_body(std::nullopt, [body, lease](ss::output_stream<char>& out) {
-                    return write_payload(out, body, lease);
-                });
-            }
-            co_return std::move(rep);
-        } catch (const ss::timed_out_error&) {
-            terminal_status = 504;
-            co_return error(std::move(rep), 504);
-        } catch (const WorkerQueueFull&) {
-            terminal_status = 503;
-            ++counts.rejected;
-            co_return error(std::move(rep), 503);
-        } catch (...) {
-            terminal_status = 500;
-            ++counts.errors;
-            co_return error(std::move(rep), 500);
-        }
     }
 };
-ss::future<std::unique_ptr<ss::http::reply>> Handler::handle(const ss::sstring&,
-    std::unique_ptr<ss::http::request> req, std::unique_ptr<ss::http::reply> rep) {
-    return service.handle(mode, route, std::move(req), std::move(rep));
-}
 }
 
 struct NetworkServer::Impl {
     Shared shared;
     ss::sharded<Service> services;
     ss::alien::instance& alien;
-    Compress compress;
     bool started = false;
     std::optional<ss::shared_future<>> stopping;  // stop() may be called again
-    ss::semaphore policy_updates{1}; // shard 0; serialize even canceled Python calls
-    Impl(ServerConfig c, unsigned n, ss::alien::instance& a, std::function<void()> wake, Compress fn)
-        : shared(std::move(c), n, std::move(wake)), alien(a), compress(std::move(fn)) {}
+    Impl(ServerConfig c, unsigned n, ss::alien::instance& a, std::function<void()> wake)
+        : shared(std::move(c), n, std::move(wake)), alien(a) {}
 };
-ss::future<> NetworkServer::install_policy(NativePolicy policy) {
-    return ss::with_semaphore(p->policy_updates, 1, [this, policy] {
-        return p->services.invoke_on_all(&Service::install_policy, policy);
-    });
-}
 NetworkServer::NetworkServer(ServerConfig c, unsigned n, ss::alien::instance& a,
-                              std::function<void()> wake, Compress compress)
-    : p(std::make_unique<Impl>(std::move(c), n, a, std::move(wake), std::move(compress))) {}
+                              std::function<void()> wake)
+    : p(std::make_unique<Impl>(std::move(c), n, a, std::move(wake))) {}
 NetworkServer::~NetworkServer() = default;
 ss::future<> NetworkServer::start() {
-    co_await p->services.start(&p->shared, p->compress);
+    co_await p->services.start(&p->shared);
     p->started = true;
     p->shared.running = true;
     co_await p->services.invoke_on_all(&Service::start);
@@ -2198,12 +1588,6 @@ std::vector<RequestEvent> NetworkServer::drain(size_t count) {
 bool NetworkServer::has_events() const {
     std::lock_guard lock(p->shared.mutex);
     return !p->shared.events.empty();
-}
-void NetworkServer::resolve(uint64_t id, unsigned shard, int code, std::string body, bool retire) {
-    if (shard >= p->shared.shard_count || !p->shared.running) return;
-    ss::alien::run_on(p->alien, shard, [impl=p.get(), id, code, body=std::move(body), retire]() mutable noexcept {
-        if (impl->shared.running) impl->services.local().resolve(id, code, std::move(body), retire);
-    });
 }
 void NetworkServer::resolve_batch(std::vector<RequestDecision> decisions) {
     if (decisions.empty() || !p->shared.running) return;

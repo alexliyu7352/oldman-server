@@ -16,11 +16,9 @@ import traceback
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
-from probes.framework_json.run import atomic_json, cpu_layout, read_response
 from probes.application_lifecycle.inputs import runtime_fingerprint
 from probes.sanic_boundary.application import EXPECTED, INPUT, concurrency
 from probes.sanic_spike.run import free_port
-from probes.final.run import threads
 from scripts.cpu_budget import (describe_cpu, cpu_topology, require_budget,
                                 cpu_snapshot, require_unthrottled)
 from run_comparison import native_libraries, stop_process
@@ -33,13 +31,81 @@ ZERO = ("active_requests", "reserved_bytes", "pending_application_nodes",
 def fingerprints():
     paths = [ROOT / "pyproject.toml", ROOT / "uv.lock", ROOT / ".python-version",
              ROOT / "dependency-lock.json", ROOT / "scripts/env.sh"]
-    for directory in ("python", "native", "scripts", "probes/sanic_boundary",
-                      "probes/sanic_spike", "probes/framework_json", "probes/final",
+    for directory in ("native", "scripts", "probes/sanic_boundary", "probes/sanic_spike",
                       "probes/application_lifecycle", "src/oldman_server"):
         paths.extend(p for p in (ROOT / directory).rglob("*")
                      if p.suffix in (".py", ".cc", ".hh", ".json", ".toml"))
     return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(set(paths))} | native_libraries()
+
+
+def atomic_json(path, value):
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temp.replace(path)
+
+
+def read_response(stream):
+    line = stream.readline()
+    if not line.startswith(b"HTTP/1.1 ") or not line.endswith(b"\r\n"):
+        raise ValueError(f"invalid HTTP status line: {line!r}")
+    status = int(line.split(b" ", 2)[1])
+    headers = {}
+    while (line := stream.readline()) != b"\r\n":
+        if not line or b":" not in line or not line.endswith(b"\r\n"):
+            raise ValueError("truncated or invalid HTTP headers")
+        key, value = line[:-2].split(b":", 1)
+        name = key.decode("ascii").lower()
+        if name in headers:
+            raise ValueError(f"duplicate header {name}")
+        headers[name] = value.strip().decode("latin-1")
+    if headers.get("transfer-encoding", "").lower() == "chunked":
+        parts = []
+        while True:
+            size_line = stream.readline()
+            try:
+                length = int(size_line.split(b";", 1)[0], 16)
+            except ValueError as exc:
+                raise ValueError("invalid chunk size") from exc
+            if length == 0:
+                while (trailer := stream.readline()) != b"\r\n":
+                    if not trailer:
+                        raise ValueError("truncated HTTP trailers")
+                break
+            if length > 65536:
+                raise ValueError("oversized response chunk")
+            data = stream.read(length)
+            if len(data) != length or stream.read(2) != b"\r\n":
+                raise ValueError("truncated chunk")
+            parts.append(data)
+        body = b"".join(parts)
+    else:
+        length = int(headers.get("content-length", "0"))
+        body = stream.read(length)
+        if len(body) != length:
+            raise ValueError("truncated HTTP response")
+    return status, headers, body
+
+
+def cpu_layout(available, topology):
+    """One CPU per physical core: three for the server, four for the client,
+    one for the controller, and a ninth CPU left unused."""
+    cpus = sorted(available)
+    if len(cpus) < 9:
+        raise ValueError("need nine affinity CPUs: three server, four client, one unused, one controller")
+    by_cpu = {row["cpu"]: row for row in topology}
+    if not set(cpus) <= by_cpu.keys():
+        raise ValueError("missing CPU topology")
+    by_core = {}
+    for cpu in cpus:
+        row = by_cpu[cpu]
+        by_core.setdefault((row["package_id"], row["core_id"]), cpu)
+    primary = list(by_core.values())
+    if len(primary) < 8:
+        raise ValueError("need eight physical cores: three server, four client, one controller")
+    active = primary[:8]
+    return {"server": active[:3], "client": active[3:7],
+            "unused": next(cpu for cpu in cpus if cpu not in active), "controller": active[7]}
 
 
 def layout_for(budget, server_cores=3):
@@ -51,9 +117,22 @@ def layout_for(budget, server_cores=3):
         raise ValueError("eight physical cores fit three or four server cores")
     topology = cpu_topology(budget["effective_cpus"])
     layout = cpu_layout(budget["effective_cpus"], topology)
-    active = [*layout["candidate3"], *layout["client"], layout["controller"]]
+    active = [*layout["server"], *layout["client"], layout["controller"]]
     return {"server": active[:server_cores], "client": active[server_cores:server_cores + 3],
             "controller": [active[7]]}, topology
+
+
+def threads(pids):
+    rows = {}
+    for pid in pids:
+        for task in Path(f"/proc/{pid}/task").iterdir():
+            try:
+                stat = (task / "stat").read_text().rsplit(")", 1)[1].split()
+                status = (task / "status").read_text().splitlines()
+                rows[task.name] = {"pid": pid, "ticks": int(stat[11])+int(stat[12]),
+                    "affinity": next(s.split(":", 1)[1].strip() for s in status if s.startswith("Cpus_allowed_list:"))}
+            except (FileNotFoundError, ProcessLookupError): pass  # the thread exited meanwhile
+    return rows
 
 
 def check_threads(pid, cpus):

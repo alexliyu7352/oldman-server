@@ -3,7 +3,6 @@ import pytest
 import uvloop
 from oldman_server.response import HTTPResponse
 
-from oldman_server.native._native import ApplicationResponseBatch
 from oldman_server.native.host import _BufferedExchange
 
 
@@ -93,34 +92,7 @@ def test_send_rejects_at_original_boundary_and_keeps_failure(headers, exception,
     uvloop.run(scenario())
 
 
-def test_native_bytes_batch_is_explicit_and_retains_checked_limits():
-    class Bytes(bytes):
-        pass
-    batch = ApplicationResponseBatch(64, bytes_headers=True)
-    good = (201, b"ok", ((b"X-Value", b"caf\xc3\xa9\xff"),))
-    assert batch.append_result(1, 0, good)
-    invalid = [
-        (200, b"ok", (("X-Value", "str"),)),
-        (200, b"ok", ((b"X-Value", bytearray(b"mutable")),)),
-        (200, b"ok", ((Bytes(b"X"), b"v"),)),
-        (200, b"ok", ((b"X-\xff", b"v"),)),
-        (200, b"ok", ((b"X", b"\r\ninjected"),)),
-        (200, b"ok", ((b"Content-Length", b"2"),)),
-        (200, b"ok", ((b"X", b"x" * 8188),)),
-        (200, b"ok", tuple((f"X-{i}".encode(), b"v") for i in range(129))),
-        (200, b"ok", ((b"X",),)), (204, b"", ()), (True, b"", ()),
-        (200, b"x" * 65, ()), (200, b"ok", []),
-    ]
-    for i, result in enumerate(invalid, 2):
-        assert batch.append_result(i, 0, result) is False
-    assert len(batch) == len(invalid) + 1
-    assert batch.stats()["queued"] == len(batch)
-    legacy = ApplicationResponseBatch(64)
-    assert legacy.append_result(1, 0, good) is False
-    assert legacy.append_result(2, 0, (200, b"ok", (("X", "café"),))) is True
-
-
-def test_invalid_custom_decoder_result_still_fails_at_native_validation():
+def test_invalid_custom_decoder_result_is_left_to_native_validation():
     class Text(str):
         pass
     for invalid in (123, Text("value"), b"already bytes", "\u2603"):
@@ -135,11 +107,9 @@ def test_invalid_custom_decoder_result_still_fails_at_native_validation():
             exchange = _BufferedExchange(b"", 64)
             exchange.respond(Custom(b"ok"))
             await exchange.send(b"", end_stream=True)
-            # The old str boundary rejected these after the application chain.
-            # Do not invent an earlier exception or accept returned bytes now.
-            result = exchange.finish()
-            batch = ApplicationResponseBatch(64, bytes_headers=True)
-            assert batch.append_result(1, 0, result) is False
+            # The old str boundary rejected these after the application chain;
+            # the native boundary does now. Do not invent an earlier exception.
+            exchange.finish()
         uvloop.run(scenario())
 
 
@@ -177,8 +147,6 @@ def test_expanding_decoder_is_bounded_before_copy_without_ending_the_chain(cumul
         assert sum(len(n) + len(v) + 4 for n, v in result[2]
                    if type(n) is type(v) is bytes) <= 8192
         assert events == ["decode", "tail", "decode", "after_send"]
-        batch = ApplicationResponseBatch(64, bytes_headers=True)
-        assert batch.append_result(1, 0, result) is False
     uvloop.run(scenario())
 
 

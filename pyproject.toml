@@ -77,7 +77,7 @@ test = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-timeout==2.4.0", "pyte
         "httpx==0.28.1", "beautifulsoup4==4.15.0",
         "jinja2==3.1.6", "pydantic==2.12.5", "msgspec==0.20.0", "attrs==26.1.0", {include-group = "http"}]
 # ujson: stock Sanic's json() encoder in the comparison with stock Sanic.
-benchmark = ["granian==2.8.1", "ujson==6.0.0", {include-group = "http"}]
+benchmark = ["ujson==6.0.0", {include-group = "http"}]
 
 [tool.uv]
 default-groups = ["build", "test", "benchmark"]
@@ -101,7 +101,7 @@ constraint-dependencies = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["python", "build", "."]
+pythonpath = ["."]
 addopts = "--strict-markers"
 # Async tests and fixtures need no marker, as the suites from Sanic and Sanic Extensions expect.
 asyncio_mode = "auto"

@@ -1,156 +1,32 @@
-"""Real integration tests; each case runs in a fresh process (see run_tests.py)."""
+"""The Engine's own lifecycle: startup, cancellation, shutdown, signals and
+resources. Each case runs in a fresh process (one Seastar per process)."""
 import asyncio
 import ctypes
-import gc
 import os
 import signal
 import threading
 
 import pytest
 
-from oldman_server.native.engine import BusyError, Config, Engine
+from oldman_server.native.engine import Config, Engine, ServerConfig
+from test_http import free_port, request
 
 
 def cpus():
     return tuple(sorted(os.sched_getaffinity(0))[-2:])
 
 
+def open_engine():
+    """An Engine serving a trivial framework handler on a free port."""
+    server = ServerConfig(http_port=free_port(), application_dispatch_all=True)
+    return Engine.open(Config(shard_cpus=cpus(), server=server),
+                       application_handler=lambda request: (200, b"", ()))
+
+
 async def wait_stat(engine, key, predicate, seconds=5):
     async with asyncio.timeout(seconds):
         while not predicate(engine.stats()[key]):
             await asyncio.sleep(0.001)
-
-
-@pytest.mark.asyncio
-async def test_roundtrip_same_process():
-    old_signal = signal.getsignal(signal.SIGINT)
-    engine = await Engine.open(Config(shard_cpus=cpus()))
-    try:
-        jobs = [engine.echo(i.to_bytes(8, "little")) for i in range(1000)]
-        out = await asyncio.wait_for(asyncio.gather(*jobs), 30)
-        assert [x.payload for x in out] == [i.to_bytes(8, "little") for i in range(1000)]
-        assert all(x.server_pid == os.getpid() for x in out)
-        assert all(x.worker_tid != threading.get_native_id() for x in out)
-        assert {x.shard for x in out} == {0, 1}
-        assert engine.stats()["pending_requests"] == 0
-        assert engine.stats()["pending_bytes"] == 0
-        assert signal.getsignal(signal.SIGINT) == old_signal
-    finally:
-        await asyncio.wait_for(engine.aclose(), 30)
-    assert engine.stats()["live_workers"] == 0
-
-
-@pytest.mark.asyncio
-async def test_input_lifetime():
-    engine = await Engine.open(Config(shard_cpus=cpus()))
-    try:
-        payload = bytes(range(256)) * 4096
-        task = asyncio.create_task(engine.echo(payload, delay_ms=50))
-        del payload
-        await wait_stat(engine, "pending_requests", lambda n: n == 1)
-        gc.collect()
-        churn = [bytes([i]) * 1048576 for i in range(8)]
-        result = await asyncio.wait_for(task, 30)
-        assert result.payload == bytes(range(256)) * 4096
-        assert len(churn) == 8
-    finally:
-        await engine.aclose()
-
-
-@pytest.mark.asyncio
-async def test_saturation_recovers():
-    engine = await Engine.open(Config(shard_cpus=cpus(), max_pending=8))
-    try:
-        tasks = [asyncio.create_task(engine.echo(b"x", delay_ms=150)) for _ in range(8)]
-        await wait_stat(engine, "pending_requests", lambda n: n == 8)
-        with pytest.raises(BusyError):
-            await engine.echo(b"rejected")
-        assert len(await asyncio.gather(*tasks)) == 8
-        assert (await engine.echo(b"accepted")).payload == b"accepted"
-    finally:
-        await engine.aclose()
-
-
-@pytest.mark.asyncio
-async def test_byte_budget_recovers():
-    engine = await Engine.open(Config(shard_cpus=cpus(), max_pending_bytes=16))
-    try:
-        task = asyncio.create_task(engine.echo(b"1234567890abcdef", delay_ms=100))
-        await wait_stat(engine, "pending_bytes", lambda n: n == 16)
-        with pytest.raises(BusyError):
-            await engine.echo(b"x")
-        await task
-        assert (await engine.echo(b"x")).payload == b"x"
-    finally:
-        await engine.aclose()
-
-
-@pytest.mark.asyncio
-async def test_canceled_timer_retains_capacity_until_native_done():
-    engine = await Engine.open(Config(shard_cpus=cpus(), max_pending=1))
-    try:
-        task = asyncio.create_task(engine.echo(b"still-owned", delay_ms=120))
-        await wait_stat(engine, "pending_requests", lambda n: n == 1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert engine.stats()["pending_bytes"] == 11
-        with pytest.raises(BusyError):
-            await engine.echo(b"too-early")
-        await wait_stat(engine, "pending_requests", lambda n: n == 0)
-        assert engine.stats()["pending_bytes"] == 0
-        assert (await engine.echo(b"again")).payload == b"again"
-    finally:
-        await engine.aclose()
-
-
-@pytest.mark.asyncio
-async def test_cancel_after_completion_queued():
-    engine = await Engine.open(Config(shard_cpus=cpus()))
-    try:
-        loop = asyncio.get_running_loop()
-        loop.remove_reader(engine.notification_fd)
-        task = asyncio.create_task(engine.echo(b"race", delay_ms=20))
-        await wait_stat(engine, "queued_completions", lambda n: n == 1)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        loop.add_reader(engine.notification_fd, engine._drain)
-        await wait_stat(engine, "pending_requests", lambda n: n == 0)
-        assert engine.stats()["pending_bytes"] == 0
-    finally:
-        asyncio.get_running_loop().add_reader(engine.notification_fd, engine._drain)
-        await engine.aclose()
-
-
-@pytest.mark.asyncio
-async def test_close_drains_inflight_and_rejects_new_work():
-    engine = await Engine.open(Config(shard_cpus=cpus()))
-    tasks = [asyncio.create_task(engine.echo(b"close", delay_ms=70)) for _ in range(64)]
-    await wait_stat(engine, "pending_requests", lambda n: n == 64)
-    await asyncio.wait_for(engine.aclose(), 10)
-    out = await asyncio.gather(*tasks)
-    assert len(out) == 64
-    assert engine.stats()["pending_requests"] == 0
-    assert engine.stats()["pending_bytes"] == 0
-    assert engine.stats()["live_workers"] == 0
-    with pytest.raises(RuntimeError):
-        await engine.echo(b"closed")
-    await engine.aclose()
-
-
-@pytest.mark.asyncio
-async def test_timer_does_not_block_python_or_other_native_tasks():
-    engine = await Engine.open(Config(shard_cpus=cpus()))
-    try:
-        delayed = asyncio.create_task(engine.echo(b"slow", delay_ms=200))
-        await asyncio.sleep(0)
-        for _ in range(20):
-            assert (await engine.echo(b"fast")).payload == b"fast"
-        assert not delayed.done()
-        await delayed
-    finally:
-        await engine.aclose()
 
 
 def c_signal_handler(signum):
@@ -165,7 +41,7 @@ def c_signal_handler(signum):
 async def test_signal_handlers_restored_after_shutdown():
     watched = (signal.SIGINT, signal.SIGTERM, signal.SIGABRT, signal.SIGSEGV, signal.SIGILL, signal.SIGFPE)
     before = {n: c_signal_handler(n) for n in watched}
-    engine = await Engine.open(Config(shard_cpus=cpus()))
+    engine = await open_engine()
     assert c_signal_handler(signal.SIGINT) == before[signal.SIGINT]
     assert c_signal_handler(signal.SIGTERM) == before[signal.SIGTERM]
     await engine.aclose()
@@ -174,15 +50,12 @@ async def test_signal_handlers_restored_after_shutdown():
 
 @pytest.mark.asyncio
 async def test_canceled_close_still_finishes_cleanup():
-    engine = await Engine.open(Config(shard_cpus=cpus()))
-    task = asyncio.create_task(engine.echo(b"owned", delay_ms=100))
-    await wait_stat(engine, "pending_requests", lambda n: n == 1)
+    engine = await open_engine()
     close = asyncio.create_task(engine.aclose())
     await asyncio.sleep(0)
     close.cancel()
     with pytest.raises(asyncio.CancelledError):
         await close
-    assert (await task).payload == b"owned"
     await asyncio.wait_for(engine.aclose(), 5)
     assert engine.stats()["live_workers"] == 0
 
@@ -191,12 +64,12 @@ async def test_canceled_close_still_finishes_cleanup():
 async def test_shutdown_releases_native_threads_and_fds():
     fds_before = len(os.listdir("/proc/self/fd"))
     threads_before = {int(t) for t in os.listdir("/proc/self/task")}
-    engine = await Engine.open(Config(shard_cpus=cpus()))
+    engine = await open_engine()
     tids = {s["tid"] for s in engine.shards()}
     assert len(tids) == 2
     assert [s["affinity"] for s in engine.shards()] == [[c] for c in cpus()]
     assert all(s["backend"] == "epoll" for s in engine.shards())
-    await engine.echo(b"fd-check")
+    assert (await request(engine.config.server.http_port, "/"))[0] == 200
     await engine.aclose()
     assert not tids & {int(t) for t in os.listdir("/proc/self/task")}
     leftover = {int(t) for t in os.listdir("/proc/self/task")} - threads_before
@@ -205,34 +78,9 @@ async def test_shutdown_releases_native_threads_and_fds():
 
 
 @pytest.mark.asyncio
-async def test_copy_baseline_preserves_binary_payload():
-    from oldman_server.native import _native as _seastar_probe
-    assert _seastar_probe.copy_roundtrip(b"\x00\xffprobe\x80") == b"\x00\xffprobe\x80"
-
-
-@pytest.mark.asyncio
-async def test_completed_queue_stays_bounded_and_batch_notifications_rearm():
-    engine = await Engine.open(Config(shard_cpus=cpus(), max_pending=8, completion_batch=3))
-    loop = asyncio.get_running_loop()
-    try:
-        loop.remove_reader(engine.notification_fd)
-        tasks = [asyncio.create_task(engine.echo(b"queued")) for _ in range(8)]
-        await wait_stat(engine, "queued_completions", lambda n: n == 8)
-        with pytest.raises(BusyError):
-            await engine.echo(b"overflow")
-        assert engine.stats()["pending_requests"] == 8
-        loop.add_reader(engine.notification_fd, engine._drain)
-        assert len(await asyncio.wait_for(asyncio.gather(*tasks), 5)) == 8
-        assert engine.stats()["pending_bytes"] == 0
-    finally:
-        loop.add_reader(engine.notification_fd, engine._drain)
-        await engine.aclose()
-
-
-@pytest.mark.asyncio
 async def test_cancel_during_open_cleans_up():
     before = len(os.listdir("/proc/self/fd"))
-    opening = asyncio.create_task(Engine.open(Config(shard_cpus=cpus())))
+    opening = asyncio.create_task(open_engine())
     await asyncio.sleep(0)
     opening.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -241,29 +89,9 @@ async def test_cancel_during_open_cleans_up():
 
 
 @pytest.mark.asyncio
-async def test_cancel_after_future_set_before_task_resumes():
-    engine = await Engine.open(Config(shard_cpus=cpus()))
-    loop = asyncio.get_running_loop()
-    try:
-        loop.remove_reader(engine.notification_fd)
-        task = asyncio.create_task(engine.echo(b"completed"))
-        await wait_stat(engine, "queued_completions", lambda n: n == 1)
-        engine._drain()
-        assert engine.stats()["pending_requests"] == 0
-        assert not task.done()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert engine.stats()["pending_bytes"] == 0
-    finally:
-        loop.add_reader(engine.notification_fd, engine._drain)
-        await engine.aclose()
-
-
-@pytest.mark.asyncio
 async def test_shutdown_preserves_handler_installed_by_application():
     original = signal.getsignal(signal.SIGABRT)
-    engine = await Engine.open(Config(shard_cpus=cpus()))
+    engine = await open_engine()
     try:
         handler = lambda *_: None
         signal.signal(signal.SIGABRT, handler)
@@ -287,7 +115,7 @@ async def held_open(monkeypatch):
         else:
             original_add(fd, callback, *args)
     monkeypatch.setattr(loop, "add_reader", add_reader)
-    opening = asyncio.create_task(Engine.open(Config(shard_cpus=cpus())))
+    opening = asyncio.create_task(open_engine())
     fd, callback = await captured
     return opening, callback.__self__, fd, callback, original_add
 
@@ -355,7 +183,7 @@ async def test_reader_registration_failure_releases_runtime(monkeypatch):
     monkeypatch.setattr(loop, "add_reader", fail_registration)
     try:
         with pytest.raises(RuntimeError, match="injected registration failure"):
-            await Engine.open(Config(shard_cpus=cpus()))
+            await open_engine()
         assert len(os.listdir("/proc/self/fd")) == before
         assert captured[0]._native.fd() == -1
     finally:

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 
-def native_config(port, cpus, mode, listen_fd=-1, accept=None):
+def native_config(port, cpus, listen_fd=-1, accept=None):
     from oldman_server.native.engine import Config, ServerConfig
     # As an application would set NATIVE_REACTOR_BACKEND (calibrate.py's
     # mode:workload:OLDMAN_SERVER_NATIVE_REACTOR_BACKEND=io_uring).
@@ -22,49 +22,22 @@ def native_config(port, cpus, mode, listen_fd=-1, accept=None):
     return Config(shard_cpus=tuple(cpus[1:]), **({} if backend is None else {'reactor_backend': backend}),
                   server=ServerConfig(
         http_port=0 if listen_fd >= 0 else port, listen_fd=listen_fd,
-        application_dispatch_all=mode == 'candidate', max_requests=1024,
+        application_dispatch_all=True, max_requests=1024,
         max_bytes=64*1024*1024, max_body_bytes=65536, max_response_bytes=65536,
         decision_timeout_ms=5000, generate_date_header=True, coalesce_notifications=True,
         # Stock adds only X-Probe-Pid in its middleware; the framework host matches.
-        probe_headers='pid' if mode == 'candidate' else 'all',
+        probe_headers='pid',
         # Sanic's KEEP_ALIVE_TIMEOUT / REQUEST_TIMEOUT defaults, as stock enforces.
-        keep_alive_timeout_ms=120000 if mode == 'candidate' else 0,
-        request_timeout_ms=60000 if mode == 'candidate' else 0, **(accept or {})))
+        keep_alive_timeout_ms=120000, request_timeout_ms=60000, **(accept or {})))
 
 
-def application_contract(engine, mode):
+def application_contract(engine):
     from probes.sanic_boundary import application
     file = Path(application.__file__).resolve()
-    # The lightweight App encodes with stdlib small_body(); Sanic routes use json().
-    codec = 'stdlib' if mode == 'app' else 'oldman_server.response.json'
-    return {'json_codec': codec, 'native_responses': engine._application_native_results,
+    return {'json_codec': 'oldman_server.response.json',
             'bytes_headers': getattr(engine, '_application_bytes_headers', False),
             'server_config': asdict(engine.config.server),
             'business': {'path': str(file), 'sha256': hashlib.sha256(file.read_bytes()).hexdigest()}}
-
-
-def make_lightweight_app(counts):
-    from seastar_http import App, Response
-    from probes.sanic_boundary import application
-    app = App()
-    @app.get('/small')
-    async def small(request):
-        counts['started'] += 1
-        counts['active'] += 1
-        response = None
-        try:
-            response = Response(application.small_body(), headers=(('Content-Type', 'application/json'),))
-            return response
-        except BaseException:
-            counts['errors'] += 1
-            raise
-        finally:
-            counts['finished'] += 1
-            counts['active'] -= 1
-            if response is not None:
-                counts['responses'] += 1
-                counts['errors'] += int(response.status != 200)
-    return app
 
 
 def verify_stock():
@@ -167,14 +140,14 @@ class SampleWindow(CounterWindow):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=('stock', 'candidate', 'app'), required=True)
+    parser.add_argument('--mode', choices=('stock', 'candidate'), required=True)
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--profile-dir', type=Path)
     parser.add_argument('--workers', type=int, default=1,
                         help='candidate: worker processes, each on an equal share of the CPUs')
     args = parser.parse_args()
-    # Stock imports the verified upstream source as `sanic`; candidate and app
-    # use oldman_server. Dependencies and interpreter still come from the
+    # Stock imports the verified upstream source as `sanic`; candidate uses
+    # oldman_server. Dependencies and interpreter still come from the
     # single uv project environment.
     if args.mode == 'stock':
         sys.path.insert(0, str(verify_stock()))
@@ -201,11 +174,6 @@ def main():
             self.engine = self.host = self.server = None
 
         async def start(self, port, listener=None):
-            if args.mode == 'app':
-                self.app = make_lightweight_app(self.counts)
-                self.engine = await self.app.start(native_config(port, self.cpus, args.mode))
-                os.sched_setaffinity(0, {self.cpus[0]})
-                return
             app = self.app = make_app(stock=args.mode == 'stock')
             # Identical accounting middleware in both Python modes. Engine's
             # native resource counters remain separately checked on candidate.
@@ -233,7 +201,7 @@ def main():
                     listen_fd = shared['listener'].fileno()
                     accept = dict(listen_shared=True, accept_counts=ctypes.addressof(shared['table']),
                                   accept_slots=SLOTS, accept_slot=shared['groups'].index(self.cpus))
-                config = native_config(port, self.cpus, args.mode, listen_fd, accept)
+                config = native_config(port, self.cpus, listen_fd, accept)
                 self.host = serve(app, config)
                 self.engine = await self.host.__aenter__()
                 os.sched_setaffinity(0, {self.cpus[0]})
@@ -267,12 +235,7 @@ def main():
             if self.engine:
                 from probes.sanic_boundary.server import module_evidence
                 result['loaded'] = module_evidence()
-                result['application_contract'] = application_contract(self.engine, args.mode)
-                if args.mode == 'app':
-                    import seastar_http
-                    file = Path(seastar_http.__file__).resolve()
-                    result['app_source'] = {'path': str(file),
-                                            'sha256': hashlib.sha256(file.read_bytes()).hexdigest()}
+                result['application_contract'] = application_contract(self.engine)
             return result
 
         async def close(self):
@@ -296,7 +259,7 @@ def main():
     comparison.Snapshot = (lambda stats: ProfileWindow(stats, args.profile_dir)) if args.profile_dir else CounterWindow
     if os.environ.get('PROBE_SAMPLE_OUT') and not args.profile_dir:
         comparison.Snapshot = lambda stats: SampleWindow(stats, os.environ['PROBE_SAMPLE_OUT'])
-    comparison.PythonService = comparison.SeastarService = Service
+    comparison.Service = Service
     comparison.child = child
     args.requests, args.bytes = 1024, 64*1024*1024
     cpus = sorted(os.sched_getaffinity(0))

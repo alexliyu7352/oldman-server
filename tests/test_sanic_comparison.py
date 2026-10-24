@@ -2,6 +2,7 @@
 from copy import deepcopy
 import pytest
 
+from probes.sanic_boundary.run import ZERO
 from probes.sanic_comparison.run import validate_response, validate_counts
 from probes.sanic_comparison.server import verify_stock
 
@@ -95,6 +96,38 @@ def test_counts_reject_partial_workers_and_errors():
         with pytest.raises(ValueError): validate_counts(bad)
     row['closed']['workers'][0]['active'] = 1
     with pytest.raises(ValueError): validate_counts(row)
+
+
+def candidate_row():
+    row = valid_row()
+    row['mode'] = 'candidate'
+    row['ready']['pids'] = row['ready']['service_pids'] = [11]
+    row['client']['server_pids'] = {'11': 300}
+    stats = dict(active=0, errors=0, engine_python_application_errors=0)
+    stats.update({'engine_'+key: 0 for key in ZERO})
+    delta = dict(responses=300, started=300, finished=300,
+                 engine_responses=300, engine_python_application_started=300,
+                 engine_python_application_finished=300)
+    row['server']['workers'] = [dict(pid=11, after=deepcopy(stats), delta=delta)]
+    row['closed']['workers'] = [deepcopy(stats)]
+    return row
+
+
+@pytest.mark.parametrize('key', [*ZERO, 'python_application_errors'])
+def test_candidate_rejects_native_leaks_and_errors(key):
+    row = candidate_row()
+    validate_counts(row)
+    row['closed']['workers'][0]['engine_'+key] = 1
+    with pytest.raises(ValueError):
+        validate_counts(row)
+
+
+@pytest.mark.parametrize('key', ['responses', 'python_application_started', 'python_application_finished'])
+def test_candidate_rejects_native_count_mismatch(key):
+    row = candidate_row()
+    row['server']['workers'][0]['delta']['engine_'+key] -= 1
+    with pytest.raises(ValueError):
+        validate_counts(row)
 
 
 def test_counter_window_handles_non_numeric_engine_metadata():

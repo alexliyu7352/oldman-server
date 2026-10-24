@@ -1,11 +1,9 @@
 #include "runtime.hh"
-#include "json_codec.hh"
 #include "multipart.hh"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <limits>
 #include <string_view>
-#include <zlib.h>
 namespace py = pybind11;
 
 namespace {
@@ -300,160 +298,9 @@ bool checked_http_response(py::tuple item, size_t max_response_bytes,
                                          upgrade);
 }
 
-struct ApplicationResponseBatch {
-    // No Python references: only this owned vector crosses the GIL boundary.
-    std::vector<probe::RequestDecision> pending;
-    size_t max_response_bytes;
-    bool bytes_headers;
-    bool no_body_statuses;  // 204 and 304 as the checked path takes them
-    uint64_t json_encoded = 0, json_fallback = 0, queued = 0, flushed = 0;
-
-    ApplicationResponseBatch(size_t limit, bool encoded_headers, bool bodyless_statuses)
-        : max_response_bytes(limit), bytes_headers(encoded_headers), no_body_statuses(bodyless_statuses) {}
-
-    bool normalize(py::handle result, probe::RequestDecision& decision) {
-        if (PyDict_Check(result.ptr())) {
-            decision.body = probe::json_codec::encode(result, max_response_bytes, &json_fallback);
-            decision.headers.emplace_back("Content-Type", "application/json");
-            decision.code = 200;
-            ++json_encoded;
-            return true;
-        }
-        if (PyUnicode_CheckExact(result.ptr())) {
-            Py_ssize_t size;
-            const char* text = PyUnicode_AsUTF8AndSize(result.ptr(), &size);
-            if (!text) throw py::error_already_set();
-            if (static_cast<size_t>(size) > max_response_bytes) return false;
-            decision.body.assign(text, static_cast<size_t>(size));
-            decision.headers.emplace_back("Content-Type", "text/plain; charset=utf-8");
-            decision.code = 200;
-            return true;
-        }
-        if (PyUnicode_Check(result.ptr())) {
-            // The legacy App calls the subclass's encode method, which may
-            // change the payload or raise. Preserve that uncommon behavior.
-            auto encoded = py::reinterpret_borrow<py::object>(result).attr("encode")("utf-8");
-            if (!PyBytes_CheckExact(encoded.ptr())) return false;
-            const auto size = static_cast<size_t>(PyBytes_GET_SIZE(encoded.ptr()));
-            if (size > max_response_bytes) return false;
-            decision.body.assign(PyBytes_AS_STRING(encoded.ptr()), size);
-            decision.headers.emplace_back("Content-Type", "text/plain; charset=utf-8");
-            decision.code = 200;
-            return true;
-        }
-        if (PyBytes_CheckExact(result.ptr())) {
-            const auto size = static_cast<size_t>(PyBytes_GET_SIZE(result.ptr()));
-            if (size > max_response_bytes) return false;
-            decision.body.assign(PyBytes_AS_STRING(result.ptr()), size);
-            decision.code = 200;
-            return true;
-        }
-        if (PyTuple_CheckExact(result.ptr()) && PyTuple_GET_SIZE(result.ptr()) == 3)
-            return checked_http_response_fields(PyTuple_GET_ITEM(result.ptr(), 0),
-                PyTuple_GET_ITEM(result.ptr(), 1), PyTuple_GET_ITEM(result.ptr(), 2),
-                max_response_bytes, decision, bytes_headers, no_body_statuses);
-        return false;
-    }
-
-    bool append_result(py::handle id, py::handle shard, py::handle result) {
-        // Invalid routing identity is a caller error, never a routable 500.
-        const auto request_id = response_id(id);
-        const auto request_shard = response_shard(shard);
-        probe::RequestDecision decision{request_id, request_shard, 500, {}, true, {}};
-        auto fallback = [&](int status = 500) {
-            pending.push_back({request_id, request_shard, status, {}, true, {}});
-            ++queued;
-        };
-        bool valid;
-        try {
-            valid = normalize(result, decision);
-        } catch (py::error_already_set& error) {
-            // Match the legacy Python wrapper's timeout/cancellation mapping,
-            // including exceptions raised by subclass serialization methods.
-            // Cancellation has precedence even for a multiple-inheritance
-            // exception that is also a TimeoutError or ordinary Exception.
-            if (error.matches(py::module_::import("asyncio.exceptions").attr("CancelledError"))) {
-                fallback(503);
-                return true;
-            }
-            if (error.matches(PyExc_TimeoutError)) {
-                fallback(504);
-                return true;
-            }
-            fallback();
-            // Other control exceptions propagate only after a terminal 500 is
-            // queued. Ordinary serializer/validation exceptions are isolated.
-            if (!error.matches(PyExc_Exception)) throw;
-            return false;
-        } catch (const std::exception&) {
-            fallback();
-            return false;
-        }
-        if (!valid) {
-            fallback();
-            return false;
-        }
-        pending.push_back(std::move(decision));
-        ++queued;
-        return true;
-    }
-
-    // The handler read `bytes` of a request body still arriving (flow control).
-    void append_body_read(py::handle id, py::handle shard, size_t bytes) {
-        probe::RequestDecision decision{response_id(id), response_shard(shard), 0, {}, true, {}};
-        decision.kind = probe::DecisionKind::body_read;
-        decision.content_length = static_cast<int64_t>(bytes);
-        pending.push_back(std::move(decision));
-        ++queued;
-    }
-    void flush(probe::Runtime& runtime) {
-        std::vector<probe::RequestDecision> owned;
-        owned.swap(pending);
-        const auto count = owned.size();
-        if (!count) return;
-        {
-            py::gil_scoped_release release;
-            runtime.resolve_requests(std::move(owned));
-        }
-        flushed += count;
-    }
-
-    py::dict stats() const {
-        py::dict out;
-        out["json_encoded"] = json_encoded;
-        out["json_fallback"] = json_fallback;
-        out["queued"] = queued;
-        out["flushed"] = flushed;
-        return out;
-    }
-};
 } // namespace
 
-static py::dict metrics_dict(const probe::Metrics& m) {
-    py::dict d;
-#define FIELD(name) d[#name] = m.name
-    FIELD(input_copy_ns); FIELD(output_copy_ns); FIELD(submitted_ns);
-    FIELD(dispatch_ns); FIELD(queue_ns); FIELD(algorithm_ns); FIELD(compute_cpu_ns);
-    FIELD(work_start_ns); FIELD(work_end_ns); FIELD(return_to_shard_ns);
-    FIELD(notification_wait_ns); FIELD(cooperative_yields); FIELD(work_tid); FIELD(shard_tid);
-#undef FIELD
-    d["binding_result_ns"] = probe::clock_ns();
-    return d;
-}
 PYBIND11_MODULE(_native, m) {
-    m.def("encode_json", [](py::handle value, size_t max_response_bytes) {
-        return py::bytes(probe::json_codec::encode(value, max_response_bytes));
-    }, py::arg("value"), py::arg("max_response_bytes") = 134217728);
-    py::class_<ApplicationResponseBatch>(m, "ApplicationResponseBatch")
-        .def(py::init<size_t, bool, bool>(), py::arg("max_response_bytes"),
-             py::kw_only(), py::arg("bytes_headers") = false, py::arg("no_body_statuses") = false)
-        .def("append_result", &ApplicationResponseBatch::append_result,
-             py::arg("id"), py::arg("shard"), py::arg("result"))
-        .def("append_body_read", &ApplicationResponseBatch::append_body_read,
-             py::arg("id"), py::arg("shard"), py::arg("bytes"))
-        .def("flush", &ApplicationResponseBatch::flush, py::arg("runtime"))
-        .def("__len__", [](const ApplicationResponseBatch& batch) { return batch.pending.size(); })
-        .def("stats", &ApplicationResponseBatch::stats);
     py::class_<ApplicationRequest>(m, "ApplicationRequest")
         // Socket metadata is optional so tests and in-process measurement can
         // build complete Sanic requests without a listening runtime.
@@ -498,30 +345,16 @@ PYBIND11_MODULE(_native, m) {
         .def("header_bytes", &ApplicationRequest::header_bytes, py::arg("name"), py::arg("default") = py::none())
         .def("validate_sanic_request", &ApplicationRequest::validate_sanic_request)
         .def("sanic_request", &ApplicationRequest::sanic_request);
-    py::class_<probe::NativePolicy>(m, "NativePolicy")
-        .def(py::init<>())
-        .def_readwrite("allow_fixed", &probe::NativePolicy::allow_fixed)
-        .def_readwrite("allow_file", &probe::NativePolicy::allow_file)
-        .def_readwrite("allow_compress", &probe::NativePolicy::allow_compress)
-        .def_readwrite("max_payload_bytes", &probe::NativePolicy::max_payload_bytes);
     py::class_<probe::ServerConfig>(m, "ServerConfig")
         .def(py::init<>())
         .def_readwrite("http_port", &probe::ServerConfig::http_port)
-        .def_readwrite("tcp_port", &probe::ServerConfig::tcp_port)
-        .def_readwrite("udp_port", &probe::ServerConfig::udp_port)
         .def_readwrite("max_requests", &probe::ServerConfig::max_requests)
         .def_readwrite("max_bytes", &probe::ServerConfig::max_bytes)
         .def_readwrite("max_body_bytes", &probe::ServerConfig::max_body_bytes)
         .def_readwrite("decision_timeout_ms", &probe::ServerConfig::decision_timeout_ms)
-        .def_readwrite("file_path", &probe::ServerConfig::file_path)
         .def_readwrite("coalesce_notifications", &probe::ServerConfig::coalesce_notifications)
-        .def_readwrite("cooperative_compression", &probe::ServerConfig::cooperative_compression)
-        .def_readwrite("inline_compression", &probe::ServerConfig::inline_compression)
-        .def_readwrite("upstream_ports", &probe::ServerConfig::upstream_ports)
-        .def_readwrite("application_routes", &probe::ServerConfig::application_routes)
         .def_readwrite("generate_date_header", &probe::ServerConfig::generate_date_header)
         .def_readwrite("max_response_bytes", &probe::ServerConfig::max_response_bytes)
-        .def_readwrite("native_json", &probe::ServerConfig::native_json)
         .def_readwrite("application_dispatch_all", &probe::ServerConfig::application_dispatch_all)
         .def_readwrite("probe_headers", &probe::ServerConfig::probe_headers)
         .def_readwrite("http_host", &probe::ServerConfig::http_host)
@@ -540,8 +373,6 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("body_window_bytes", &probe::ServerConfig::body_window_bytes)
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
         .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors);
-    m.attr("zlib_runtime_version") = ::zlibVersion();
-    m.attr("zlib_header_version") = ZLIB_VERSION;
     // Sanic's parse_multipart_form for the forms native/multipart.hh accepts:
     // (fields, files) dicts of lists, file parts as file_type(type, body, name);
     // None means Sanic's parser decides.
@@ -573,51 +404,9 @@ PYBIND11_MODULE(_native, m) {
         }
         return py::make_tuple(fields, files);
     });
-    m.def("compression_reservation", &probe::compression_reservation);
-    m.def("native_compress", [](py::bytes input, int level) {
-        probe::validate_level(level);
-        auto start = probe::clock_ns();
-        std::string owned = input;
-        auto copied = probe::clock_ns();
-        probe::WorkResult r;
-        { py::gil_scoped_release release; r = probe::compress_native(owned, level); }
-        r.metrics.input_copy_ns = copied - start;
-        r.metrics.submitted_ns = copied;
-        start = probe::clock_ns();
-        auto output = py::bytes(r.payload);
-        r.metrics.output_copy_ns = probe::clock_ns() - start;
-        return py::make_tuple(std::move(output), metrics_dict(r.metrics));
-    }, py::arg("input"), py::arg("level") = 6);
-    m.def("native_wait", [](unsigned milliseconds) {
-        probe::WorkResult r;
-        { py::gil_scoped_release release; r = probe::wait_native(milliseconds); }
-        return py::make_tuple(py::bytes(r.payload), metrics_dict(r.metrics));
-    });
-    m.def("copy_roundtrip", [](py::bytes payload) {
-        std::string owned = payload;
-        return py::bytes(owned);
-    }, "Synchronous two-copy diagnostic baseline; no Seastar scheduling.");
     py::class_<probe::Runtime>(m, "Runtime")
-        .def(py::init<std::vector<int>, size_t, size_t, std::vector<int>, probe::ServerConfig, std::string>(),
-             py::arg("cpus"), py::arg("max_pending"), py::arg("max_bytes"), py::arg("worker_cpus") = std::vector<int>{},
-             py::arg("server") = probe::ServerConfig{}, py::arg("reactor_backend") = std::string{})
-        .def("drain_requests", [](probe::Runtime& r, size_t count) {
-            auto events = r.drain_requests(count);
-            py::list out;
-            for (const auto& e : events) {
-                py::object body = e.copied ? py::object(py::bytes(e.body)) : py::object(py::none());
-                if (e.route == "application") {
-                    py::tuple headers(e.headers.size());
-                    for (size_t i = 0; i < e.headers.size(); ++i)
-                        headers[i] = py::make_tuple(py::bytes(e.headers[i].first), py::bytes(e.headers[i].second));
-                    out.append(py::make_tuple(e.id, e.shard, e.method, e.route, e.body_size, body,
-                                              e.parameter, e.parent, py::bytes(e.target), std::move(headers)));
-                } else {
-                    out.append(py::make_tuple(e.id, e.shard, e.method, e.route, e.body_size, body, e.parameter, e.parent));
-                }
-            }
-            return out;
-        })
+        .def(py::init<std::vector<int>, probe::ServerConfig, std::string>(),
+             py::arg("cpus"), py::arg("server") = probe::ServerConfig{}, py::arg("reactor_backend") = std::string{})
         .def("drain_requests_owned", [](probe::Runtime& r, size_t count, py::object connections) {
             auto events = r.drain_requests(count);
             // Framework connections are tracked here, without Python events: the
@@ -676,7 +465,7 @@ PYBIND11_MODULE(_native, m) {
                     }
                 } else {
                     py::object body = e.copied ? py::object(py::bytes(e.body)) : py::object(py::none());
-                    // Latin-1 cannot fail (a probe route's parameter is a raw query value).
+                    // Latin-1 decodes any byte: it cannot fail.
                     item = py::make_tuple(e.id, e.shard, decode_latin1(e.method), decode_latin1(e.route),
                                           e.body_size, std::move(body), decode_latin1(e.parameter), e.parent);
                 }
@@ -689,60 +478,6 @@ PYBIND11_MODULE(_native, m) {
             // signal handler) while building this list loses the batch's rest.
             return out;
         }, py::arg("count"), py::arg("connections") = py::none())
-        .def("resolve_request", [](probe::Runtime& r, uint64_t id, unsigned shard, int code, py::bytes body, bool retire) {
-            std::string owned = body;
-            py::gil_scoped_release release;
-            r.resolve_request(id, shard, code, std::move(owned), retire);
-        }, py::arg("id"), py::arg("shard"), py::arg("code"), py::arg("body"), py::arg("retire") = false)
-        .def("resolve_requests", [](probe::Runtime& r, py::list items) {
-            std::vector<probe::RequestDecision> owned;
-            owned.reserve(items.size());
-            for (auto value : items) {
-                auto item = py::cast<py::tuple>(value);
-                if (item.size() != 4 && item.size() != 5)
-                    throw py::value_error("decision must contain id, shard, code, body, optional retire");
-                if (!py::isinstance<py::bytes>(item[3])) throw py::type_error("decision body must be bytes");
-                if (item.size() == 5 && !py::isinstance<py::bool_>(item[4]))
-                    throw py::type_error("retire must be bool");
-                owned.push_back({py::cast<uint64_t>(item[0]), py::cast<unsigned>(item[1]),
-                                 py::cast<int>(item[2]), py::cast<std::string>(item[3]),
-                                 item.size() == 5 && py::cast<bool>(item[4])});
-            }
-            // Convert the entire batch under the GIL. No Python object enters a reactor.
-            py::gil_scoped_release release;
-            r.resolve_requests(std::move(owned));
-        })
-        .def("resolve_http_responses", [](probe::Runtime& r, py::list items) {
-            std::vector<probe::RequestDecision> owned;
-            owned.reserve(items.size());
-            auto latin1 = [](py::handle value) -> std::string {
-                if (!py::isinstance<py::str>(value)) throw py::type_error("HTTP headers must be str pairs");
-                auto* encoded = PyUnicode_AsLatin1String(value.ptr());
-                if (!encoded) throw py::error_already_set();
-                return py::reinterpret_steal<py::bytes>(encoded).cast<std::string>();
-            };
-            for (auto value : items) {
-                auto item = py::cast<py::tuple>(value);
-                if (item.size() != 5)
-                    throw py::value_error("HTTP response must contain id, shard, status, body, headers");
-                if (!py::isinstance<py::int_>(item[2]) || py::isinstance<py::bool_>(item[2]))
-                    throw py::type_error("HTTP status must be int");
-                if (!py::isinstance<py::bytes>(item[3])) throw py::type_error("HTTP body must be bytes");
-                probe::RequestDecision decision{py::cast<uint64_t>(item[0]), py::cast<unsigned>(item[1]),
-                    py::cast<int>(item[2]), py::cast<std::string>(item[3]), true};
-                for (auto raw_pair : py::reinterpret_borrow<py::iterable>(item[4])) {
-                    auto pair = py::cast<py::tuple>(raw_pair);
-                    if (pair.size() != 2) throw py::value_error("HTTP header must contain name and value");
-                    decision.headers.emplace_back(latin1(pair[0]), latin1(pair[1]));
-                }
-                if (!probe::valid_http_response(decision.code, decision.headers))
-                    throw py::value_error("invalid HTTP status or response header");
-                owned.push_back(std::move(decision));
-            }
-            // Convert/validate all owned values before releasing the GIL.
-            py::gil_scoped_release release;
-            r.resolve_requests(std::move(owned));
-        })
         .def("resolve_http_responses_checked", [](probe::Runtime& r, py::list items,
                                                   size_t max_response_bytes, bool bytes_headers,
                                                   bool no_body_statuses) {
@@ -811,27 +546,7 @@ PYBIND11_MODULE(_native, m) {
             return d;
         })
         .def("fd", &probe::Runtime::fd)
-        // Bound class arguments are copied while the GIL is held: with
-        // call_guard the copy would read the Python-owned object without it.
-        .def("submit_policy", [](probe::Runtime& r, uint64_t id, const probe::NativePolicy& policy) {
-            auto owned = policy;
-            py::gil_scoped_release release;
-            return r.submit_policy(id, owned);
-        })
-        .def("submit", [](probe::Runtime& r, uint64_t id, py::bytes payload, uint64_t delay) {
-            std::string owned = payload;
-            py::gil_scoped_release release;
-            return r.submit(id, std::move(owned), delay);
-        })
-        .def("submit_work", [](probe::Runtime& r, uint64_t id, py::bytes payload, int operation, int parameter) {
-            probe::Metrics m;
-            auto start = probe::clock_ns();
-            std::string owned = payload;
-            m.input_copy_ns = probe::clock_ns() - start;
-            m.submitted_ns = probe::clock_ns();
-            py::gil_scoped_release release;
-            return r.submit_work(id, std::move(owned), operation, parameter, m);
-        })
+        .def("clear_notification", &probe::Runtime::clear_notification)
         .def("submit_file", [](probe::Runtime& r, uint64_t id, int operation, std::string path,
                                uint64_t offset, int64_t length) {
             // The shard opens it as a C string, which would end at a NUL: refused
@@ -864,42 +579,13 @@ PYBIND11_MODULE(_native, m) {
             }
             return result;
         })
-        .def("drain", [](probe::Runtime& r, size_t count) {
-            std::vector<probe::Completion> items;
-            { py::gil_scoped_release release; items = r.drain(count); }
-            py::list result;
-            for (auto& c : items) {
-                auto start = probe::clock_ns();
-                auto output = py::bytes(c.payload);
-                c.metrics.output_copy_ns = probe::clock_ns() - start;
-                result.append(py::make_tuple(c.id, std::move(output), c.pid, c.tid, c.shard, c.error, metrics_dict(c.metrics)));
-            }
-            return result;
-        })
         .def("stats", [](const probe::Runtime& r) {
             auto s = r.stats();
             py::dict d;
-            d["pending_requests"] = s.pending_requests;
-            d["pending_bytes"] = s.pending_bytes;
-            d["queued_completions"] = s.queued_completions;
             d["live_workers"] = s.live_workers;
             d["state"] = s.state;
-            d["completed"] = s.completed;
-            d["rejected"] = s.rejected;
             d["error"] = s.error;
-            d["pool_queued"] = s.pool_queued;
-            d["pool_active"] = s.pool_active;
-            d["pool_live"] = s.pool_live;
             return d;
-        })
-        .def("workers", [](const probe::Runtime& r) {
-            py::list out;
-            for (const auto& w : r.workers()) {
-                py::dict d;
-                d["tid"] = w.tid; d["affinity"] = w.affinity;
-                out.append(d);
-            }
-            return out;
         })
         .def("shards", [](const probe::Runtime& r) {
             py::list out;
@@ -911,6 +597,8 @@ PYBIND11_MODULE(_native, m) {
             }
             return out;
         })
+        // Bound class arguments are copied while the GIL is held: with
+        // call_guard the copy would read the Python-owned object without it.
         .def("start_server", [](probe::Runtime& r, const probe::ServerConfig& server) {
             auto owned = server;
             py::gil_scoped_release release;

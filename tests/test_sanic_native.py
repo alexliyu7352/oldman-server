@@ -1,7 +1,6 @@
 """Direct Sanic processing over real Seastar sockets, isolated per test."""
 import asyncio
 import contextvars
-from dataclasses import replace
 import threading
 
 import aiohttp
@@ -107,7 +106,7 @@ def test_native_sanic_send_snapshot_waits_for_chain_and_preserves_terminal_prior
     uvloop.run(scenario())
 
 
-def test_native_sanic_batch_owns_final_responses_and_isolates_invalid_siblings():
+def test_native_sanic_final_responses_isolate_invalid_siblings():
     OldmanServer, _, serve = api()
     async def scenario():
         app = OldmanServer("native_batch", configure_logging=False)
@@ -124,14 +123,13 @@ def test_native_sanic_batch_owns_final_responses_and_isolates_invalid_siblings()
             final = raw(f"final-{value}".encode(), status=201,
                         headers={"X-Value": str(value), "X-Latin": "café"})
             if value == 3:
-                # Rejected by the shared native validator, after Sanic finishes
-                # (a control character; a Connection field is framed by the
-                # host on this path too, as on the checked one).
+                # Rejected by the native validator, after Sanic finishes (a
+                # control character; a Connection field is framed by the host).
                 final.headers["X-Bad"] = "a\x01b"
             retained.append(final)
             return final
         cfg = config(application_dispatch_all=True, decision_timeout_ms=3000)
-        async with serve(app, cfg, native_responses=True) as engine:
+        async with serve(app, cfg) as engine:
             flush = engine._flush_application
             engine._flush_application = held.set
             async with aiohttp.ClientSession() as client:
@@ -164,15 +162,12 @@ def test_native_sanic_batch_owns_final_responses_and_isolates_invalid_siblings()
                         assert reply[1]["X-Latin"] == "café"
             await quiescent(engine)
             stats = engine.server_stats()
-            assert stats.get("native_response_queued", 0) == 8
-            assert stats["native_response_flushed"] == 8
-            assert stats["native_response_json_encoded"] == stats["native_response_json_fallback"] == 0
             assert stats["python_application_errors"] == 1
         await quiescent(engine)
     uvloop.run(scenario())
 
 
-def test_native_sanic_batch_drops_reply_after_native_deadline_and_recovers():
+def test_native_sanic_drops_reply_after_native_deadline_and_recovers():
     OldmanServer, _, serve = api()
     async def scenario():
         app = OldmanServer("native_batch_late", configure_logging=False)
@@ -180,7 +175,7 @@ def test_native_sanic_batch_drops_reply_after_native_deadline_and_recovers():
         async def handler(req):
             return text("ok")
         cfg = config(application_dispatch_all=True, decision_timeout_ms=100)
-        async with serve(app, cfg, native_responses=True) as engine:
+        async with serve(app, cfg) as engine:
             held = asyncio.Event()
             flush = engine._flush_application
             engine._flush_application = held.set
@@ -198,29 +193,8 @@ def test_native_sanic_batch_drops_reply_after_native_deadline_and_recovers():
                 assert (await exchange(client, cfg.server.http_port, "/"))[0::2] == (200, b"ok")
             await quiescent(engine)
             stats = engine.server_stats()
-            assert stats.get("native_response_queued", 0) == 2
-            assert stats["native_response_flushed"] == 2
             assert stats["python_application_errors"] == 0
             assert engine._application_terminal == set() and not engine._application_tasks
-        await quiescent(engine)
-    uvloop.run(scenario())
-
-
-def test_native_sanic_default_uses_the_checked_response_path():
-    OldmanServer, _, serve = api()
-    async def scenario():
-        app = OldmanServer("native_batch_default", configure_logging=False)
-        @app.get("/")
-        async def handler(req):
-            return text("default")
-        cfg = config(application_dispatch_all=True)
-        async with serve(app, cfg) as engine:
-            async with aiohttp.ClientSession() as client:
-                assert (await exchange(client, cfg.server.http_port, "/"))[0::2] == (200, b"default")
-            await quiescent(engine)
-            stats = engine.server_stats()
-            assert stats.get("native_response_queued", 0) == 0
-            assert stats["python_application_finished"] == 1
         await quiescent(engine)
     uvloop.run(scenario())
 
@@ -295,8 +269,7 @@ def test_native_sanic_routes_middleware_context_metadata_and_real_await():
         runner = web.AppRunner(upstream)
         await runner.setup()
         upstream_port = free_port()
-        cfg = replace(config(application_dispatch_all=True, decision_timeout_ms=3000),
-                      batch_decisions=True, retire_http_contexts=True)
+        cfg = config(application_dispatch_all=True, decision_timeout_ms=3000)
         try:
             await web.TCPSite(runner, "127.0.0.1", upstream_port).start()
             @app.get("/proxy")

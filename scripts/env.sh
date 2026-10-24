@@ -34,4 +34,3 @@ export LIBRARY_PATH="$PROBE_DEPS/toolchain/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export PKG_CONFIG_PATH="$PROBE_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 # Use host headers/glibc; a dependency prefix is not an alternate OS sysroot.
 unset PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_LIBDIR
-export PYTHONPATH="$PROBE_ROOT/python:$PROBE_ROOT/build${PYTHONPATH:+:$PYTHONPATH}"

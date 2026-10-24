@@ -18,10 +18,10 @@ import traceback
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT/'scripts'))
 from probes.sanic_boundary import run as boundary
+from probes.sanic_boundary.run import atomic_json, read_response
 from probes.sanic_boundary.application import EXPECTED, INPUT, concurrency
 from probes.sanic_comparison.server import verify_stock, profile_records
 from probes.application_lifecycle.inputs import runtime_fingerprint, process_identity, check_identity
-from probes.framework_json.run import atomic_json, read_response
 from probes.sanic_spike.run import free_port
 from scripts.cpu_budget import _cpus, describe_cpu, cpu_snapshot, require_unthrottled
 from run_http_benchmarks import read_json, read_line, send
@@ -104,14 +104,14 @@ def validate_counts(row):
     for stats, closed in [(w['after'], False) for w in workers] + [(w, True) for w in row['closed']['workers']]:
         if stats['active'] or stats['errors']:
             raise ValueError('active work or errors remain')
-        if row['mode'] in ('candidate', 'app'):
+        if row['mode'] == 'candidate':
             # At the end of the window the shards may still be reporting
             # connections the client is closing (queued application_closed
             # events); requests in flight show in the other counters.
             keys = boundary.ZERO if closed else [k for k in boundary.ZERO if k != 'queued_decisions']
             if any(stats['engine_'+k] for k in keys) or stats['engine_python_application_errors']:
                 raise ValueError('native resources or Python errors remain')
-    if row['mode'] in ('candidate', 'app'):
+    if row['mode'] == 'candidate':
         for w in workers:
             count = client['server_pids'][str(w['pid'])]
             if any(w['delta']['engine_'+k] != count for k in
@@ -161,13 +161,8 @@ def verify_ready(ready, mode, server, layout, runtime, workers=1):
                 worker['sanic_file'] != str(package) or
                 worker['sanic_sha256'] != hashlib.sha256(package.read_bytes()).hexdigest()):
                 raise ValueError('loaded Sanic/runtime mismatch')
-            if mode in ('candidate', 'app'):
+            if mode == 'candidate':
                 boundary.verify_modules(worker['loaded'])
-                if mode == 'app':
-                    path = ROOT/'python/seastar_http.py'
-                    if worker.get('app_source') != {'path': str(path.resolve()),
-                            'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}:
-                        raise ValueError('loaded App source mismatch')
     if [w['pid'] for w in ready['workers']] != pids:
         raise ValueError('worker metadata count/order mismatch')
     for index, worker in enumerate(ready['workers']):
@@ -179,10 +174,10 @@ def verify_ready(ready, mode, server, layout, runtime, workers=1):
             # Candidate worker `index`: its share of the server CPUs, Python first.
             size = len(layout['server']) // workers
             group = layout['server'][index * size:(index + 1) * size]
-            if mode in ('candidate', 'app') and (worker['main_cpu'] != group[0] or
+            if mode == 'candidate' and (worker['main_cpu'] != group[0] or
                     os.sched_getaffinity(worker['pid']) != {group[0]}):
                 raise ValueError('candidate main thread affinity mismatch')
-            cpus = group[1:] if mode in ('candidate', 'app') else layout['server']
+            cpus = group[1:] if mode == 'candidate' else layout['server']
             if len(worker['shards']) != len(cpus): raise ValueError('shard count mismatch')
             for shard, cpu in zip(worker['shards'], cpus, strict=True):
                 if os.sched_getaffinity(shard['tid']) != {cpu}: raise ValueError('shard affinity mismatch')
@@ -231,11 +226,11 @@ def execute(out, mode, workload, *, layout, budget, runtime, warmup, seconds, ra
             diagnostic='none', workers=1, scale=1):
     if diagnostic not in ('none', 'cprofile') or not math.isfinite(rate) or rate < 0:
         raise ValueError('invalid diagnostic/rate')
-    if mode not in (*MODES, 'app') or (mode == 'app' and workload != 'small'):
+    if mode not in MODES:
         raise ValueError('unsupported service/workload')
     if workers != 1 and mode != 'candidate':
         raise ValueError('worker processes are a candidate setting')
-    if diagnostic == 'cprofile' and (mode not in ('candidate', 'stock', 'app') or rate <= 0):
+    if diagnostic == 'cprofile' and (mode not in ('candidate', 'stock') or rate <= 0):
         raise ValueError('profiling requires a Python service and a positive offered rate')
     out.mkdir(parents=True, exist_ok=False)
     (out/'expected.bin').write_bytes(EXPECTED[workload]); (out/'input.bin').write_bytes(INPUT)

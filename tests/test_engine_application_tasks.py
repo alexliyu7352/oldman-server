@@ -20,12 +20,11 @@ class FakeRuntime:
         os.eventfd_write(self.fd_, 1)  # Engine startup waits for state 1.
 
     def fd(self): return self.fd_
-    def drain(self, count):
+    def clear_notification(self):
         try:
             os.eventfd_read(self.fd_)
         except BlockingIOError:
             pass
-        return ()
     def drain_requests_owned(self, count, connections=None):
         events, self.events = self.events, []
         return events

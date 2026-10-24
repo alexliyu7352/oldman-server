@@ -1,22 +1,18 @@
 #pragma once
-#include "work.hh"
 #include <seastar/core/future.hh>
 #include <seastar/core/alien.hh>
 #include <atomic>
 #include <functional>
 #include <map>
+#include <string>
+#include <vector>
 
 namespace probe {
 struct ServerConfig {
-    unsigned http_port = 0, tcp_port = 0, udp_port = 0;
+    unsigned http_port = 0;
     size_t max_requests = 256, max_bytes = 64 * 1024 * 1024, max_body_bytes = 1024 * 1024;
     unsigned decision_timeout_ms = 1000;
-    std::string file_path;
     bool coalesce_notifications = false;
-    bool cooperative_compression = false;
-    bool inline_compression = false;
-    std::vector<unsigned> upstream_ports; // Bounded loopback HTTP experiment.
-    std::vector<std::pair<std::string, std::string>> application_routes;
     bool generate_date_header = false;
     size_t max_response_bytes = 65536;
     // Diagnostic response headers on the framework host: "all" (pid, shard,
@@ -60,9 +56,9 @@ struct ServerConfig {
     // framework renders them, as Sanic's error handler does); otherwise the host
     // answers them with a plain error response.
     bool framework_errors = false;
-    bool native_json = false;
-    bool application_dispatch_all = false; // External framework owns all HTTP routing.
-    bool enabled() const { return http_port || tcp_port || udp_port || listen_fd >= 0 || worker_listen_fd >= 0; }
+    // The framework owns all HTTP routing; required with any listener.
+    bool application_dispatch_all = false;
+    bool enabled() const { return http_port || listen_fd >= 0 || worker_listen_fd >= 0; }
 };
 // One worker process's line in the shared accept counts. connections: the
 // owning process's pid in the high 32 bits and its open connections in the low
@@ -123,13 +119,6 @@ struct RequestDecision {
 bool valid_http_response(int status,
     const std::vector<std::pair<std::string, std::string>>& headers, bool no_body_statuses = false,
     bool upgrade = false);
-// A deliberately small, typed native operation contract, not a Python compiler.
-// Each shard owns a copy; version acknowledges an update on every shard.
-struct NativePolicy {
-    uint64_t version = 0;
-    bool allow_fixed = false, allow_file = false, allow_compress = false;
-    size_t max_payload_bytes = 1024 * 1024;
-};
 struct ServerSnapshot {
     std::map<std::string, uint64_t> totals;
     std::vector<std::map<std::string, uint64_t>> shards;
@@ -138,17 +127,14 @@ class NetworkServer {
     struct Impl;
     std::unique_ptr<Impl> p;
 public:
-    using Compress = std::function<seastar::future<WorkResult>(std::string, int)>;
     NetworkServer(ServerConfig config, unsigned shards, seastar::alien::instance& alien,
-                  std::function<void()> notify, Compress compress);
+                  std::function<void()> notify);
     ~NetworkServer();
     seastar::future<> start();
     seastar::future<> stop();
     // A graceful stop's first step: see Service::drain.
     seastar::future<> drain();
-    seastar::future<> install_policy(NativePolicy policy);
     std::vector<RequestEvent> drain(size_t count);
-    void resolve(uint64_t id, unsigned shard, int decision, std::string body, bool retire = false);
     void resolve_batch(std::vector<RequestDecision> decisions);
     bool has_events() const;
     ServerSnapshot snapshot() const;
