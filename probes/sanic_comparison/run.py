@@ -236,8 +236,7 @@ def execute(out, mode, workload, *, layout, budget, runtime, warmup, seconds, ra
     (out/'expected.bin').write_bytes(EXPECTED[workload]); (out/'input.bin').write_bytes(INPUT)
     port = free_port()
     # Both services of a comparison get the same client: `scale` times the
-    # single-process connections (the candidate's worker count), so each
-    # candidate process has as many connections as one process alone has.
+    # single-process connections (connection_scale).
     row = dict(mode=mode, workload=workload, warmup=warmup, seconds=seconds, rate=rate, diagnostic=diagnostic,
                concurrency=concurrency(workload) * scale, workers=workers,
                layout=layout, commands=[], validated=False)
@@ -327,6 +326,13 @@ def case_order(*, python_only=False, smoke=False):
     return order
 
 
+def connection_scale(server_cores):
+    """The client's connections, in single-process units: twice them on four
+    server cores (the multi-worker comparison), whatever the candidate's
+    worker count, so that its layouts meet the same load."""
+    return 2 if server_cores == 4 else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out',type=Path,required=True)
@@ -336,7 +342,8 @@ def main():
     parser.add_argument('--server-cores',type=int,default=3,choices=(3,4),
                         help='server CPUs; stock runs one worker on each')
     parser.add_argument('--workers',type=int,default=1,
-                        help='candidate worker processes, splitting the server CPUs evenly')
+                        help='candidate worker processes, splitting the server CPUs evenly (one CPU '
+                             'each: the same-thread mode)')
     args = parser.parse_args(); out = args.out.resolve(); out.mkdir(parents=True,exist_ok=False)
     if args.workers != 1 and not args.python_only:
         raise SystemExit('candidate workers compare against stock only (--python-only)')
@@ -354,7 +361,7 @@ def main():
         for key,mode,workload in order:
             row = execute(out/key,mode,workload,layout=layout,budget=budget,runtime=runtime,
                 warmup=.1 if args.smoke else 2,seconds=.25 if args.smoke else 5,
-                workers=args.workers if mode == 'candidate' else 1,scale=args.workers)
+                workers=args.workers if mode == 'candidate' else 1,scale=connection_scale(args.server_cores))
             print(json.dumps({'key':key,'rps':row['client']['rps'],
                   'cpu_us':row['service_cpu_us_per_request'],'foreign_cores':row['foreign_cores'],
                   'pressure':row['pressure']}),flush=True)

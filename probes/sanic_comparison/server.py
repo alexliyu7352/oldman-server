@@ -19,8 +19,8 @@ def native_config(port, cpus, listen_fd=-1, accept=None):
     # As an application would set NATIVE_REACTOR_BACKEND (calibrate.py's
     # mode:workload:OLDMAN_SERVER_NATIVE_REACTOR_BACKEND=io_uring).
     backend = os.environ.get('OLDMAN_SERVER_NATIVE_REACTOR_BACKEND')
-    # NATIVE_SAME_THREAD likewise: the shard on the Python thread, one CPU per process.
-    same_thread = os.environ.get('OLDMAN_SERVER_NATIVE_SAME_THREAD', '').lower() in ('1', 'true', 'yes')
+    # A worker of one CPU runs its shard on the Python thread (NATIVE_SAME_THREAD).
+    same_thread = len(cpus) == 1
     return Config(shard_cpus=tuple(cpus[:1] if same_thread else cpus[1:]), same_thread=same_thread,
                   **({} if backend is None else {'reactor_backend': backend}),
                   server=ServerConfig(
@@ -267,12 +267,12 @@ def main():
     args.requests, args.bytes = 1024, 64*1024*1024
     cpus = sorted(os.sched_getaffinity(0))
     # Stock: one worker per CPU. Candidate: `workers` processes, each a Python
-    # CPU and its shard CPUs (the layout Sanic's NATIVE_SERVER workers get).
+    # CPU and its shard CPUs, or one CPU each (the layouts Sanic's NATIVE_SERVER
+    # workers get).
     size = len(cpus) // args.workers
-    # Same-thread workers take one CPU each.
-    smallest = 1 if os.environ.get('OLDMAN_SERVER_NATIVE_SAME_THREAD', '').lower() in ('1', 'true', 'yes') else 2
+    # A candidate worker of one CPU runs same-thread (as Sanic's workers would on these CPUs).
     if (len(cpus) not in (3, 4) or (args.workers > 1 and args.mode != 'candidate')
-            or args.workers < 1 or size * args.workers != len(cpus) or size < smallest):
+            or args.workers < 1 or size * args.workers != len(cpus)):
         raise ValueError('three or four service CPUs, split evenly between candidate workers')
     if args.mode == 'stock':
         comparison.prefork(args, cpus)

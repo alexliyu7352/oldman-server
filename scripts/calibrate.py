@@ -5,9 +5,9 @@ Prints RPS, service and main-thread CPU per request, per-thread cores, the cores
 other processes used on the window's CPUs and their SMT siblings (foreign_cores),
 and the share of the window in which some task stalled on CPU, memory or IO (pressure).
 
-usage: calibrate.py [--server-cores 4 --workers 2] OUT_DIR mode:workload[:ENVVAR=value] ...
+usage: calibrate.py [--server-cores 4 --workers 4] OUT_DIR mode:workload[:ENVVAR=value] ...
 (--server-cores: server CPUs, stock running a worker on each; --workers: candidate
-worker processes splitting them.)
+worker processes splitting them, one CPU each being the same-thread mode.)
 """
 import argparse
 import json
@@ -49,7 +49,8 @@ def main():
             os.environ[name] = value
         row = run.execute(out / f"{mode}-{workload}-{time.time_ns()}", mode, workload, layout=layout,
                           budget=budget, runtime=runtime, warmup=2, seconds=5,
-                          workers=args.workers if mode == "candidate" else 1, scale=args.workers)
+                          workers=args.workers if mode == "candidate" else 1,
+                          scale=run.connection_scale(args.server_cores))
         seconds, pids = row["client"]["seconds"], row["ready"]["pids"]
         threads, main_ticks = [], 0
         for pid in pids:
