@@ -248,6 +248,11 @@ WORKERS_APP = textwrap.dedent('''
         print("RESULTS " + json.dumps(results), flush=True)
         if MARK and not os.path.exists(MARK):
             open(MARK, "w").close()
+            # The restarted workers' drive waits for both of them, not for
+            # the files this generation left.
+            for name in os.listdir():
+                if name.startswith("ready-"):
+                    os.remove(name)
             app.m.restart(all_workers=True)
         else:
             app.m.terminate()
@@ -332,8 +337,9 @@ def test_workers_serve_natively_on_their_own_cpus(short_dir):
 def test_restarted_workers_serve_natively_again(short_dir):
     port = free_port()
     (first, second), _ = run_workers(short_dir, {"PORT": str(port), "RESTART_MARK": str(short_dir / "mark")})
-    for results in (first, second):
-        assert {result["worker"] for result in results} == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
+    for round_, results in enumerate((first, second)):
+        workers = {result["worker"] for result in results}
+        assert workers == {"Oldman-Server-0-0", "Oldman-Server-1-0"}, f"round {round_}"
         check_worker_cpus(results)
     # New processes, on the same CPU groups.
     assert not {result["pid"] for result in first} & {result["pid"] for result in second}
