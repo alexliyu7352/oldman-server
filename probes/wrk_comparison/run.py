@@ -74,12 +74,13 @@ def tree_ticks(root):
 
 
 def wait_quiet(limit=1800):
-    """Until the whole machine has been under one busy core for 30 s (at most `limit` s)."""
+    """Until the whole machine has been under two busy cores for 30 s (at most
+    `limit` s): a desktop's browser alone often keeps one busy."""
     deadline, quiet = time.monotonic() + limit, 0
     everything = set(range(os.cpu_count()))
     while quiet < 3 and time.monotonic() < deadline:
         before = busy(everything); time.sleep(10)
-        quiet = quiet + 1 if cores(before, busy(everything)) < 1 else 0
+        quiet = quiet + 1 if cores(before, busy(everything)) < 2 else 0
 
 
 def wrk(port, path, connections, seconds, client):
