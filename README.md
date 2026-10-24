@@ -193,6 +193,7 @@ OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SAME_THREAD=true .venv/bin
 OLDMAN_SERVER_NATIVE_SAME_THREAD=true python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>   # 原生主机测试，同线程模式
 python scripts/calibrate.py build/calib-<目录> candidate:small candidate:body      # 服务端吞吐与主线程 µs
 python probes/sanic_comparison/run.py --python-only --out build/compare-<新目录>     # 阶段验收：与原版 Sanic 配对对照
+python probes/wrk_comparison/run.py --out build/wrk-<新目录> --quiet                # 4 核同机：各布局、裸函数（原生主机自己的上限）与原版，wrk 压测
 ```
 
 ## 发布
