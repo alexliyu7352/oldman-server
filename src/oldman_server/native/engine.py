@@ -110,11 +110,14 @@ class Config:
     # The shards' I/O: "epoll" (or "") or "io_uring", which falls back to
     # epoll, with a warning, where the system refuses it.
     reactor_backend: str = "epoll"
+    # No shard thread: the one shard runs on this event loop's thread, which
+    # polls it (shard_cpus: that thread's one CPU, for the file threads; epoll).
+    same_thread: bool = False
 
 
 # The native runtime starts once per process. Engines opened with
 # persistent=True share one and start/stop only its network server:
-# (runtime, shard CPUs, backend).
+# (runtime, shard CPUs, backend, same-thread mode).
 _persistent = None
 # A process forked after the runtime started (Sanic's "fork" start method, say)
 # has the runtime's memory but not its threads, and a process starts one
@@ -160,15 +163,18 @@ def _persistent_runtime(config):
     """The process's persistent runtime, created on first use: (runtime, created)."""
     global _persistent
     if _persistent is None:
-        runtime = _new_runtime(list(config.shard_cpus), _native.ServerConfig(), config.reactor_backend)
-        _persistent = (runtime, tuple(config.shard_cpus), config.reactor_backend)
+        runtime = _new_runtime(list(config.shard_cpus), _native.ServerConfig(), config.reactor_backend,
+                               config.same_thread)
+        _persistent = (runtime, tuple(config.shard_cpus), config.reactor_backend, config.same_thread)
         atexit.register(_stop_persistent_runtime)
         return runtime, True
-    runtime, shards, backend = _persistent
+    runtime, shards, backend, same_thread = _persistent
     if shards != tuple(config.shard_cpus):
         raise ValueError("the persistent native runtime already runs on other CPUs")
     if backend != config.reactor_backend:
         raise ValueError(f"the persistent native runtime already runs the {backend or 'default'} reactor backend")
+    if same_thread != config.same_thread:
+        raise ValueError("the persistent native runtime already runs in the other threading mode")
     return runtime, False
 
 
@@ -286,6 +292,9 @@ class Engine:
         if (not config.shard_cpus or len(set(config.shard_cpus)) != len(config.shard_cpus)
                 or not set(config.shard_cpus) <= os.sched_getaffinity(0)):
             raise ValueError("shard_cpus must be distinct available CPUs")
+        if config.same_thread and (len(config.shard_cpus) != 1
+                                   or config.reactor_backend not in ("epoll", "")):
+            raise ValueError("the same-thread mode takes one CPU and epoll")
         if config.completion_batch <= 0:
             raise ValueError("bounds must be positive")
         if config.server is None:
@@ -356,6 +365,8 @@ class Engine:
         self._abandoned = False  # its server stopped by abandon(); the runtime may serve another
         self._draining = False
         self._reader_registered = False
+        self._same_thread = config.same_thread
+        self._reactor_fd = -1  # same-thread mode: the shard's reactor, while this loop watches it
         self._application_handler = application_handler
         self._application_error_handler = application_error_handler
         self.application_connections = (application_connections
@@ -401,23 +412,28 @@ class Engine:
         if self._opened is not None:
             self._opened(self)
         try:
-            self._native = _new_runtime(list(c.shard_cpus), server, c.reactor_backend)
+            self._native = _new_runtime(list(c.shard_cpus), server, c.reactor_backend, c.same_thread)
             self.notification_fd = self._native.fd()
             self._loop.add_reader(self.notification_fd, self._drain)
             self._reader_registered = True
+            if self._same_thread:
+                self._loop.add_reader(self._native.reactor_fd(), self._pump)
+                self._reactor_fd = self._native.reactor_fd()
             await self._ready
             return self
         except Exception:
             # Registration can fail, so cleanup cannot require a working reader.
             if self._native is not None:
-                if self._reader_registered:
-                    self._loop.remove_reader(self.notification_fd)
-                    self._reader_registered = False
+                self._remove_readers()
+                # The same-thread shard starts and stops only while polled.
+                poll = self._native.poll if self._same_thread else (lambda: None)
                 while self._native.stats()["state"] == 0:
+                    poll()
                     await asyncio.sleep(.001)
                 if self._native.stats()["state"] == 1:
                     self._native.stop()
                 while self._native.stats()["state"] < 3:
+                    poll()
                     await asyncio.sleep(.001)
                 await _off_loop(self._native.join)
                 self._native.close_fd()
@@ -430,14 +446,16 @@ class Engine:
         self._loop.add_reader(self.notification_fd, self._drain)
         self._reader_registered = True
         try:
+            if self._same_thread:
+                self._loop.add_reader(runtime.reactor_fd(), self._pump)
+                self._reactor_fd = runtime.reactor_fd()
             if created:
                 await self._ready  # the runtime reports running through the notification fd
             if self._opened is not None:
                 self._opened(self)
             self._server_generation = await _off_loop(runtime.start_server, server)
         except BaseException:
-            self._loop.remove_reader(self.notification_fd)
-            self._reader_registered = False
+            self._remove_readers()
             raise
         if not self._ready.done():
             self._ready.set_result(None)
@@ -629,6 +647,8 @@ class Engine:
                 bytes_headers=self._application_bytes_headers,
                 no_body_statuses=self.config.server.application_dispatch_all)
             self._decision_stats["python_application_errors"] += invalid
+            if self._same_thread and self._reactor_fd >= 0:
+                self._pump()  # write the responses now
 
     async def _serve_application(self, request_id, shard, request, handler):
         """Queue a complete owned response while the Task still owns its wrapper."""
@@ -826,9 +846,9 @@ class Engine:
         self._native.clear_notification()
         if self._files:
             self._drain_files()
-        for values in self._native.drain_requests_owned(self.config.completion_batch,
-                                                        self.application_connections):
-            self._application_event(values)
+        if self._same_thread:
+            self._native.poll()  # what other threads posted to the shard
+        self._take_requests()
         status = self._native.stats()
         if status["state"] == 1 and not self._ready.done():
             self._ready.set_result(None)
@@ -836,6 +856,24 @@ class Engine:
             self._ready.set_exception(RuntimeError(status["error"]))
         if status["state"] >= 3 and not self._stopped.done():
             self._stopped.set_result(None)
+
+    def _take_requests(self):
+        for values in self._native.drain_requests_owned(self.config.completion_batch,
+                                                        self.application_connections):
+            self._application_event(values)
+
+    def _pump(self):
+        """Same-thread mode: run the shard's ready work, then take what it published."""
+        self._native.poll()
+        self._take_requests()
+
+    def _remove_readers(self):
+        if self._reader_registered:
+            self._loop.remove_reader(self.notification_fd)
+            self._reader_registered = False
+        if self._reactor_fd >= 0:
+            self._loop.remove_reader(self._reactor_fd)
+            self._reactor_fd = -1
 
     def stats(self):
         return self._native.stats()
@@ -893,8 +931,7 @@ class Engine:
                 await self._finish_cancelled(self._cancel_applications())
                 self._reap_applications()
                 self._flush_application()
-            self._loop.remove_reader(self.notification_fd)
-            self._reader_registered = False
+            self._remove_readers()
             self._release_connections()
         # The server stopped: every tunnel is gone; file results are no longer drained.
         for request_id in tuple(self._application_tunnels):
@@ -914,12 +951,11 @@ class Engine:
         if self._close_task is not None and self._close_task.done():
             return
         self._closed = True
-        if self._reader_registered:
-            try:
-                self._loop.remove_reader(self.notification_fd)
-            except Exception:
-                pass  # the loop may already be closed
-            self._reader_registered = False
+        try:
+            self._remove_readers()
+        except Exception:
+            pass  # the loop may already be closed
+        self._reader_registered, self._reactor_fd = False, -1
         if self._persistent:
             self._native.stop_server(self._server_generation)
             self._abandoned = True

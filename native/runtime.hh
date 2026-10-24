@@ -53,6 +53,8 @@ public:
     virtual void stop() = 0;
     virtual void join() = 0;
     virtual void close_fd() = 0;
+    virtual std::size_t poll() = 0;
+    virtual int reactor_fd() const = 0;
 };
 class Runtime {
     std::unique_ptr<RuntimeBackend> p;
@@ -62,7 +64,11 @@ public:
     // reactor_backend: "epoll" or empty (the default), or "io_uring": the
     // io_uring build where this system allows it, else epoll (fallback()
     // says why). Anything else is refused.
-    explicit Runtime(std::vector<int> cpus, ServerConfig server = {}, std::string reactor_backend = {});
+    // same_thread: no shard thread; the one shard's io_context is polled by
+    // the thread that made the runtime (Python's), which waits on reactor_fd()
+    // and calls poll() (`cpus`: that thread's CPU, for the file threads; epoll).
+    explicit Runtime(std::vector<int> cpus, ServerConfig server = {}, std::string reactor_backend = {},
+                     bool same_thread = false);
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
@@ -96,5 +102,10 @@ public:
     void stop() { p->stop(); }
     void join() { p->join(); }
     void close_fd() { p->close_fd(); }
+    // Same-thread mode: runs the shard's ready work (no blocking) and returns
+    // how many handlers ran. Call it when reactor_fd() is readable, after
+    // clear_notification(), and after resolve_requests(); then drain_requests.
+    std::size_t poll() { return p->poll(); }
+    int reactor_fd() const { return p->reactor_fd(); }
 };
 }

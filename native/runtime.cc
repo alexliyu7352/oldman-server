@@ -28,6 +28,19 @@ namespace {
 constexpr const char* backend_name = "io_uring";
 #else
 constexpr const char* backend_name = "epoll";
+// The same-thread mode's poller waits on the shard reactor's epoll descriptor,
+// which asio::detail::epoll_reactor keeps private: the explicit instantiation
+// below reads it (access checking does not apply to its names).
+static_assert(ASIO_VERSION == 103802, "check epoll_reactor::epoll_fd_ in this Asio version");
+template <typename Tag, typename Tag::type Member>
+struct Expose {
+    friend typename Tag::type member(Tag) { return Member; }
+};
+struct ReactorFd {
+    using type = int asio::detail::epoll_reactor::*;
+    friend type member(ReactorFd);
+};
+template struct Expose<ReactorFd, &asio::detail::epoll_reactor::epoll_fd_>;
 #endif
 // Signals go to Python's main thread: the runtime's threads take none.
 void block_signals() {
@@ -154,6 +167,12 @@ FileResult execute_file(uint64_t id, int operation, const std::string& path, uin
 struct Impl {
     std::vector<int> cpus;
     ServerConfig server_config;
+    // No shard thread: the thread that made the runtime polls the one shard's
+    // io_context (Runtime::poll) when its reactor's descriptor is readable.
+    const bool same_thread;
+    std::thread::id poller;  // the thread that made the runtime, in that mode
+    int reactor_descriptor = -1;
+    std::atomic<bool> pollable{false};
     // One io_context per shard, each run by its own thread on its CPU.
     std::vector<std::unique_ptr<asio::io_context>> contexts;
     std::vector<asio::executor_work_guard<asio::io_context::executor_type>> keep_running;
@@ -183,11 +202,28 @@ struct Impl {
     std::condition_variable stopping;
     bool stop_requested = false;  // under mutex
 
-    Impl(std::vector<int> c, ServerConfig config)
-        : cpus(std::move(c)), server_config(std::move(config)),
+    Impl(std::vector<int> c, ServerConfig config, bool same)
+        : cpus(std::move(c)), server_config(std::move(config)), same_thread(same),
           notify_fd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) {
         if (notify_fd < 0) throw std::runtime_error("eventfd creation failed");
         adopt(server_config);
+        if (same_thread) {
+            poller = std::this_thread::get_id();
+            make_polled_context();
+        }
+    }
+    // Same-thread mode: the shard's io_context, made on the polling thread so
+    // that it waits on the reactor before the control thread posts the
+    // server's start. The work guard keeps poll() from stopping it when idle.
+    void make_polled_context() {
+        contexts.push_back(std::make_unique<asio::io_context>(1));
+        keep_running.push_back(asio::make_work_guard(*contexts.back()));
+#ifndef OLDMAN_NATIVE_URING
+        auto& reactor = asio::use_service<asio::detail::epoll_reactor>(*contexts.back());
+        reactor.init_task();
+        reactor_descriptor = reactor.*member(ReactorFd{});
+#endif
+        pollable = true;
     }
     ~Impl() { if (notify_fd >= 0) ::close(notify_fd); }
     void notify() noexcept {
@@ -202,11 +238,19 @@ struct Impl {
     std::unique_ptr<NetworkServer> make_server(ServerConfig config) {
         std::vector<asio::io_context*> shards;
         for (auto& context : contexts) shards.push_back(context.get());
-        return std::make_unique<NetworkServer>(std::move(config), std::move(shards), [this] { notify(); },
-                                               [this](std::function<void()> job) { files->post(std::move(job)); });
+        return std::make_unique<NetworkServer>(
+            std::move(config), std::move(shards), [this] { notify(); },
+            [this](std::function<void()> job) {
+                // The job posts its result to the shard, whose poller hears of
+                // posts from other threads only through the notification.
+                if (same_thread) files->post([this, job = std::move(job)] { job(); notify(); });
+                else files->post(std::move(job));
+            },
+            poller);
     }
     // The shards: each pinned to its CPU and reporting its thread before it runs.
     void start_shards() {
+        if (same_thread) return;  // the context exists; no thread runs it
         std::latch running(std::ptrdiff_t(cpus.size()));
         std::vector<std::exception_ptr> failures(cpus.size());
         shard_info.resize(cpus.size());
@@ -237,6 +281,10 @@ struct Impl {
     void stop_shards() {
         keep_running.clear();
         for (auto& context : contexts) context->stop();
+        if (same_thread) {  // the poller may still call poll(): the context goes with the runtime
+            pollable = false;
+            return;
+        }
         for (auto& thread : shard_threads)
             if (thread.joinable()) thread.join();
         shard_threads.clear();
@@ -307,7 +355,7 @@ void validate_server(const ServerConfig& config) {
 class AsioRuntime final : public RuntimeBackend {
     std::unique_ptr<Impl> p;
 public:
-    AsioRuntime(std::vector<int> cpus, ServerConfig config);
+    AsioRuntime(std::vector<int> cpus, ServerConfig config, bool same_thread = false);
     ~AsioRuntime() override;
     int fd() const override;
     void clear_notification() override;
@@ -324,9 +372,11 @@ public:
     void stop() override;
     void join() override;
     void close_fd() override;
+    std::size_t poll() override;
+    int reactor_fd() const override;
 };
-AsioRuntime::AsioRuntime(std::vector<int> cpus, ServerConfig config)
-    : p(std::make_unique<Impl>(std::move(cpus), std::move(config))) {
+AsioRuntime::AsioRuntime(std::vector<int> cpus, ServerConfig config, bool same_thread)
+    : p(std::make_unique<Impl>(std::move(cpus), std::move(config), same_thread)) {
     p->thread = std::thread([this] { p->run(); });
 }
 AsioRuntime::~AsioRuntime() {
@@ -474,6 +524,11 @@ void AsioRuntime::stop() {
     p->stopping.notify_all();
 }
 void AsioRuntime::join() { if (p->thread.joinable()) p->thread.join(); }
+std::size_t AsioRuntime::poll() {
+    if (!p->same_thread) throw std::logic_error("poll() is the same-thread mode's");
+    return p->pollable.load(std::memory_order_acquire) ? p->contexts.front()->poll() : 0;
+}
+int AsioRuntime::reactor_fd() const { return p->reactor_descriptor; }
 void AsioRuntime::close_fd() {
     if (p->notify_fd >= 0) {
         ::close(p->notify_fd);
@@ -529,17 +584,19 @@ static RuntimeBackend* load_uring(const std::vector<int>& cpus, const ServerConf
     }
     return factory(&cpus, &config, &why);
 }
-Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor_backend) {
+Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor_backend, bool same_thread) {
     if (cpus.empty()) throw std::invalid_argument("CPUs required");
     if (!reactor_backend.empty() && reactor_backend != "epoll" && reactor_backend != "io_uring")
         throw std::invalid_argument("unknown reactor backend: " + reactor_backend + " (epoll or io_uring)");
+    if (same_thread && (cpus.size() != 1 || reactor_backend == "io_uring"))
+        throw std::invalid_argument("the same-thread mode takes one CPU and runs on epoll");
     validate_server(config);
     if (ever_started.exchange(true)) throw std::runtime_error("one native runtime per process");
     if (reactor_backend == "io_uring") {
         p.reset(load_uring(cpus, config, fallback_));
         if (!p && fallback_.empty()) fallback_ = "io_uring is unavailable";
     }
-    if (!p) p = std::make_unique<AsioRuntime>(std::move(cpus), std::move(config));
+    if (!p) p = std::make_unique<AsioRuntime>(std::move(cpus), std::move(config), same_thread);
 }
 Runtime::~Runtime() = default;
 #endif

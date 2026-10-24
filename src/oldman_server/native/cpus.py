@@ -31,12 +31,22 @@ def parse_cpus(value):
     return tuple(int(cpu) for cpu in value)
 
 
-def _parse_groups(value):
-    """NATIVE_WORKER_CPUS as groups: a list of CPU lists, or "0,1,2;3,4,5"."""
+def same_thread(config):
+    """NATIVE_SAME_THREAD: each process's one shard runs on its Python thread,
+    one CPU per process (engine.Config.same_thread)."""
+    return bool(config.get("NATIVE_SAME_THREAD"))
+
+
+def _parse_groups(value, single=False):
+    """NATIVE_WORKER_CPUS as groups: a list of CPU lists, or "0,1,2;3,4,5"
+    (single: one CPU each, the same-thread mode's)."""
     if isinstance(value, str):
         value = [part.split(",") for part in value.split(";") if part.strip()]
     groups = [tuple(int(cpu) for cpu in group) for group in value]
-    if not groups or any(len(group) < 2 for group in groups):
+    if single:
+        if not groups or any(len(group) != 1 for group in groups):
+            raise ValueError("NATIVE_WORKER_CPUS needs one CPU per worker with NATIVE_SAME_THREAD")
+    elif not groups or any(len(group) < 2 for group in groups):
         raise ValueError("NATIVE_WORKER_CPUS needs groups of a Python CPU and at least one shard CPU")
     return groups
 
@@ -49,6 +59,8 @@ def shard_count(config, cpus, processes=1):
 def fast_workers(config):
     """Workers for fast=True: as many processes of 1 + NATIVE_SHARDS CPUs as fit."""
     cpus = len(_available())
+    if same_thread(config):
+        return cpus
     return max(1, cpus // (1 + shard_count(config, cpus)))
 
 
@@ -60,8 +72,10 @@ def worker_groups(config, workers):
         raise ValueError("NATIVE_SHARD_CPUS names one process's shard CPUs; "
                          "with worker processes use NATIVE_SHARDS or NATIVE_WORKER_CPUS")
     if config.get("NATIVE_WORKER_CPUS"):
-        return _parse_groups(config.NATIVE_WORKER_CPUS)
+        return _parse_groups(config.NATIVE_WORKER_CPUS, same_thread(config))
     cpus = _available()
+    if same_thread(config):
+        return [(cpu,) for cpu in cpus]
     size = 1 + shard_count(config, len(cpus), workers)
     if len(cpus) < size:
         # Too few CPUs for one group: Python shares with the shards.
@@ -90,5 +104,5 @@ def worker_group(config):
     number = worker_number()
     if not planned or number is None:
         return None
-    groups = _parse_groups(planned)
+    groups = _parse_groups(planned, same_thread(config))
     return groups[number % len(groups)]

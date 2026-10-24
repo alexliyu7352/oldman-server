@@ -405,8 +405,9 @@ PYBIND11_MODULE(_native, m) {
         return py::make_tuple(fields, files);
     });
     py::class_<probe::Runtime>(m, "Runtime")
-        .def(py::init<std::vector<int>, probe::ServerConfig, std::string>(),
-             py::arg("cpus"), py::arg("server") = probe::ServerConfig{}, py::arg("reactor_backend") = std::string{})
+        .def(py::init<std::vector<int>, probe::ServerConfig, std::string, bool>(),
+             py::arg("cpus"), py::arg("server") = probe::ServerConfig{}, py::arg("reactor_backend") = std::string{},
+             py::arg("same_thread") = false)
         .def("drain_requests_owned", [](probe::Runtime& r, size_t count, py::object connections) {
             auto events = r.drain_requests(count);
             // Framework connections are tracked here, without Python events: the
@@ -611,5 +612,9 @@ PYBIND11_MODULE(_native, m) {
              py::call_guard<py::gil_scoped_release>())
         .def("stop", &probe::Runtime::stop, py::call_guard<py::gil_scoped_release>())
         .def("join", &probe::Runtime::join, py::call_guard<py::gil_scoped_release>())
-        .def("close_fd", &probe::Runtime::close_fd);
+        .def("close_fd", &probe::Runtime::close_fd)
+        // The shard's work runs on this thread, holding the GIL: it touches no
+        // Python object.
+        .def("poll", &probe::Runtime::poll)
+        .def("reactor_fd", &probe::Runtime::reactor_fd);
 }

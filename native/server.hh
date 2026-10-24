@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace asio { class io_context; }
@@ -136,8 +137,10 @@ public:
 private:
     std::shared_ptr<Impl> p;  // the shards' queued calls keep it alive
 public:
+    // poller: the thread that polls the one shard and calls resolve_batch and
+    // drain (Runtime's same-thread mode); none otherwise.
     NetworkServer(ServerConfig config, std::vector<asio::io_context*> shards,
-                  std::function<void()> notify, Offload offload);
+                  std::function<void()> notify, Offload offload, std::thread::id poller = {});
     ~NetworkServer();
     void start();
     void stop();

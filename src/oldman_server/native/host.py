@@ -33,7 +33,7 @@ from oldman_server.touchup.schemes.base import BaseScheme
 from sanic_routing.exceptions import NotFound
 
 from . import _native
-from .cpus import parse_cpus, shard_count, worker_group
+from .cpus import parse_cpus, same_thread, shard_count, worker_group
 from .engine import (BodyError, Config, Engine, ServerConfig, STREAM_DATA, STREAM_END,
                      STREAM_START)
 from oldman_server.request import form as _form
@@ -1025,6 +1025,9 @@ def _shard_cpus(config):
     NATIVE_SHARD_CPUS (CPU list or "1,2") or the last NATIVE_SHARDS (default
     up to 2) CPUs of this process's affinity set, leaving the rest to Python."""
     group = worker_group(config)
+    if same_thread(config):
+        # The shard runs on the Python thread; its CPU pins the file threads.
+        return group[:1] if group else tuple(sorted(os.sched_getaffinity(0))[:1])
     if group:
         return group[1:]
     explicit = parse_cpus(config.get("NATIVE_SHARD_CPUS"))
@@ -1095,7 +1098,7 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
                                      + float(config.GRACEFUL_TCP_CLOSE_TIMEOUT)),
         request_timeout_ms=_timeout_ms(config.REQUEST_TIMEOUT))
     backend = config.get("NATIVE_REACTOR_BACKEND")
-    return Config(shard_cpus=shards, server=server,
+    return Config(shard_cpus=shards, server=server, same_thread=same_thread(config),
                   **({} if backend is None else {"reactor_backend": str(backend)}))
 
 

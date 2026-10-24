@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <format>
@@ -270,6 +271,9 @@ struct Shared {
     ServerConfig config;
     unsigned shard_count;
     std::function<void()> notify;
+    // The shard runs on its poller's thread (Runtime's same-thread mode), which
+    // takes the events after each poll: publishing does not notify.
+    bool same_thread;
     std::vector<std::unique_ptr<Counts>> counts;
     mutable std::mutex mutex;
     std::map<uint64_t,RequestEvent> events;
@@ -278,8 +282,8 @@ struct Shared {
     std::map<uint64_t,RequestEvent> pending_application_nodes;
     std::atomic<bool> running{false};
     std::atomic<uint64_t> decision_return_batches{0}, decision_return_items{0}, decision_return_posts{0};
-    Shared(ServerConfig c, unsigned n, std::function<void()> wake)
-        : config(std::move(c)), shard_count(n), notify(std::move(wake)) {
+    Shared(ServerConfig c, unsigned n, std::function<void()> wake, bool same)
+        : config(std::move(c)), shard_count(n), notify(std::move(wake)), same_thread(same) {
         for (unsigned i=0; i<n; ++i) {
             auto x = std::make_unique<Counts>();
             x->limit_count = config.max_requests / n + (i < config.max_requests % n);
@@ -302,7 +306,7 @@ struct Shared {
             if (!admitted) ++queued_requests;
             events.emplace(event.id, std::move(event));
         }
-        notify();
+        if (!same_thread) notify();
     }
     // Under mutex: an event leaves `events`.
     void unqueue(const RequestEvent& event) {
@@ -443,9 +447,25 @@ struct NetworkServer::Impl : std::enable_shared_from_this<NetworkServer::Impl> {
     std::vector<std::unique_ptr<Service>> services;  // services[i] lives on shard i
     bool started = false, stopped = false;
     std::mutex lifecycle;
-    Impl(ServerConfig c, std::vector<asio::io_context*> shards, std::function<void()> wake, Offload files)
-        : shared(std::move(c), unsigned(shards.size()), std::move(wake)), contexts(std::move(shards)),
-          offload(std::move(files)), services(contexts.size()) {}
+    std::thread::id poller;  // same-thread mode
+    Impl(ServerConfig c, std::vector<asio::io_context*> shards, std::function<void()> wake, Offload files,
+         std::thread::id polling)
+        : shared(std::move(c), unsigned(shards.size()), std::move(wake), polling != std::thread::id{}),
+          contexts(std::move(shards)), offload(std::move(files)), services(contexts.size()), poller(polling) {}
+    // A post from another thread reaches a same-thread shard's poller through
+    // the notification (Asio wakes no reactor that nothing runs).
+    void wake_poller() {
+        if (shared.same_thread) shared.notify();
+    }
+    // Waits for what on_all posted; the poller itself waiting (Engine.abandon
+    // stops the server from its thread) runs the shard meanwhile.
+    void await_shards(std::latch& done) {
+        if (shared.same_thread && std::this_thread::get_id() == poller) {
+            while (!done.try_wait()) contexts.front()->run_one_for(std::chrono::milliseconds(1));
+        } else {
+            done.wait();
+        }
+    }
     // Runs fn(shard) on every shard and waits for all; the first failure is
     // rethrown once all have run.
     void on_all(const std::function<void(unsigned)>& fn);
@@ -1825,7 +1845,8 @@ void NetworkServer::Impl::on_all(const std::function<void(unsigned)>& fn) {
             done.count_down();
         });
     }
-    done.wait();
+    wake_poller();
+    await_shards(done);
     for (auto& failure : failures)
         if (failure) std::rethrow_exception(failure);
 }
@@ -1840,7 +1861,8 @@ void NetworkServer::Impl::on_all_async(const std::function<asio::awaitable<void>
             });
         });
     }
-    done.wait();
+    wake_poller();
+    await_shards(done);
     for (auto& failure : failures)
         if (failure) std::rethrow_exception(failure);
 }
@@ -1868,8 +1890,9 @@ void NetworkServer::Impl::hand_off(unsigned shard, Socket socket, Endpoint remot
 }
 
 NetworkServer::NetworkServer(ServerConfig c, std::vector<asio::io_context*> shards, std::function<void()> wake,
-                             Offload offload)
-    : p(std::make_shared<Impl>(std::move(c), std::move(shards), std::move(wake), std::move(offload))) {}
+                             Offload offload, std::thread::id poller)
+    : p(std::make_shared<Impl>(std::move(c), std::move(shards), std::move(wake), std::move(offload),
+                               poller)) {}
 NetworkServer::~NetworkServer() = default;
 void NetworkServer::start() {
     std::lock_guard lock(p->lifecycle);
