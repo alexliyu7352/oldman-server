@@ -6,6 +6,7 @@ whose client checks every response but tops out near 185k RPS on 3 cores).
 
   run.py --out DIR [--connections 64,256,512] [--rounds 2] [--path /] [--quiet]
          [--services candidate,candidate-shards,bare,bare-shards,stock]
+         (each candidate and bare service also as NAME-io_uring)
 
 Each window: warm-up, then wrk; it records RPS, non-2xx responses, the
 service's own CPU (its process tree) per request, other processes' load on the
@@ -34,6 +35,7 @@ SERVE = Path(__file__).with_name("serve.py")
 # name: serve.py arguments after the port, environment. Four server CPUs: the
 # candidate as planned for 4 workers (same-thread, one CPU each), and 2 workers
 # of 1 Python thread + 1 shard; the bare function in both layouts; stock, 4 workers.
+# The -io_uring variants (not run by default) take the io_uring backend.
 SERVICES = {
     "candidate": (["candidate", "4"], {}),
     "candidate-shards": (["candidate", "2"], {"OLDMAN_SERVER_NATIVE_SHARDS": "1"}),
@@ -41,6 +43,10 @@ SERVICES = {
     "bare-shards": (["bare", "2", "0"], {}),
     "stock": (["stock", "4"], {}),
 }
+DEFAULT_SERVICES = list(SERVICES)
+for _name in ("candidate", "candidate-shards", "bare", "bare-shards"):
+    _arguments, _extra = SERVICES[_name]
+    SERVICES[f"{_name}-io_uring"] = (_arguments, {**_extra, "OLDMAN_SERVER_NATIVE_REACTOR_BACKEND": "io_uring"})
 
 
 def busy(cpus):
@@ -150,7 +156,7 @@ def main():
     parser.add_argument("--path", default="/")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--seconds", type=int, default=10)
-    parser.add_argument("--services", default=",".join(SERVICES))
+    parser.add_argument("--services", default=",".join(DEFAULT_SERVICES))
     parser.add_argument("--quiet", action="store_true", help="wait for a quiet machine before each level")
     args = parser.parse_args()
     services = args.services.split(",")

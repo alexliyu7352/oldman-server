@@ -33,7 +33,8 @@ async def bare_worker(index, group, same_thread, listen_fd, table):
         decision_timeout_ms=60000, generate_date_header=False, coalesce_notifications=True,
         probe_headers="none", keep_alive_timeout_ms=120000, request_timeout_ms=60000)
     config = Config(shard_cpus=tuple(group[:1] if same_thread else group[1:]), server=server,
-                    same_thread=same_thread)
+                    same_thread=same_thread,
+                    reactor_backend=os.environ.get("OLDMAN_SERVER_NATIVE_REACTOR_BACKEND", "epoll"))
     # The shards' CPUs stay this thread's until the runtime has started them.
     engine = await Engine.open(config, application_handler=bare_handler,
                                opened=lambda _: os.sched_setaffinity(0, {group[0]}))
