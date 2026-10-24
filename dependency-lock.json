@@ -234,6 +234,16 @@
       "Format": "tar",
       "Destination": "sources/liburing",
       "StripComponents": 1
+    },
+    {
+      "Name": "asio",
+      "Version": "1.38.2",
+      "Filename": "asio-8806a6803cde7054c3049d3666d3ec36786568c5.tar.gz",
+      "URL": "https://codeload.github.com/chriskohlhoff/asio/tar.gz/8806a6803cde7054c3049d3666d3ec36786568c5",
+      "SHA256": "ca7f6c14f2bf91e61c7e81fb693f2f8fc86f93e85520d5fc7fd035d0f666bb35",
+      "Format": "tar",
+      "Destination": "sources/asio",
+      "StripComponents": 1
     }
   ],
   "release_archives": [

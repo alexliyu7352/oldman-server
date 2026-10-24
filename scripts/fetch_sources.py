@@ -1,7 +1,7 @@
 """Download, check and unpack the source archives the release build compiles.
 
 dependency-lock.json pins them: its "archives" of the tar format (Seastar with
-its patch, Boost, OpenSSL, fmt, yaml-cpp, c-ares, liburing) and its
+its patch, Boost, OpenSSL, fmt, yaml-cpp, c-ares, liburing, Asio) and its
 "release_archives" (hwloc, protobuf, ragel; the development host uses its own
 packages of these). Each archive must match its SHA-256; it is unpacked into
 DIRECTORY/<Name> (the lock's StripComponents applied) and its patches applied.

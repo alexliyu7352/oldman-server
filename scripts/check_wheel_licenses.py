@@ -4,8 +4,8 @@ auditwheel copies into oldman_server.libs/ whatever the extension and libseastar
 need at run time, which depends on the build image as well as on our build
 (a library the image links in by default, for example). Every library there
 must be one listed below, whose license file is in the wheel's licenses
-(LICENSES/ as the package's license files); pybind11 is compiled into the
-extension itself. A library that is not listed fails the check, so that a new
+(LICENSES/ as the package's license files); pybind11 and Asio (header-only)
+are compiled into the extension itself. A library that is not listed fails the check, so that a new
 one is reviewed (and its license added) before a wheel carrying it is released.
 
     python scripts/check_wheel_licenses.py WHEEL...
@@ -31,7 +31,7 @@ LIBRARIES = {
     "libyaml-cpp": "yaml-cpp-MIT.txt",
 }
 # Compiled into the extension, not a separate library.
-EMBEDDED = ["pybind11-BSD-3-Clause.txt"]
+EMBEDDED = ["pybind11-BSD-3-Clause.txt", "asio-BSL-1.0.txt"]
 
 
 def problems(wheel):
