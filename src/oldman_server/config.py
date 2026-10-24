@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "NATIVE_MAX_REQUESTS": 4096,
     "NATIVE_MAX_RESPONSE_SIZE": 128 * 1024 * 1024,
     "NATIVE_REACTOR_BACKEND": "epoll",
+    "NATIVE_SAME_THREAD": None,  # chosen by the CPUs per worker (oldman_server.native.cpus)
     "NATIVE_SERVER": False,
     "NATIVE_SHARD_CPUS": None,
     "NATIVE_SHARDS": None,  # up to 2
@@ -158,6 +159,7 @@ class Config(dict, metaclass=DescriptorMeta):
     NATIVE_MAX_REQUESTS: int
     NATIVE_MAX_RESPONSE_SIZE: int
     NATIVE_REACTOR_BACKEND: str
+    NATIVE_SAME_THREAD: bool | None
     NATIVE_SERVER: bool
     NATIVE_SHARD_CPUS: str | int | Sequence[int] | None
     NATIVE_SHARDS: int | None

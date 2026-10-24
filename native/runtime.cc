@@ -281,7 +281,7 @@ struct Impl {
     void stop_shards() {
         keep_running.clear();
         for (auto& context : contexts) context->stop();
-        if (same_thread) {  // the poller may still call poll(): the context goes with the runtime
+        if (same_thread) {  // the poller may still call poll(): the context goes in close_fd()
             pollable = false;
             return;
         }
@@ -534,6 +534,13 @@ void AsioRuntime::close_fd() {
         ::close(p->notify_fd);
         p->notify_fd = -1;
     }
+    // Same-thread mode: the shard's io_context outlives the shards for its
+    // poller; once the runtime has stopped and been joined, its descriptors go.
+    if (p->same_thread && !p->thread.joinable() && !p->pollable) {
+        p->keep_running.clear();
+        p->contexts.clear();
+        p->reactor_descriptor = -1;
+    }
 }
 }  // namespace
 
@@ -588,11 +595,12 @@ Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor
     if (cpus.empty()) throw std::invalid_argument("CPUs required");
     if (!reactor_backend.empty() && reactor_backend != "epoll" && reactor_backend != "io_uring")
         throw std::invalid_argument("unknown reactor backend: " + reactor_backend + " (epoll or io_uring)");
-    if (same_thread && (cpus.size() != 1 || reactor_backend == "io_uring"))
-        throw std::invalid_argument("the same-thread mode takes one CPU and runs on epoll");
+    if (same_thread && cpus.size() != 1) throw std::invalid_argument("the same-thread mode takes one CPU");
     validate_server(config);
     if (ever_started.exchange(true)) throw std::runtime_error("one native runtime per process");
-    if (reactor_backend == "io_uring") {
+    if (reactor_backend == "io_uring" && same_thread) {
+        fallback_ = "the same-thread mode runs on epoll";
+    } else if (reactor_backend == "io_uring") {
         p.reset(load_uring(cpus, config, fallback_));
         if (!p && fallback_.empty()) fallback_ = "io_uring is unavailable";
     }

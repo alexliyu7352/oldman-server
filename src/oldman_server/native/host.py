@@ -1026,6 +1026,8 @@ def _shard_cpus(config):
     up to 2) CPUs of this process's affinity set, leaving the rest to Python."""
     group = worker_group(config)
     if same_thread(config):
+        if parse_cpus(config.get("NATIVE_SHARD_CPUS")) is not None:
+            raise ValueError("NATIVE_SHARD_CPUS places shard threads: the same-thread mode has none")
         # The shard runs on the Python thread; its CPU pins the file threads.
         return group[:1] if group else tuple(sorted(os.sched_getaffinity(0))[:1])
     if group:

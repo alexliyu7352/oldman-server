@@ -9,7 +9,7 @@ import aiohttp
 import pytest
 from oldman_server.native import _native as native
 from oldman_server.native import engine as api
-from test_http import config, wait_stat
+from test_http import config, hold_requests, poll_shard, take_requests, wait_stat
 
 
 async def async_request(port, path, body=None):
@@ -64,11 +64,10 @@ async def test_native_checked_batch_isolates_bad_replies_and_owns_request():
                (202, b"valid-last", ())]
     cfg = config(application_dispatch_all=True, decision_timeout_ms=3000)
     engine = await api.Engine.open(cfg, application_handler=lambda req: (200, b"", ()))
-    loop = asyncio.get_running_loop()
     jobs = []
     retained = []
     try:
-        loop.remove_reader(engine.notification_fd)
+        hold_requests(engine)
         jobs = [asyncio.create_task(async_request(cfg.server.http_port, f"/owned?{i}", b"request\x00\xff"))
                 for i in range(len(replies))]
         await wait_stat(engine, "queued_decisions", lambda n: n == len(replies))
@@ -83,6 +82,7 @@ async def test_native_checked_batch_isolates_bad_replies_and_owns_request():
         assert engine.server_stats()["decision_return_batches"] == 0
         assert engine.server_stats()["pending_decisions"] == len(replies)
         bad_count = engine._native.resolve_http_responses_checked(batch, 64)
+        poll_shard(engine)
         assert bad_count == len(invalid)
         result = await asyncio.gather(*jobs)
         assert result[0][0] == 201 and result[0][2] == b"valid-first"
@@ -100,12 +100,13 @@ async def test_native_checked_batch_isolates_bad_replies_and_owns_request():
         await wait_stat(engine, "queued_decisions", lambda n: n == 1)
         rid, shard, _req = engine._native.drain_requests_owned(64)[0]
         assert engine._native.resolve_http_responses_checked([(rid, shard, 99, b"", (), 1)], 64) == 1
+        poll_shard(engine)
         assert (await pending_job)[0] == 500
         terminal = engine._native.drain_requests_owned(64)
         assert len(terminal) == 1 and len(terminal[0]) == 8
         assert terminal[0][3] == "application_done" and terminal[0][7] == rid
     finally:
-        loop.add_reader(engine.notification_fd, engine._drain)
+        take_requests(engine)
         await engine.aclose()
         await asyncio.gather(*jobs, return_exceptions=True)
     assert engine.server_stats()["reserved_bytes"] == 0

@@ -9,17 +9,17 @@ import threading
 import pytest
 
 from oldman_server.native.engine import Config, Engine, ServerConfig
-from test_http import free_port, request
+from test_http import free_port, request, same_thread
 
 
 def cpus():
-    return tuple(sorted(os.sched_getaffinity(0))[-2:])
+    return tuple(sorted(os.sched_getaffinity(0))[-1 if same_thread() else -2:])
 
 
 def open_engine():
     """An Engine serving a trivial framework handler on a free port."""
     server = ServerConfig(http_port=free_port(), application_dispatch_all=True)
-    return Engine.open(Config(shard_cpus=cpus(), server=server),
+    return Engine.open(Config(shard_cpus=cpus(), server=server, same_thread=same_thread()),
                        application_handler=lambda request: (200, b"", ()))
 
 
@@ -66,9 +66,12 @@ async def test_shutdown_releases_native_threads_and_fds():
     threads_before = {int(t) for t in os.listdir("/proc/self/task")}
     engine = await open_engine()
     tids = {s["tid"] for s in engine.shards()}
-    assert len(tids) == 2
-    assert [s["affinity"] for s in engine.shards()] == [[c] for c in cpus()]
-    assert all(s["backend"] == "epoll" for s in engine.shards())
+    if same_thread():
+        assert not tids  # no shard thread: the shard runs on this one
+    else:
+        assert len(tids) == 2
+        assert [s["affinity"] for s in engine.shards()] == [[c] for c in cpus()]
+        assert all(s["backend"] == "epoll" for s in engine.shards())
     assert (await request(engine.config.server.http_port, "/"))[0] == 200
     await engine.aclose()
     assert not tids & {int(t) for t in os.listdir("/proc/self/task")}

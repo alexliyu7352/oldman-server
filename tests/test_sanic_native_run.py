@@ -303,14 +303,28 @@ def run_workers(directory, env):
     return results, listeners
 
 
-def expected_groups():
+# The worker layouts: as planned for two workers (shard threads where the CPUs
+# leave room, see oldman_server.native.cpus), and the same-thread mode's.
+LAYOUTS = pytest.mark.parametrize("same_thread", [False, True], ids=["planned", "same-thread"])
+
+
+def layout_env(same_thread):
+    return {"OLDMAN_SERVER_NATIVE_SAME_THREAD": "true"} if same_thread else {}
+
+
+def expected_groups(same_thread=False):
     from oldman_server.config import Config
     from oldman_server.native.cpus import worker_groups
-    return worker_groups(Config(), 2)
+    config = Config()
+    if same_thread:
+        config.NATIVE_SAME_THREAD = True
+    return worker_groups(config, 2)
 
 
-def check_worker_cpus(results):
-    groups = expected_groups()
+def check_worker_cpus(results, same_thread=False):
+    # Python on its group's first CPU, a shard on each other one (none in
+    # the same-thread mode, whose shard runs on the Python thread).
+    groups = expected_groups(same_thread)
     for result in results:
         group = groups[int(result["worker"].split("-")[2]) % len(groups)]
         assert result["python"] == [group[0]]
@@ -318,14 +332,15 @@ def check_worker_cpus(results):
         assert result["loop"] == "uvloop.Loop"
 
 
-def test_workers_serve_natively_on_their_own_cpus(short_dir):
+@LAYOUTS
+def test_workers_serve_natively_on_their_own_cpus(short_dir, same_thread):
     # The workers accept on the main process's socket, as in Sanic, and each
     # serves through its own native host, Python and shards on the CPU group
     # the main process planned for it.
     port = free_port()
-    [results], listeners = run_workers(short_dir, {"PORT": str(port)})
+    [results], listeners = run_workers(short_dir, {"PORT": str(port), **layout_env(same_thread)})
     assert {result["worker"] for result in results} == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
-    check_worker_cpus(results)
+    check_worker_cpus(results, same_thread)
     assert {result["location"] for result in results} == {f"http://127.0.0.1:{port}"}
     assert {result["server"] for result in results} == {f"127.0.0.1:{port}"}
     assert listeners.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
@@ -334,24 +349,27 @@ def test_workers_serve_natively_on_their_own_cpus(short_dir):
     assert min(Counter(result["worker"] for result in results).values()) >= 16
 
 
-def test_restarted_workers_serve_natively_again(short_dir):
+@LAYOUTS
+def test_restarted_workers_serve_natively_again(short_dir, same_thread):
     port = free_port()
-    (first, second), _ = run_workers(short_dir, {"PORT": str(port), "RESTART_MARK": str(short_dir / "mark")})
+    (first, second), _ = run_workers(short_dir, {"PORT": str(port), "RESTART_MARK": str(short_dir / "mark"),
+                                                 **layout_env(same_thread)})
     for round_, results in enumerate((first, second)):
         workers = {result["worker"] for result in results}
         assert workers == {"Oldman-Server-0-0", "Oldman-Server-1-0"}, f"round {round_}"
-        check_worker_cpus(results)
+        check_worker_cpus(results, same_thread)
     # New processes, on the same CPU groups.
     assert not {result["pid"] for result in first} & {result["pid"] for result in second}
 
 
-def test_workers_share_a_unix_socket(short_dir):
+@LAYOUTS
+def test_workers_share_a_unix_socket(short_dir, same_thread):
     # Unix sockets have no SO_REUSEPORT: the workers accept on the main
     # process's socket (instead of each binding its own over the path, so that
     # the last one would get every connection), which it removes at exit.
     path = short_dir / "app.sock"
-    [results], listeners = run_workers(short_dir, {"UNIX": str(path)})
-    check_worker_cpus(results)
+    [results], listeners = run_workers(short_dir, {"UNIX": str(path), **layout_env(same_thread)})
+    check_worker_cpus(results, same_thread)
     assert {result["server"] for result in results} == {str(path)}
     assert listeners.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
     assert len(set.union(*listeners.values())) == 1
@@ -361,27 +379,29 @@ def test_workers_share_a_unix_socket(short_dir):
     assert min(Counter(result["worker"] for result in results).values()) >= 16
 
 
+@LAYOUTS
 @pytest.mark.parametrize("family", ["unix", "tcp"])
-def test_workers_sharing_an_address_take_turns(short_dir, family):
+def test_workers_sharing_an_address_take_turns(short_dir, family, same_thread):
     # Connections one after another, kept open: a worker accepts while no
     # other has fewer open connections. Without turns, the worker whose shard
     # is busy polling (not sleeping) takes nearly every connection.
     address = {"UNIX": str(short_dir / "app.sock")} if family == "unix" else {"PORT": str(free_port())}
     [results], _ = run_workers(short_dir, {**address, "HOLD": "16",
-                                           "OLDMAN_SERVER_NATIVE_SHARDS": "1"})
+                                           "OLDMAN_SERVER_NATIVE_SHARDS": "1", **layout_env(same_thread)})
     split = Counter(result["worker"] for result in results)
     assert split.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
     assert max(split.values()) - min(split.values()) <= 2
 
 
+@LAYOUTS
 @pytest.mark.parametrize("family", ["unix", "tcp"])
-def test_workers_sharing_an_address_split_a_burst(short_dir, family):
+def test_workers_sharing_an_address_split_a_burst(short_dir, family, same_thread):
     # Hundreds of connections at once: a worker counts each connection as it
     # accepts it, so the other worker's turn comes during the burst rather
     # than after the first has taken all it could.
     address = {"UNIX": str(short_dir / "app.sock")} if family == "unix" else {"PORT": str(free_port())}
     [results], _ = run_workers(short_dir, {**address, "BURST": "512",
-                                           "OLDMAN_SERVER_NATIVE_SHARDS": "1"})
+                                           "OLDMAN_SERVER_NATIVE_SHARDS": "1", **layout_env(same_thread)})
     split = Counter(result["worker"] for result in results)
     assert split.keys() == {"Oldman-Server-0-0", "Oldman-Server-1-0"}
     assert max(split.values()) - min(split.values()) <= 16, split
@@ -646,6 +666,7 @@ def test_unix_socket_served_natively(short_dir):
     path = short_dir / "app.sock"
     lines, result = run(textwrap.dedent(UNIX_DRIVE) + textwrap.dedent(f'''
         app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SAME_THREAD = False  # two shards, whatever the environment says
         drive_unix({str(path)!r})
         app.run(unix={str(path)!r}, motd=False)
         print("AFTER " + json.dumps([os.path.exists({str(path)!r}), events]))
@@ -719,6 +740,7 @@ def test_tcp_run_serves_on_sanics_socket():
     port = free_port()
     lines, _ = run(f'''
         app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SAME_THREAD = False  # two shards, whatever the environment says
 
         @app.get("/shard")
         async def shard(request):
@@ -788,6 +810,7 @@ def test_reactor_backend_setting(backend):
     lines, _ = run(f'''
         from oldman_server.native import host
         app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SAME_THREAD = False  # shard threads, which report their backend
         app.config.NATIVE_REACTOR_BACKEND = "{backend}"
 
         @app.after_server_start
@@ -799,6 +822,41 @@ def test_reactor_backend_setting(backend):
     ''')
     assert json.loads(lines["BACKENDS"]) == [backend]
     assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
+
+
+def test_the_same_thread_mode_serves_on_epoll():
+    # One process in the same-thread mode: no shard thread; io_uring is not
+    # its backend, so it serves on epoll with a warning.
+    port = free_port()
+    lines, result = run(f'''
+        import threading
+        from oldman_server.native import host
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SAME_THREAD = True
+        app.config.NATIVE_REACTOR_BACKEND = "io_uring"
+
+        @app.after_server_start
+        async def layout(app):
+            print("LAYOUT " + json.dumps([host._engine.shards(), host._engine.config.same_thread]), flush=True)
+
+        drive({port})
+        app.run(host="127.0.0.1", port={port}, motd=False)
+    ''')
+    assert json.loads(lines["LAYOUT"]) == [[], True]
+    assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
+    assert "the same-thread mode runs on epoll" in result.stdout + result.stderr
+
+
+def test_the_same_thread_mode_refuses_shard_cpus():
+    result = subprocess.run([sys.executable, "-c", APP + textwrap.dedent(f'''
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SAME_THREAD = True
+        app.config.NATIVE_SHARD_CPUS = "1"
+        app.run(host="127.0.0.1", port={free_port()}, motd=False)
+        print("RUN RETURNED", flush=True)
+    ''')], capture_output=True, text=True, timeout=60, cwd=ROOT)
+    assert result.returncode != 0 and "RUN RETURNED" not in result.stdout
+    assert "the same-thread mode has none" in result.stderr
 
 
 def test_io_uring_falls_back_to_epoll_without_its_build(tmp_path):
@@ -922,6 +980,7 @@ def test_a_native_host_that_cannot_start_fails_the_run():
     # A single process: app.run() raises (it returned normally, exit status 0).
     result = subprocess.run([sys.executable, "-c", APP + textwrap.dedent(f'''
         app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SAME_THREAD = False  # the shard threads' CPUs
         app.config.NATIVE_SHARD_CPUS = "4000,4001"
         app.run(host="127.0.0.1", port={free_port()}, motd=False)
         print("RUN RETURNED", flush=True)

@@ -107,3 +107,92 @@ def test_a_forked_child_leaves_the_inherited_runtime_alone(mode):
         runtime.close_fd()
     ''', mode)
     assert "child 0" in out, out
+
+
+SAME_THREAD = '''
+    import socket
+
+    def pump(runtime, timeout):
+        # The poller's turn (what the Engine does): either descriptor, then poll.
+        select.select([runtime.fd(), runtime.reactor_fd()], [], [], timeout)
+        runtime.clear_notification()
+        runtime.poll()
+
+    def until(runtime, state):
+        deadline = time.monotonic() + 10
+        while runtime.stats()["state"] < state and time.monotonic() < deadline:
+            pump(runtime, 0.1)
+        assert runtime.stats()["state"] >= state, runtime.stats()
+
+    def server_config():
+        config = n.ServerConfig()
+        config.application_dispatch_all = True
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            config.http_port = probe.getsockname()[1]
+        return config
+'''
+
+
+def run_same_thread(script):
+    return run(textwrap.dedent(SAME_THREAD) + textwrap.dedent(script))
+
+
+def test_a_same_thread_runtime_runs_while_its_thread_polls_it():
+    # No shard thread: the control thread's start and stop of the server
+    # reach the shard through the notification, and happen only as the
+    # thread that made the runtime polls it.
+    out = run_same_thread('''
+        threads = len(os.listdir("/proc/self/task"))
+        config = server_config()
+        runtime = n.Runtime([cpus[-1]], config, "epoll", True)
+        assert runtime.reactor_fd() >= 0 and runtime.shards() == []
+        until(runtime, 1)
+        with socket.create_connection(("127.0.0.1", config.http_port), timeout=5):
+            pass
+        # The control thread and the file threads; none for a shard.
+        print("threads", len(os.listdir("/proc/self/task")) - threads)
+        runtime.stop()
+        until(runtime, 3)
+        runtime.join()
+        runtime.close_fd()
+        print("stopped")
+    ''')
+    assert "threads 3" in out and "stopped" in out, out
+
+
+def test_the_polling_thread_starts_and_stops_a_server_itself():
+    # Engine.abandon stops a persistent runtime's server from the thread that
+    # polls it, which then runs the shard while it waits instead of hanging.
+    out = run_same_thread('''
+        runtime = n.Runtime([cpus[-1]], n.ServerConfig(), "epoll", True)
+        until(runtime, 1)
+        config = server_config()
+        generation = runtime.start_server(config)
+        with socket.create_connection(("127.0.0.1", config.http_port), timeout=5):
+            pass
+        runtime.stop_server(generation)
+        print("stopped server")
+        runtime.stop()
+        until(runtime, 3)
+        runtime.join()
+        runtime.close_fd()
+    ''')
+    assert "stopped server" in out, out
+
+
+def test_the_same_thread_mode_runs_on_epoll():
+    out = run_same_thread('''
+        runtime = n.Runtime([cpus[-1]], n.ServerConfig(), "io_uring", True)
+        print("fallback", runtime.fallback())
+        until(runtime, 1)
+        runtime.stop()
+        until(runtime, 3)
+        runtime.join()
+        runtime.close_fd()
+    ''')
+    assert "fallback the same-thread mode runs on epoll" in out, out
+    with pytest.raises(AssertionError, match="one CPU"):
+        run_same_thread('''
+            n.Runtime(cpus[-2:], n.ServerConfig(), "epoll", True)
+        ''')

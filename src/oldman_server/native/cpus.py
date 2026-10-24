@@ -1,10 +1,16 @@
 """CPUs for the native host's threads: each serving process runs Python on one
-CPU and its native shards on others.
+CPU and its native shards on others, or, in the same-thread mode, its one
+shard on the Python thread (one CPU per process, no shard thread).
 
 One process takes NATIVE_SHARD_CPUS, or the last NATIVE_SHARDS CPUs of its
 affinity, for the shards. With Sanic's worker processes the main process
 splits its CPUs into one group per worker (NATIVE_WORKER_CPUS: Python CPU
-first, then the shard CPUs) and passes the groups to the workers.
+first, then the shard CPUs; one CPU in the same-thread mode) and passes the
+groups to the workers.
+
+NATIVE_SAME_THREAD unset: worker processes run same-thread when their CPUs
+leave none for a shard thread each (fast=True: one worker per CPU), unless
+NATIVE_SHARDS asks for shards; explicit groups say it by their size.
 
 Plain Python: the worker manager plans CPUs without loading the extension.
 """
@@ -31,23 +37,46 @@ def parse_cpus(value):
     return tuple(int(cpu) for cpu in value)
 
 
+def _same_thread_setting(config):
+    """NATIVE_SAME_THREAD as set: True, False, or None (unset)."""
+    value = config.get("NATIVE_SAME_THREAD")
+    return None if value is None else bool(value)
+
+
+def plans_same_thread(config, workers, cpus):
+    """Whether `workers` server processes on `cpus` CPUs run same-thread:
+    NATIVE_SAME_THREAD, or, unset, when the CPUs leave no shard CPU per worker
+    and NATIVE_SHARDS asks for no shards."""
+    setting = _same_thread_setting(config)
+    if setting is not None:
+        return setting
+    return workers > 1 and cpus < 2 * workers and not config.get("NATIVE_SHARDS")
+
+
 def same_thread(config):
-    """NATIVE_SAME_THREAD: each process's one shard runs on its Python thread,
-    one CPU per process (engine.Config.same_thread)."""
-    return bool(config.get("NATIVE_SAME_THREAD"))
+    """Whether this process runs its one shard on its Python thread
+    (engine.Config.same_thread): NATIVE_SAME_THREAD, or, unset, a worker
+    process whose planned group is one CPU."""
+    setting = _same_thread_setting(config)
+    if setting is not None:
+        return setting
+    group = worker_group(config)
+    return group is not None and len(group) == 1
 
 
-def _parse_groups(value, single=False):
-    """NATIVE_WORKER_CPUS as groups: a list of CPU lists, or "0,1,2;3,4,5"
-    (single: one CPU each, the same-thread mode's)."""
+def _parse_groups(value, same=None):
+    """NATIVE_WORKER_CPUS as groups: a list of CPU lists, or "0,1,2;3,4,5".
+    One CPU each is the same-thread mode; `same`: the mode they must be in."""
     if isinstance(value, str):
         value = [part.split(",") for part in value.split(";") if part.strip()]
     groups = [tuple(int(cpu) for cpu in group) for group in value]
-    if single:
-        if not groups or any(len(group) != 1 for group in groups):
-            raise ValueError("NATIVE_WORKER_CPUS needs one CPU per worker with NATIVE_SAME_THREAD")
-    elif not groups or any(len(group) < 2 for group in groups):
-        raise ValueError("NATIVE_WORKER_CPUS needs groups of a Python CPU and at least one shard CPU")
+    single = bool(groups) and all(len(group) == 1 for group in groups)
+    if not groups or not single and any(len(group) < 2 for group in groups):
+        raise ValueError("NATIVE_WORKER_CPUS needs groups of a Python CPU and at least one shard CPU, "
+                         "or one CPU per worker (the same-thread mode)")
+    if same is not None and same != single:
+        raise ValueError("NATIVE_WORKER_CPUS needs one CPU per worker with NATIVE_SAME_THREAD"
+                         if same else "NATIVE_WORKER_CPUS of one CPU each requires NATIVE_SAME_THREAD")
     return groups
 
 
@@ -57,24 +86,26 @@ def shard_count(config, cpus, processes=1):
 
 
 def fast_workers(config):
-    """Workers for fast=True: as many processes of 1 + NATIVE_SHARDS CPUs as fit."""
+    """Workers for fast=True: one same-thread process per CPU, or as many
+    processes of 1 + NATIVE_SHARDS CPUs as fit."""
     cpus = len(_available())
-    if same_thread(config):
+    if plans_same_thread(config, cpus, cpus):
         return cpus
     return max(1, cpus // (1 + shard_count(config, cpus)))
 
 
 def worker_groups(config, workers):
     """CPU groups for `workers` server processes (each its Python CPU, then its
-    shard CPUs): NATIVE_WORKER_CPUS, or consecutive groups of this process's
-    CPUs. Workers beyond the groups share them (worker n uses group n % len)."""
+    shard CPUs; one CPU each in the same-thread mode): NATIVE_WORKER_CPUS, or
+    consecutive groups of this process's CPUs. Workers beyond the groups share
+    them (worker n uses group n % len)."""
     if parse_cpus(config.get("NATIVE_SHARD_CPUS")) is not None:
         raise ValueError("NATIVE_SHARD_CPUS names one process's shard CPUs; "
                          "with worker processes use NATIVE_SHARDS or NATIVE_WORKER_CPUS")
     if config.get("NATIVE_WORKER_CPUS"):
-        return _parse_groups(config.NATIVE_WORKER_CPUS, same_thread(config))
+        return _parse_groups(config.NATIVE_WORKER_CPUS, _same_thread_setting(config))
     cpus = _available()
-    if same_thread(config):
+    if plans_same_thread(config, workers, len(cpus)):
         return [(cpu,) for cpu in cpus]
     size = 1 + shard_count(config, len(cpus), workers)
     if len(cpus) < size:
@@ -104,5 +135,5 @@ def worker_group(config):
     number = worker_number()
     if not planned or number is None:
         return None
-    groups = _parse_groups(planned, same_thread(config))
+    groups = _parse_groups(planned, _same_thread_setting(config))
     return groups[number % len(groups)]

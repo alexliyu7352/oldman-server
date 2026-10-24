@@ -14,6 +14,8 @@ import time
 
 from pathlib import Path
 
+import pytest
+
 
 APP = textwrap.dedent(
     """
@@ -268,14 +270,18 @@ def test_a_restarted_worker_that_fails_to_start_leaves_the_others(tmp_path):
     assert "failed to start" in text
 
 
-def test_a_native_worker_whose_engine_cannot_start_ends_the_service(tmp_path):
+@pytest.mark.parametrize("groups, same_thread", [("0,4000;1,4001", False), ("4000;4001", True)],
+                         ids=["shards", "same-thread"])
+def test_a_native_worker_whose_engine_cannot_start_ends_the_service(tmp_path, groups, same_thread):
     # The worker acknowledges, then its native host fails to start (CPUs
     # that do not exist): the service ends instead of running without it.
+    # The groups' size says the mode, whatever the environment sets.
     process = start(
         tmp_path,
-        """
+        f"""
         app.config.NATIVE_SERVER = True
-        app.config.NATIVE_WORKER_CPUS = "0,4000;1,4001"
+        app.config.NATIVE_WORKER_CPUS = "{groups}"
+        app.config.NATIVE_SAME_THREAD = {same_thread}
         """,
     )
     try:

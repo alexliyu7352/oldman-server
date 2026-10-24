@@ -111,7 +111,8 @@ class Config:
     # epoll, with a warning, where the system refuses it.
     reactor_backend: str = "epoll"
     # No shard thread: the one shard runs on this event loop's thread, which
-    # polls it (shard_cpus: that thread's one CPU, for the file threads; epoll).
+    # polls it (shard_cpus: that thread's one CPU, for the file threads). On
+    # epoll: io_uring falls back to it, with a warning.
     same_thread: bool = False
 
 
@@ -292,9 +293,8 @@ class Engine:
         if (not config.shard_cpus or len(set(config.shard_cpus)) != len(config.shard_cpus)
                 or not set(config.shard_cpus) <= os.sched_getaffinity(0)):
             raise ValueError("shard_cpus must be distinct available CPUs")
-        if config.same_thread and (len(config.shard_cpus) != 1
-                                   or config.reactor_backend not in ("epoll", "")):
-            raise ValueError("the same-thread mode takes one CPU and epoll")
+        if config.same_thread and len(config.shard_cpus) != 1:
+            raise ValueError("the same-thread mode takes one CPU")
         if config.completion_batch <= 0:
             raise ValueError("bounds must be positive")
         if config.server is None:

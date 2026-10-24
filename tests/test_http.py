@@ -16,10 +16,18 @@ def free_port(kind=socket.SOCK_STREAM):
         return sock.getsockname()[1]
 
 
+def same_thread():
+    """A run of the native tests in the same-thread mode (OLDMAN_SERVER_NATIVE_SAME_THREAD,
+    as the framework tests take it)."""
+    return os.environ.get("OLDMAN_SERVER_NATIVE_SAME_THREAD", "").lower() in ("1", "true", "yes")
+
+
 def config(**kwargs):
     assert hasattr(api, "ServerConfig"), "native HTTP configuration is missing"
     cpus = tuple(sorted(os.sched_getaffinity(0))[-4:])
     server = api.ServerConfig(http_port=free_port(), **kwargs)
+    if same_thread():
+        return api.Config(shard_cpus=cpus[:1], server=server, same_thread=True)
     return api.Config(shard_cpus=cpus[:2], server=server)
 
 
@@ -34,6 +42,30 @@ async def request(port, path, body=None, connection=None):
             if connection is None:
                 c.close()
     return await asyncio.to_thread(send)
+
+
+def hold_requests(engine):
+    """The Engine stops taking requests, which stay queued: its notification
+    reader goes; in the same-thread mode the shard is still polled."""
+    loop = asyncio.get_running_loop()
+    loop.remove_reader(engine.notification_fd)
+    if engine._same_thread:
+        loop.add_reader(engine._reactor_fd, engine._native.poll)
+
+
+def take_requests(engine):
+    """The Engine takes requests again (hold_requests undone)."""
+    loop = asyncio.get_running_loop()
+    loop.add_reader(engine.notification_fd, engine._drain)
+    if engine._same_thread and engine._reactor_fd >= 0:
+        loop.add_reader(engine._reactor_fd, engine._pump)
+
+
+def poll_shard(engine):
+    """After resolving on the runtime directly: the same-thread shard writes
+    the responses when polled (as the Engine's own flush does)."""
+    if engine._same_thread:
+        engine._native.poll()
 
 
 async def wait_stat(engine, key, predicate):

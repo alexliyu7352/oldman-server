@@ -23,7 +23,7 @@ def available(monkeypatch):
 
 
 def config(**settings):
-    result = Config()
+    result = Config(env_prefix=None)  # the planning, whatever the environment sets
     result.update(settings)
     return result
 
@@ -32,7 +32,9 @@ def test_groups_of_a_python_cpu_and_two_shards(available):
     available(16)
     assert cpus.worker_groups(config(), 2)[:2] == [(0, 1, 2), (3, 4, 5)]
     assert len(cpus.worker_groups(config(), 2)) == 5
-    assert cpus.fast_workers(config()) == 5
+    # fast=True: one same-thread worker per CPU; with NATIVE_SHARDS, groups.
+    assert cpus.fast_workers(config()) == 16
+    assert cpus.fast_workers(config(NATIVE_SHARDS=2)) == 5
 
 
 def test_fewer_shards_when_the_workers_need_the_cpus(available):
@@ -45,16 +47,36 @@ def test_fewer_shards_when_the_workers_need_the_cpus(available):
 
 def test_too_few_cpus_for_a_group(available):
     available(1)
-    assert cpus.worker_groups(config(), 2) == [(0, 0)]  # Python shares its CPU
+    assert cpus.worker_groups(config(), 1) == [(0, 0)]  # Python shares its CPU
+    assert cpus.worker_groups(config(NATIVE_SHARDS=1), 2) == [(0, 0)]
     available(2)
     assert cpus.worker_groups(config(NATIVE_SHARDS=2), 1) == [(0, 1)]
+
+
+def test_same_thread_workers_when_no_cpu_is_left_for_a_shard(available):
+    # Fewer than two CPUs per worker: each runs its shard on its Python thread.
+    available(4)
+    assert cpus.worker_groups(config(), 4) == [(0,), (1,), (2,), (3,)]
+    assert cpus.worker_groups(config(), 3) == [(0,), (1,), (2,), (3,)]
+    assert cpus.worker_groups(config(), 2) == [(0, 1), (2, 3)]  # a shard CPU each
+    assert cpus.fast_workers(config()) == 4
+    # Asked for: NATIVE_SHARDS keeps shard threads, NATIVE_SAME_THREAD decides.
+    assert cpus.worker_groups(config(NATIVE_SHARDS=1), 4) == [(0, 1), (2, 3)]
+    assert cpus.worker_groups(config(NATIVE_SAME_THREAD=True), 2) == [(0,), (1,), (2,), (3,)]
+    assert cpus.worker_groups(config(NATIVE_SAME_THREAD=False), 4) == [(0, 1), (2, 3)]
+    assert cpus.fast_workers(config(NATIVE_SAME_THREAD=False)) == 1
 
 
 def test_explicit_groups_and_shard_cpus():
     assert cpus.worker_groups(config(NATIVE_WORKER_CPUS="0,1,2; 4,5"), 2) == [(0, 1, 2), (4, 5)]
     assert cpus.worker_groups(config(NATIVE_WORKER_CPUS=[[3, 4]]), 2) == [(3, 4)]
+    assert cpus.worker_groups(config(NATIVE_WORKER_CPUS="0; 2"), 2) == [(0,), (2,)]  # same-thread
     with pytest.raises(ValueError, match="at least one shard"):
         cpus.worker_groups(config(NATIVE_WORKER_CPUS="0;1,2"), 2)
+    with pytest.raises(ValueError, match="one CPU per worker with NATIVE_SAME_THREAD"):
+        cpus.worker_groups(config(NATIVE_WORKER_CPUS="0,1;2,3", NATIVE_SAME_THREAD=True), 2)
+    with pytest.raises(ValueError, match="requires NATIVE_SAME_THREAD"):
+        cpus.worker_groups(config(NATIVE_WORKER_CPUS="0;1", NATIVE_SAME_THREAD=False), 2)
     with pytest.raises(ValueError, match="NATIVE_SHARD_CPUS"):
         cpus.worker_groups(config(NATIVE_SHARD_CPUS="1,2"), 2)
 
@@ -71,6 +93,16 @@ def test_a_worker_takes_its_group_by_number(monkeypatch):
     assert cpus.worker_group(planned) is None
     monkeypatch.setenv("OLDMAN_SERVER_WORKER_NAME", "Oldman-Server-0-0")
     assert cpus.worker_group(config()) is None  # nothing planned
+
+
+def test_a_worker_runs_same_thread_by_its_group(monkeypatch):
+    monkeypatch.setenv("OLDMAN_SERVER_WORKER_NAME", "Oldman-Server-1-0")
+    assert cpus.same_thread(config(NATIVE_WORKER_CPUS=[(0,), (1,)]))
+    assert not cpus.same_thread(config(NATIVE_WORKER_CPUS=[(0, 1), (2, 3)]))
+    assert cpus.same_thread(config(NATIVE_WORKER_CPUS=[(0,), (1,)], NATIVE_SAME_THREAD=True))
+    monkeypatch.delenv("OLDMAN_SERVER_WORKER_NAME")
+    assert not cpus.same_thread(config())  # one process: shard threads
+    assert cpus.same_thread(config(NATIVE_SAME_THREAD=True))
 
 
 def test_a_worker_takes_its_accept_turn_by_number(monkeypatch):
@@ -147,6 +179,7 @@ def test_shard_cpus_from_the_environment(monkeypatch, value, expected):
     # any setting: one CPU must still be a CPU list.
     from oldman_server.native.host import _shard_cpus
     monkeypatch.setenv("OLDMAN_SERVER_NATIVE_SHARD_CPUS", value)
+    monkeypatch.delenv("OLDMAN_SERVER_NATIVE_SAME_THREAD", raising=False)
     monkeypatch.delenv("OLDMAN_SERVER_WORKER_NAME", raising=False)
     assert _shard_cpus(Config()) == expected
     with pytest.raises(ValueError, match="NATIVE_SHARD_CPUS"):
