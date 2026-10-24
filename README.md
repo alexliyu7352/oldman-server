@@ -4,8 +4,8 @@
 
 ## 现状
 
-- **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 10.6 万对 7.4 万 RPS（1.42 倍），回显请求体约 8.3 万对 6.4 万（1.32 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 8.8 万对 8.0 万（1.10 倍），每请求总 CPU 约为原版的 0.6–0.74 倍，每组配对都领先。
-- **多 worker**：同 4 个物理核，2 个 worker 进程（各 1 个 Python 线程 + 1 个 shard）对原版 Sanic 4 个 worker：小 JSON 16.9 万对 9.5 万 RPS（1.80 倍），回显请求体 14.3 万对 8.0 万（1.76 倍），sleep 14.0 万对 10.1 万（1.38 倍），每请求总 CPU 约为原版的 0.51–0.66 倍。（AMD Ryzen 7 3800X，Ubuntu 20.04，2026-10-22；客户端为 Seastar 的 HTTP 压测工具，占另外 3 个核。）
+- **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 11.8 万对 7.5 万 RPS（1.58 倍），回显请求体约 8.9 万对 6.4 万（1.38 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 9.3 万对 8.1 万（1.14 倍），每请求总 CPU 约为原版的 0.52–0.71 倍，每组配对都领先。
+- **多 worker**：同 4 个物理核，2 个 worker 进程（各 1 个 Python 线程 + 1 个 shard）对原版 Sanic 4 个 worker：小 JSON 17.5 万对 9.7 万 RPS（1.80 倍），回显请求体 15.8 万对 8.4 万（1.87 倍），sleep 15.1 万对 10.3 万（1.47 倍），每请求总 CPU 约为原版的 0.53–0.63 倍。以上为默认的 epoll；io_uring 单进程与之相当，多 worker 小 JSON 18.2 万（1.88 倍）、sleep 15.5 万（1.54 倍）。（AMD Ryzen 7 3800X，Ubuntu 20.04，Linux 5.15，2026-10-24；客户端为 Seastar 的 HTTP 压测工具，占另外 3 个核。）
 - **测试**：Sanic 与 sanic-ext 的测试集已并入本项目（`tests/framework`、`tests/ext`），按本包的行为维护，经 asyncio 服务器和经原生主机（`OLDMAN_SERVER_NATIVE_SERVER=true`）两种方式都全部通过。与 Sanic 的差异见下文。
 
 ## 安装
