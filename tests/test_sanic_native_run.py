@@ -824,27 +824,31 @@ def test_reactor_backend_setting(backend):
     assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
 
 
-def test_the_same_thread_mode_serves_on_epoll():
-    # One process in the same-thread mode: no shard thread; io_uring is not
-    # its backend, so it serves on epoll with a warning.
+@pytest.mark.parametrize("backend", ["epoll", "io_uring"])
+def test_the_same_thread_mode_serves_on_either_backend(backend):
+    # One process in the same-thread mode: no shard thread, on the backend
+    # NATIVE_REACTOR_BACKEND names (io_uring where the system allows it).
+    if backend == "io_uring" and not io_uring_available():
+        pytest.skip("io_uring_setup is not permitted here")
     port = free_port()
     lines, result = run(f'''
-        import threading
         from oldman_server.native import host
         app.config.NATIVE_SERVER = True
         app.config.NATIVE_SAME_THREAD = True
-        app.config.NATIVE_REACTOR_BACKEND = "io_uring"
+        app.config.NATIVE_REACTOR_BACKEND = "{backend}"
 
         @app.after_server_start
         async def layout(app):
-            print("LAYOUT " + json.dumps([host._engine.shards(), host._engine.config.same_thread]), flush=True)
+            engine = host._engine
+            print("LAYOUT " + json.dumps([engine.shards(), engine.config.same_thread,
+                                          engine._native.fallback()]), flush=True)
 
         drive({port})
         app.run(host="127.0.0.1", port={port}, motd=False)
     ''')
-    assert json.loads(lines["LAYOUT"]) == [[], True]
+    assert json.loads(lines["LAYOUT"]) == [[], True, ""]
     assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
-    assert "the same-thread mode runs on epoll" in result.stdout + result.stderr
+    assert "io_uring is unavailable" not in result.stdout + result.stderr
 
 
 def test_the_same_thread_mode_refuses_shard_cpus():

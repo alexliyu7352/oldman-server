@@ -111,8 +111,7 @@ class Config:
     # epoll, with a warning, where the system refuses it.
     reactor_backend: str = "epoll"
     # No shard thread: the one shard runs on this event loop's thread, which
-    # polls it (shard_cpus: that thread's one CPU, for the file threads). On
-    # epoll: io_uring falls back to it, with a warning.
+    # polls it (shard_cpus: that thread's one CPU, for the file threads).
     same_thread: bool = False
 
 

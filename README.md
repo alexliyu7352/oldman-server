@@ -65,12 +65,12 @@ Sanic 的设置照常生效：
 | 设置 | 含义 |
 |---|---|
 | `NATIVE_SHARDS` / `NATIVE_SHARD_CPUS` | shard 线程数量（默认最多 2，取进程 CPU 集合中最后几个）或指定 CPU（只用于单进程）。多 worker 时设了 `NATIVE_SHARDS` 就保留 shard 线程，不自动用同线程模式 |
-| `NATIVE_SAME_THREAD` | 同线程模式：不另开 shard 线程，进程唯一的 shard 在 Python 线程上运行，一个进程一个 CPU，省掉两个线程之间交接请求与响应（只用 epoll）。默认不设：worker 进程的 CPU 不够每个再配一个 shard CPU 时自动启用（`fast=True` 即每个 CPU 一个 worker），除非设了 `NATIVE_SHARDS`；单进程默认不用。设 `True` / `False` 则总是 / 从不 |
+| `NATIVE_SAME_THREAD` | 同线程模式：不另开 shard 线程，进程唯一的 shard 在 Python 线程上运行，一个进程一个 CPU，省掉两个线程之间交接请求与响应。默认不设：worker 进程的 CPU 不够每个再配一个 shard CPU 时自动启用（`fast=True` 即每个 CPU 一个 worker），除非设了 `NATIVE_SHARDS`；单进程默认不用。设 `True` / `False` 则总是 / 从不 |
 | `NATIVE_WORKER_CPUS` | 多 worker 时每个 worker 的 CPU 组，如 `"0,1,2;3,4,5"`（每组第一个给 Python，其余给 shard），或每组一个 CPU（`"0;1;2;3"`，同线程模式）；默认由主进程按 1 + `NATIVE_SHARDS` 个 CPU 一组依次切分，同线程模式每个 CPU 一组 |
 | `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出时由原生层直接回 503，不经错误处理器：这时 Python 已经满载） |
 | `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB） |
 | `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
-| `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前），以及同线程模式，改用 epoll 并记一条警告。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
+| `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前、内核分不出 ring 的内存），改用 epoll 并记一条警告。同线程模式两种都能用。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
 | `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
 
 ## 原生主机与 asyncio 服务器

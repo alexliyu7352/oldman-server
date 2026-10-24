@@ -66,8 +66,8 @@ public:
     // says why). Anything else is refused.
     // same_thread: no shard thread; the one shard's io_context is polled by
     // the thread that made the runtime (Python's), which waits on reactor_fd()
-    // and calls poll() (`cpus`: that thread's CPU, for the file threads). It
-    // runs on epoll: io_uring falls back, as above.
+    // and calls poll() (`cpus`: that thread's CPU, for the file threads), on
+    // either backend.
     explicit Runtime(std::vector<int> cpus, ServerConfig server = {}, std::string reactor_backend = {},
                      bool same_thread = false);
     ~Runtime();

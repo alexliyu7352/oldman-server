@@ -28,20 +28,43 @@ namespace {
 constexpr const char* backend_name = "io_uring";
 #else
 constexpr const char* backend_name = "epoll";
-// The same-thread mode's poller waits on the shard reactor's epoll descriptor,
-// which asio::detail::epoll_reactor keeps private: the explicit instantiation
-// below reads it (access checking does not apply to its names).
-static_assert(ASIO_VERSION == 103802, "check epoll_reactor::epoll_fd_ in this Asio version");
-template <typename Tag, typename Tag::type Member>
-struct Expose {
-    friend typename Tag::type member(Tag) { return Member; }
-};
-struct ReactorFd {
-    using type = int asio::detail::epoll_reactor::*;
-    friend type member(ReactorFd);
-};
-template struct Expose<ReactorFd, &asio::detail::epoll_reactor::epoll_fd_>;
 #endif
+// The same-thread mode's poller waits on the shard reactor's descriptor, which
+// Asio keeps private (epoll_reactor::epoll_fd_; io_uring_service::rings_, one
+// ring by default): the explicit instantiation below reads the member
+// (access checking does not apply to its names).
+static_assert(ASIO_VERSION == 103802, "check the reactor members read below in this Asio version");
+template <auto Member, typename Tag>
+struct Expose {
+    friend auto member(Tag) { return Member; }
+};
+struct ReactorMember {
+    friend auto member(ReactorMember);
+};
+#ifdef OLDMAN_NATIVE_URING
+template struct Expose<&asio::detail::io_uring_service::rings_, ReactorMember>;
+int reactor_descriptor_of(asio::io_context& context) {
+    auto& service = asio::use_service<asio::detail::io_uring_service>(context);
+    service.init_task();
+    return (service.*member(ReactorMember{})).front().ring_.ring_fd;
+}
+#else
+template struct Expose<&asio::detail::epoll_reactor::epoll_fd_, ReactorMember>;
+int reactor_descriptor_of(asio::io_context& context) {
+    auto& reactor = asio::use_service<asio::detail::epoll_reactor>(context);
+    reactor.init_task();
+    return reactor.*member(ReactorMember{});
+}
+#endif
+// A shard's io_context, run by one thread. Its io_uring ring has 1024 entries
+// rather than Asio's 16384: the kernel allocates a ring in physically
+// contiguous pages, which a fragmented machine may lack for a large one (setup
+// then fails with ENOMEM); with fewer entries Asio submits sooner, and the
+// kernel keeps completions that overflow the queue.
+std::unique_ptr<asio::io_context> make_context() {
+    return std::make_unique<asio::io_context>(
+        asio::config_from_string("scheduler.concurrency_hint=1\nreactor.io_uring_ring_size=1024"));
+}
 // Signals go to Python's main thread: the runtime's threads take none.
 void block_signals() {
     sigset_t all;
@@ -207,23 +230,28 @@ struct Impl {
           notify_fd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) {
         if (notify_fd < 0) throw std::runtime_error("eventfd creation failed");
         adopt(server_config);
-        if (same_thread) {
-            poller = std::this_thread::get_id();
-            make_polled_context();
+        // The shards' io_contexts, made here rather than on their threads: a
+        // backend the kernel refuses fails the construction, which the io_uring
+        // build's entry point turns into the fallback to epoll. In the
+        // same-thread mode this is the polling thread, which then waits on the
+        // reactor before the control thread posts the server's start; the work
+        // guards keep an idle poll() from stopping the context.
+        try {
+            for (size_t i = 0; i < cpus.size(); ++i) {
+                contexts.push_back(make_context());
+                keep_running.push_back(asio::make_work_guard(*contexts.back()));
+            }
+            if (same_thread) {
+                poller = std::this_thread::get_id();
+                reactor_descriptor = reactor_descriptor_of(*contexts.front());
+                pollable = true;
+            }
+        } catch (...) {
+            keep_running.clear();
+            contexts.clear();
+            ::close(notify_fd);
+            throw;
         }
-    }
-    // Same-thread mode: the shard's io_context, made on the polling thread so
-    // that it waits on the reactor before the control thread posts the
-    // server's start. The work guard keeps poll() from stopping it when idle.
-    void make_polled_context() {
-        contexts.push_back(std::make_unique<asio::io_context>(1));
-        keep_running.push_back(asio::make_work_guard(*contexts.back()));
-#ifndef OLDMAN_NATIVE_URING
-        auto& reactor = asio::use_service<asio::detail::epoll_reactor>(*contexts.back());
-        reactor.init_task();
-        reactor_descriptor = reactor.*member(ReactorFd{});
-#endif
-        pollable = true;
     }
     ~Impl() { if (notify_fd >= 0) ::close(notify_fd); }
     void notify() noexcept {
@@ -250,14 +278,10 @@ struct Impl {
     }
     // The shards: each pinned to its CPU and reporting its thread before it runs.
     void start_shards() {
-        if (same_thread) return;  // the context exists; no thread runs it
+        if (same_thread) return;  // no thread runs its context
         std::latch running(std::ptrdiff_t(cpus.size()));
         std::vector<std::exception_ptr> failures(cpus.size());
         shard_info.resize(cpus.size());
-        for (unsigned i = 0; i < cpus.size(); ++i) {
-            contexts.push_back(std::make_unique<asio::io_context>(1));
-            keep_running.push_back(asio::make_work_guard(*contexts.back()));
-        }
         for (unsigned i = 0; i < cpus.size(); ++i) {
             shard_threads.emplace_back([this, i, &running, &failures] {
                 block_signals();
@@ -549,7 +573,7 @@ void AsioRuntime::close_fd() {
 // running runtime, or nullptr and why not when this system refuses io_uring.
 extern "C" __attribute__((visibility("default")))
 RuntimeBackend* oldman_native_uring_runtime(const std::vector<int>* cpus, const ServerConfig* config,
-                                             std::string* why) {
+                                             bool same_thread, std::string* why) {
     // Asio's io_uring support assumes Linux 5.10 or later.
     unsigned major = 0, minor = 0;
     utsname system{};
@@ -559,18 +583,19 @@ RuntimeBackend* oldman_native_uring_runtime(const std::vector<int>* cpus, const 
         return nullptr;
     }
     try {
-        asio::io_context probe(1);  // sets up a ring: refused by seccomp, io_uring_disabled, ...
+        // Sets up the shards' rings: refused by seccomp, io_uring_disabled, ENOMEM, ...
+        return new AsioRuntime(*cpus, *config, same_thread);
     } catch (const std::exception& e) {
         *why = e.what();
         return nullptr;
     }
-    return new AsioRuntime(*cpus, *config);
 }
 #else
 static std::atomic<bool> ever_started{false};
 
 // The io_uring build, next to this extension; nullptr (and why) without it.
-static RuntimeBackend* load_uring(const std::vector<int>& cpus, const ServerConfig& config, std::string& why) {
+static RuntimeBackend* load_uring(const std::vector<int>& cpus, const ServerConfig& config, bool same_thread,
+                                  std::string& why) {
     Dl_info self{};
     if (!::dladdr(reinterpret_cast<void*>(&load_uring), &self) || !self.dli_fname) {
         why = "cannot locate the native extension";
@@ -583,13 +608,13 @@ static RuntimeBackend* load_uring(const std::vector<int>& cpus, const ServerConf
         why = ::dlerror();
         return nullptr;
     }
-    using Factory = RuntimeBackend* (*)(const std::vector<int>*, const ServerConfig*, std::string*);
+    using Factory = RuntimeBackend* (*)(const std::vector<int>*, const ServerConfig*, bool, std::string*);
     auto factory = reinterpret_cast<Factory>(::dlsym(library, "oldman_native_uring_runtime"));
     if (!factory) {
         why = "the io_uring build has no entry point";
         return nullptr;
     }
-    return factory(&cpus, &config, &why);
+    return factory(&cpus, &config, same_thread, &why);
 }
 Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor_backend, bool same_thread) {
     if (cpus.empty()) throw std::invalid_argument("CPUs required");
@@ -598,10 +623,8 @@ Runtime::Runtime(std::vector<int> cpus, ServerConfig config, std::string reactor
     if (same_thread && cpus.size() != 1) throw std::invalid_argument("the same-thread mode takes one CPU");
     validate_server(config);
     if (ever_started.exchange(true)) throw std::runtime_error("one native runtime per process");
-    if (reactor_backend == "io_uring" && same_thread) {
-        fallback_ = "the same-thread mode runs on epoll";
-    } else if (reactor_backend == "io_uring") {
-        p.reset(load_uring(cpus, config, fallback_));
+    if (reactor_backend == "io_uring") {
+        p.reset(load_uring(cpus, config, same_thread, fallback_));
         if (!p && fallback_.empty()) fallback_ = "io_uring is unavailable";
     }
     if (!p) p = std::make_unique<AsioRuntime>(std::move(cpus), std::move(config), same_thread);

@@ -181,17 +181,29 @@ def test_the_polling_thread_starts_and_stops_a_server_itself():
     assert "stopped server" in out, out
 
 
-def test_the_same_thread_mode_runs_on_epoll():
-    out = run_same_thread('''
-        runtime = n.Runtime([cpus[-1]], n.ServerConfig(), "io_uring", True)
-        print("fallback", runtime.fallback())
+@pytest.mark.parametrize("backend", ["epoll", "io_uring"])
+def test_a_same_thread_runtime_serves_on_either_backend(backend):
+    # The poller waits on the reactor's descriptor: the epoll set, or the
+    # io_uring ring (where the system allows io_uring; else epoll and why).
+    from test_sanic_native_run import io_uring_available
+    out = run_same_thread(f'''
+        config = server_config()
+        runtime = n.Runtime([cpus[-1]], config, "{backend}", True)
+        print("fallback", repr(runtime.fallback()), runtime.reactor_fd() >= 0)
         until(runtime, 1)
+        with socket.create_connection(("127.0.0.1", config.http_port), timeout=5):
+            pass
         runtime.stop()
         until(runtime, 3)
         runtime.join()
         runtime.close_fd()
+        print("stopped")
     ''')
-    assert "fallback the same-thread mode runs on epoll" in out, out
+    expected = "fallback '' True" if backend == "epoll" or io_uring_available() else "fallback 'io_uring"
+    assert expected in out and "stopped" in out, out
+
+
+def test_a_same_thread_runtime_takes_one_cpu():
     with pytest.raises(AssertionError, match="one CPU"):
         run_same_thread('''
             n.Runtime(cpus[-2:], n.ServerConfig(), "epoll", True)
