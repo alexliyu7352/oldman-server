@@ -606,6 +606,46 @@ def test_a_single_process_listens_on_the_worker_0_address(short_dir):
     assert not list(short_dir.glob("w*.sock"))
 
 
+def test_tcp_connections_send_each_write_at_once():
+    # TCP_NODELAY, as asyncio and uvloop set it: without it a streamed
+    # response's next piece waited until the client acknowledged the last
+    # (which a client may delay some 40 ms).
+    port = free_port()
+    lines, _ = run(f'''
+        import socket
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SHARDS = 1
+
+        @app.get("/nodelay")
+        async def nodelay(request):
+            # This connection's socket among the process's descriptors: on
+            # the server's port, from the client's.
+            for name in os.listdir("/proc/self/fd"):
+                try:
+                    sock = socket.socket(fileno=os.dup(int(name)))
+                except OSError:
+                    continue  # not a socket
+                with sock:
+                    try:
+                        found = (sock.family == socket.AF_INET and sock.getsockname()[1] == {port}
+                                 and sock.getpeername()[1] == request.port)
+                    except OSError:
+                        found = False
+                    if found:
+                        return text(str(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)))
+            return text("not found")
+
+        @app.after_server_start
+        async def requests(app):
+            _, body = await exchange({port}, b"GET /nodelay HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n")
+            print("NODELAY " + body, flush=True)
+            app.stop()
+
+        app.run(host="127.0.0.1", port={port}, single_process=True, motd=False)
+    ''')
+    assert lines["NODELAY"] == "1"
+
+
 def test_sanic_testing_client_once_per_process():
     lines, _ = run('''
         app.config.NATIVE_SERVER = True

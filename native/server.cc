@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -788,6 +789,13 @@ class Service {
         }
         failures = 0;
         if (!accepts()) co_return false;
+        if (remote.data()->sa_family != AF_UNIX) {
+            // As asyncio and uvloop: each piece of a streamed response goes
+            // out as it is written, not after the peer acknowledges the last
+            // (delayed acknowledgements held them back some 40 ms).
+            const int on = 1;
+            ::setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+        }
         if (counted && own_slot) count_connection(1);
         owner.hand_off(target, std::move(socket), remote, listener.unix_path, counted);
         co_return true;
