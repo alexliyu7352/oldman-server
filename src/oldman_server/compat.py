@@ -312,23 +312,30 @@ else:
 
 # While the native host serves (NATIVE_SERVER), its file operations run on the
 # native shards: an object with serving() (true on the loop it serves),
-# stat(path) and read(path, offset, length) returning awaitables.
+# stat(path), read(path, offset, length) and open(path) (open() and fstat: the
+# stat) returning awaitables.
 native_files: Any = None
 
 _stat_async = stat_async
 
 
-async def stat_async(path) -> os.stat_result:  # type: ignore[no-redef]
+def serving_native_files():
+    """native_files while the native host serves on the running loop, else None."""
     files = native_files
-    if files is not None and files.serving():
+    return files if files is not None and files.serving() else None
+
+
+async def stat_async(path) -> os.stat_result:  # type: ignore[no-redef]
+    files = serving_native_files()
+    if files is not None:
         return await files.stat(path)
     return await _stat_async(path)
 
 
 async def read_file_async(path, offset: int = 0, size: int | None = None) -> bytes:
     """open(path, "rb"), seek to `offset` and read `size` bytes (all by default)."""
-    files = native_files
-    if files is not None and files.serving():
+    files = serving_native_files()
+    if files is not None:
         return await files.read(path, offset, -1 if size is None else size)
     async with await open_async(path, mode="rb") as f:
         if offset:

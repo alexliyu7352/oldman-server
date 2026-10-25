@@ -1,7 +1,9 @@
 """File responses on the native host: file(), file_stream() and app.static()
-read by the native file threads with Sanic's headers and errors."""
+read by the native file threads with Sanic's headers and errors; a large
+file()'s body goes from the file to the connection."""
 import asyncio
 from email.utils import formatdate
+import itertools
 import json as json_module
 import os
 
@@ -24,6 +26,19 @@ def make_app(name, directory):
     @app.get("/file/<name>")
     async def whole(request, name):
         return await file(directory / name, request_headers=request.headers)
+
+    @app.route("/seen/<name>", methods=["GET", "HEAD"])
+    async def seen(request, name):
+        status = int(request.args.get("status", 200))
+        return await file(directory / name, status=status)
+
+    @app.on_response
+    async def body_seen(request, response):
+        # What response middleware sees of a file() body, and a body it sets.
+        if request.path.startswith("/seen/"):
+            if request.args.get("replace"):
+                response.body = b"replaced"
+            response.headers["x-body"] = "none" if response.body is None else str(len(response.body))
 
     @app.get("/stream/<name>")
     async def stream(request, name):
@@ -58,6 +73,18 @@ def make_app(name, directory):
         _engine.file_open_stat = present
         return await file_stream(directory / "vanished.bin")
 
+    @app.get("/vanished-file")
+    async def vanished_file(request):
+        # Opened in the handler, gone when the shard opens it to send it.
+        from oldman_server.native.host import _engine
+        check = _engine.file_open_stat
+
+        async def present(path):
+            _engine.file_open_stat = check
+            return os.stat_result((0o100644, 0, 0, 1, 0, 0, 200000, 0, 0, 0))
+        _engine.file_open_stat = present
+        return await file(directory / "vanished.bin", last_modified=None)
+
     @app.get("/stat/<name>")
     async def stat(request, name):
         path = directory / name
@@ -86,12 +113,15 @@ def write_files(directory):
     return contents
 
 
+_apps = itertools.count()
+
+
 def run(tmp_path, *scenarios):
     contents = write_files(tmp_path)
 
     async def main():
         from oldman_server.native.host import serve
-        app = make_app(f"files_{os.getpid()}_{len(scenarios)}", tmp_path)
+        app = make_app(f"files_{os.getpid()}_{next(_apps)}", tmp_path)
         cfg = config(application_dispatch_all=True, max_response_bytes=4 << 20)
         results = []
         async with serve(app, cfg) as engine:
@@ -157,6 +187,51 @@ def test_file_and_static_responses(tmp_path):
         "equal": True, "part": "34567",
         "errors": [["IsADirectoryError", 21, True], ["FileNotFoundError", 2, True]]}
     assert operations[0] > 0 and operations[1:] == (0, 0)  # served by native file operations
+
+
+def test_large_files_go_from_the_file_to_the_connection(tmp_path):
+    huge = os.urandom(5 << 20)  # more than the host's response limit (4 MiB here)
+    (tmp_path / "huge.bin").write_bytes(huge)
+
+    async def whole(reader, writer):
+        writer.write(get("/seen/big.bin") + get("/seen/small.txt") + get("/seen/big.bin?replace=1"))
+        return [await read_response(reader) for _ in range(3)]
+
+    async def ranged_and_huge(reader, writer):
+        writer.write(get("/static/big.bin", "Range: bytes=1000-299999") + get("/file/huge.bin"))
+        return [await read_response(reader) for _ in range(2)]
+
+    async def head_and_no_body(reader, writer):
+        # HEAD: the file's Content-Length, no body; a 204 sends none either.
+        writer.write(b"HEAD /seen/big.bin HTTP/1.1\r\nHost: x\r\n\r\n"
+                     + get("/seen/big.bin?status=204") + get("/seen/small.txt"))
+        head = (await reader.readuntil(b"\r\n\r\n")).decode("latin-1").lower()
+        return head, await read_response(reader), await read_response(reader)
+
+    async def vanished(reader, writer):
+        # Its Content-Length went out with the head: the connection ends there.
+        writer.write(get("/vanished-file"))
+        head = await reader.readuntil(b"\r\n\r\n")
+        return head.decode("latin-1").lower(), await reader.read()
+
+    contents, (seen, (ranged, whole_huge), (head, no_body, after), (cut_head, cut_rest),
+               operations) = run(tmp_path, whole, ranged_and_huge, head_and_no_body, vanished)
+    big = contents["big.bin"]
+    (s1, h1, b1), (s2, h2, b2), (s3, h3, b3) = seen
+    # Response middleware sees no body for a large file; a small one is read.
+    assert (s1, b1, header(h1, "x-body")) == (200, big, "none")
+    assert header(h1, "content-length") == str(len(big))
+    assert (s2, b2, header(h2, "x-body")) == (200, contents["small.txt"], "36")
+    # A body set by middleware is sent instead of the file.
+    assert (s3, b3, header(h3, "x-body"), header(h3, "content-length")) == (200, b"replaced", "8", "8")
+    (s4, h4, b4), (s5, _, b5) = ranged, whole_huge
+    assert (s4, b4, header(h4, "content-range")) == (206, big[1000:300000], f"bytes 1000-299999/{len(big)}")
+    assert (s5, b5) == (200, huge)
+    assert head.startswith("http/1.1 200") and f"content-length: {len(big)}\r\n" in head
+    assert no_body[0] == 204 and no_body[2] == b""
+    assert after[0] == 200 and after[2] == contents["small.txt"]
+    assert "content-length: 200000\r\n" in cut_head and cut_rest == b""
+    assert operations[1:] == (0, 0)
 
 
 def test_file_streams(tmp_path):

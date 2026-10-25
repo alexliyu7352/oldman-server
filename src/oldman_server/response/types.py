@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Coroutine, Iterator
 from datetime import datetime
+from pathlib import PurePath
 from types import MemberDescriptorType
 from typing import TYPE_CHECKING, Any, AnyStr, Callable, TypeVar
 
-from oldman_server.compat import Header
+from oldman_server.compat import Header, read_file_async
 from oldman_server.cookies import CookieJar
 from oldman_server.cookies.response import Cookie, SameSite
 from oldman_server.exceptions import OldmanServerException, ServerError
@@ -314,6 +315,47 @@ class HTTPResponse(BaseHTTPResponse):
 
     async def __aexit__(self, *_):
         await self.eof()
+
+
+class FileResponse(HTTPResponse):
+    """file()'s response for a large file on the native host: when it is
+    sent, the host reads the file range and writes it to the connection, so
+    its bytes never become a Python object. ``body`` is None; a body set
+    before the send is sent instead of the file."""
+
+    __slots__ = ("_file",)
+
+    def __init__(
+        self,
+        location: str | PurePath,
+        offset: int,
+        length: int,
+        status: int = 200,
+        headers: Header | dict[str, str] | None = None,
+        content_type: str | None = None,
+    ):
+        super().__init__(None, status, headers, content_type)
+        self.body = None
+        self._file = location, offset, length
+
+    async def send(
+        self,
+        data: AnyStr | None = None,
+        end_stream: bool | None = None,
+    ) -> None:
+        file, self._file = self._file, None
+        if file is not None and self.body is None:
+            # The native host's exchange; otherwise the file is read here.
+            send_file_body = getattr(self.stream, "send_file_body", None)
+            if (
+                send_file_body is not None
+                and not data
+                and end_stream is not False
+                and await send_file_body(self, *file)
+            ):
+                return
+            self.body = await read_file_async(*file)
+        await super().send(data, end_stream)
 
 
 class JSONResponse(HTTPResponse):

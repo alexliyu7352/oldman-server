@@ -637,6 +637,29 @@ class _BufferedExchange:
         await _engine.stream_file(self.native.request_id, self.native.shard, path, offset, length,
                                   chunk_size)
 
+    async def send_file_body(self, response, path, offset, length):
+        """FileResponse.send: the complete response whose body is `length` bytes
+        of `path` from `offset`, read and written by the native host. False when
+        it cannot be (the response is then sent with the file read into it)."""
+        status = response.status
+        if (self.native is None or self.streaming is not None or self.result is not None
+                or type(status) is not int or not has_message_body(status)):
+            return False
+        if self.native.method == "HEAD":
+            # The body's Content-Length unless one was given, and no body.
+            response.headers.setdefault("content-length", str(length))
+            response.body = b""
+            self.complete()
+            return True
+        # As Sanic sets it for a complete body, replacing any other value.
+        response.headers["content-length"] = str(length)
+        await self._stream_start(b"")
+        self._count_sent(length, False)
+        await _engine.stream_file(self.native.request_id, self.native.shard, path, offset, length,
+                                  65536)
+        await self._stream_more(b"", True)
+        return True
+
     async def websocket_handshake(self, request, subprotocols=None):
         """WebSocketProtocol.websocket_handshake: the 101 switches the native
         connection to a tunnel served by WebsocketImplProtocol."""
@@ -1179,6 +1202,9 @@ class _NativeFiles:
 
     def read(self, path, offset, length):
         return self._engine.file_read(path, offset, length)
+
+    def open(self, path):
+        return self._engine.file_open_stat(path)
 
 
 class NativeServer:

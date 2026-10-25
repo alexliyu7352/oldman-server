@@ -3,19 +3,25 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from email.utils import formatdate, parsedate_to_datetime
 from mimetypes import guess_type
-from os import path
+from os import path, stat_result
 from pathlib import PurePath
 from time import time
 from typing import Any, AnyStr, Callable
 from urllib.parse import quote_plus
 
-from oldman_server.compat import Header, open_async, read_file_async, stat_async
+from oldman_server.compat import (
+    Header,
+    open_async,
+    read_file_async,
+    serving_native_files,
+    stat_async,
+)
 from oldman_server.constants import DEFAULT_HTTP_CONTENT_TYPE
 from oldman_server.helpers import Default, _default
 from oldman_server.log import logger
 from oldman_server.models.protocol_types import HTMLProtocol, Range
 
-from .types import HTTPResponse, JSONResponse, ResponseStream
+from .types import FileResponse, HTTPResponse, JSONResponse, ResponseStream
 
 
 def empty(
@@ -191,6 +197,19 @@ async def validate_file(
     return None
 
 
+# On the native host, file() sends a file of at least this many bytes from the
+# file to the connection (FileResponse): as a Python object its bytes would cost
+# more, in copies and the fresh pages of a large allocation. A smaller file
+# costs less read into the response than sent that way.
+_NATIVE_SEND_SIZE = 128 << 10
+
+
+def _read_length(stat: stat_result, offset: int, size: int | None) -> int:
+    """How many bytes reading `size` (None: to the end) from `offset` gets."""
+    length = max(0, stat.st_size - offset)
+    return length if size is None else min(length, size)
+
+
 async def file(
     location: str | PurePath,
     status: int = 200,
@@ -203,6 +222,7 @@ async def file(
     max_age: float | int | None = None,
     no_store: bool | None = None,
     _range: Range | None = None,
+    _stat: stat_result | None = None,
 ) -> HTTPResponse:
     """Return a response object with file data.
 
@@ -218,6 +238,7 @@ async def file(
         max_age (Optional[Union[float, int]], optional): Max age for cache control.
         no_store (Optional[bool], optional): Any cache should not store this response. Defaults to None.
         _range (Optional[Range], optional):
+        _stat (Optional[os.stat_result], optional): The file's stat, when the caller has one.
 
     Returns:
         HTTPResponse: The response object with the file data.
@@ -226,8 +247,8 @@ async def file(
     if isinstance(last_modified, datetime):
         last_modified = last_modified.replace(microsecond=0).timestamp()
     elif isinstance(last_modified, Default):
-        stat = await stat_async(location)
-        last_modified = stat.st_mtime
+        _stat = await stat_async(location)
+        last_modified = _stat.st_mtime
 
     if (
         validate_when_requested
@@ -268,17 +289,36 @@ async def file(
     filename = filename or path.split(location)[-1]
 
     if _range:
-        out_stream = await read_file_async(location, _range.start, _range.size)
+        offset, size = _range.start, _range.size
         headers["Content-Range"] = (
             f"bytes {_range.start}-{_range.end}/{_range.total}"
         )
         status = 206
     else:
-        out_stream = await read_file_async(location)
+        offset, size = 0, None
 
     content_type = mime_type or guess_content_type(
         filename, fallback="text/plain; charset=utf-8"
     )
+    files = serving_native_files()
+    if files is not None:
+        # A file of unknown size, or a large one, is opened here: it raises
+        # in the handler as reading it would.
+        opened = None
+        if _stat is None:
+            _stat = opened = await files.open(location)
+        if _read_length(_stat, offset, size) >= _NATIVE_SEND_SIZE:
+            if opened is None:
+                opened = await files.open(location)
+            return FileResponse(
+                location,
+                offset,
+                _read_length(opened, offset, size),
+                status=status,
+                headers=headers,
+                content_type=content_type,
+            )
+    out_stream = await read_file_async(location, offset, size)
     return HTTPResponse(
         body=out_stream,
         status=status,

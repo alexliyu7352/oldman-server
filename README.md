@@ -71,7 +71,7 @@ Sanic 的设置照常生效：
 | `NATIVE_SAME_THREAD` | 同线程模式：不另开 shard 线程，进程唯一的 shard 在 Python 线程上运行，一个进程一个 CPU，省掉两个线程之间交接请求与响应。默认不设：worker 进程的 CPU 不够每个再配一个 shard CPU 时自动启用（`fast=True` 即每个 CPU 一个 worker），除非设了 `NATIVE_SHARDS`；单进程默认不用。设 `True` / `False` 则总是 / 从不 |
 | `NATIVE_WORKER_CPUS` | 多 worker 时每个 worker 的 CPU 组，如 `"0,1,2;3,4,5"`（每组第一个给 Python，其余给 shard），或每组一个 CPU（`"0;1;2;3"`，同线程模式）；默认由主进程按 1 + `NATIVE_SHARDS` 个 CPU 一组依次切分，同线程模式每个 CPU 一组 |
 | `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出时由原生层直接回 503，不经错误处理器：这时 Python 已经满载） |
-| `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB） |
+| `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB；从文件直接写入连接的 `file()` 不受它限制） |
 | `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
 | `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前、内核分不出 ring 的内存），改用 epoll 并记一条警告。同线程模式两种都能用。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
 | `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
@@ -80,7 +80,7 @@ Sanic 的设置照常生效：
 
 原生主机在当前进程内服务明文 HTTP/1.1，监听 TCP 或 unix socket，包括 keep-alive、pipelining、chunked 请求体、流式请求与流式响应、背压、100-continue 和 WebSocket。
 
-- 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由原生主机的文件线程完成（在 shard 的 CPU 上，读盘时不阻塞 shard），不再经 aiofiles 线程池；`file_stream()` 的文件内容由文件线程读出、shard 直接写入连接，分块与原版相同（带 Range 时的修正见「行为修正」）。响应头、304/206、错误类型与原版一致。`file()` 把整个文件读成 bytes 再交给原生主机写出，大文件（如 256 KiB）在同线程布局下比原版慢，见 [BENCHMARKS.md](https://github.com/alexliyu7352/oldman-server/blob/main/BENCHMARKS.md)「静态文件」。
+- 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由原生主机的文件线程完成（在 shard 的 CPU 上，读盘时不阻塞 shard），不再经 aiofiles 线程池；`file_stream()` 与 128 KiB 以上的 `file()` 的文件内容由文件线程读出、shard 直接写入连接，不经 Python（`file()` 因此带来的差异见「与 Sanic 的差异」），`file_stream()` 的分块与原版相同（带 Range 时的修正见「行为修正」）；更小的文件由 `file()` 读进响应，这样更省。响应头、304/206、错误类型与原版一致。
 - multipart 表单：`request.form` / `request.files` 的解析由 C++ 完成（`native/multipart.hh`），结果与 Sanic 的 `parse_multipart_form` 相同；遇到需要 Python 编解码或 Unicode 处理的表单（非 ASCII 的段头、非 UTF-8 字段、`filename*`、没有 name 的段、格式错误）则照旧由 Sanic 的解析器处理。
 - 监听 socket：由 Sanic 照原样绑定（unix socket 用临时名、权限默认 0o666（`UNIX_SOCKET_MODE`）、改名替换，退出时删除），原生主机在这个 socket 上接受连接（shard 0 接受后分给各 shard），它在服务期间保持打开、随服务器关闭，所以传入的 `sock`（TCP 或 AF_UNIX）、`app.serve_location` 与原版一致。多 worker 时与原版的 TCP 一样，由主进程绑定并监听一次，各 worker 都在这一个 socket 上接受连接（unix socket 也是，退出时由主进程删除）。主进程从启动到退出一直在监听：还没有 worker 在接受时（启动时、所有 worker 一起重启时）新连接在队列里等，而不是被拒绝，别的程序这时也绑定不了这个地址；一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket，已在队列里的连接由其他 worker 接走。各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。用户传入的共用 socket 同样如此。原版的 unix socket 是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。放在 nginx 之后的部署见下一节。
 - 只服务明文 HTTP/1.1：TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见「与 Sanic 的差异」）。
@@ -172,6 +172,7 @@ server {
 - `request.headers` 是 `NativeHeaders`：`[]`、`get`、`getone`、`getall`、`in` 与属性访问（`headers.content_type`）直接查原生请求；迭代、`items()`、`len()`、`==`、`copy()` 与修改在第一次用到时建一个 `Header`，之后都在它上面进行，结果与 `Header` 相同。它是 `multidict.MultiMapping`（也是 `Mapping`），但不是 `CIMultiDict`：`isinstance(request.headers, CIMultiDict)` 为 False。
 - 请求行之前的空行按 RFC 9112 跳过，计入请求头上限（`REQUEST_MAX_HEADER_SIZE` 等），超出回 413；原版对任何前导空行都回 400。
 - `request.head`、`raw_headers`、`request_line` 由解析出的请求行与字段重建（冒号后一个空格、值已去掉两端空白、名字保留请求方的大小写），不是请求方发来的原始字节。
+- `file()`（`app.static` 也用它）回应 128 KiB 以上的文件时，文件内容不读进 Python：handler 里只打开文件（打不开时照原版在 handler 里抛出），送出响应时由原生主机从文件读出、直接写入连接。响应中间件看到的 `response.body` 是 None；中间件设了别的 body，就送出那个 body。`Content-Length` 是打开时的文件大小，之后文件变短的话，连接在已送出的数据之后关闭。这种响应不受 `NATIVE_MAX_RESPONSE_SIZE` 限制。更小的文件与 asyncio 服务器照旧把文件读进 `response.body`。
 - 响应头最多 128 个字段、合计约 8 KiB，超出时交给错误处理器（500）；asyncio 服务器没有这个上限（放在 nginx 之后时，nginx 默认的 `proxy_buffer_size` 也只容纳 4 或 8 KiB 的上游响应头）。
 - `request.protocol` 是原生连接的替身：提供 `state`、`version`、`conn_info`，不是 `HttpProtocol` 实例。
 - 原生服务的默认运行没有 worker manager，所以没有 `app.m`（multiplexer）。这与原版 `single_process=True` 相同。

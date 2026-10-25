@@ -347,12 +347,13 @@ class StaticHandleMixin(metaclass=AppMeta):
                         return await file_stream(
                             file_path, headers=headers, _range=_range
                         )
-                # The modification time stat'ed above, instead of another stat.
+                # The stat above, instead of another stat.
                 return await file(
                     file_path,
                     headers=headers,
                     _range=_range,
                     last_modified=stats.st_mtime if stats else _default,
+                    _stat=stats,
                 )
         except (IsADirectoryError, PermissionError):
             return await directory_handler.handle(request, request.path)
