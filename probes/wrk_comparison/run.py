@@ -2,11 +2,13 @@
 oldman-server's layouts, a bare function on the native host (the server's own
 ceiling, as the site's bare WSGI/ASGI entries), and stock Sanic, on the same
 server cores. A reference beside the paired gate (probes/sanic_comparison,
-whose client checks every response but tops out near 185k RPS on 3 cores).
+whose client checks every response but tops out above 200k RPS on 3 cores).
 
   run.py --out DIR [--connections 64,256,512] [--rounds 2] [--path /] [--quiet]
-         [--services candidate,candidate-shards,bare,bare-shards,stock]
-         (each candidate and bare service also as NAME-io_uring)
+         [--services candidate,candidate-shards,bare,bare-shards,stock] [--close]
+         (each candidate and bare service also as NAME-io_uring; the bare
+         function serves / only, the framework apps also /static/small.bin
+         and /static/large.bin; --close: a new connection for every request)
 
 Each window: warm-up, then wrk; it records RPS, non-2xx responses, the
 service's own CPU (its process tree) per request, other processes' load on the
@@ -89,9 +91,10 @@ def wait_quiet(limit=1800):
         quiet = quiet + 1 if cores(before, busy(everything)) < 2 else 0
 
 
-def wrk(port, path, connections, seconds, client):
+def wrk(port, path, connections, seconds, client, close=False):
     command = ["taskset", "-c", ",".join(map(str, client)), str(WRK), f"-t{len(client)}",
-               f"-c{connections}", f"-d{seconds}s", "--latency", f"http://127.0.0.1:{port}{path}"]
+               f"-c{connections}", f"-d{seconds}s", "--latency", *(["-H", "Connection: close"] if close else []),
+               f"http://127.0.0.1:{port}{path}"]
     out = subprocess.run(command, capture_output=True, text=True, check=True).stdout
     found = lambda pattern: re.search(pattern, out)
     non2xx = found(r"Non-2xx or 3xx responses: (\d+)")
@@ -102,7 +105,7 @@ def wrk(port, path, connections, seconds, client):
             "p50": found(r"50%\s+(\S+)").group(1), "p99": found(r"99%\s+(\S+)").group(1)}
 
 
-def window(name, layout, connections, path, warmup, seconds):
+def window(name, layout, connections, path, warmup, seconds, close=False):
     arguments, extra = SERVICES[name]
     port = free_port()
     env = {**os.environ, **extra}
@@ -125,15 +128,15 @@ def window(name, layout, connections, path, warmup, seconds):
             raise RuntimeError(f"{name} did not start")
         if loop != "uvloop":
             raise RuntimeError(f"{name} runs on {loop}, not uvloop")
-        wrk(port, path, connections, warmup, layout["client"])
+        wrk(port, path, connections, warmup, layout["client"], close)
         server_cpus, client_cpus = set(layout["server"]), set(layout["client"])
         before, client_before = busy(server_cpus), busy(client_cpus)
         own_before, started = tree_ticks(process.pid), time.monotonic()
-        result = wrk(port, path, connections, seconds, layout["client"])
+        result = wrk(port, path, connections, seconds, layout["client"], close)
         elapsed = time.monotonic() - started
         own = (tree_ticks(process.pid) - own_before) / os.sysconf("SC_CLK_TCK") / elapsed
         server_busy = cores(before, busy(server_cpus))
-        return {"service": name, "connections": connections, "path": path, "loop": loop, **result,
+        return {"service": name, "connections": connections, "path": path, "close": close, "loop": loop, **result,
                 "own_cores": round(own, 3), "foreign_server_cores": round(max(0.0, server_busy - own), 3),
                 "client_cores": round(cores(client_before, busy(client_cpus)), 3),
                 "cpu_us": round(own / result["rps"] * 1e6, 2)}
@@ -158,6 +161,7 @@ def main():
     parser.add_argument("--seconds", type=int, default=10)
     parser.add_argument("--services", default=",".join(DEFAULT_SERVICES))
     parser.add_argument("--quiet", action="store_true", help="wait for a quiet machine before each level")
+    parser.add_argument("--close", action="store_true", help="a new connection for every request")
     args = parser.parse_args()
     services = args.services.split(",")
     if not set(services) <= SERVICES.keys():
@@ -175,7 +179,7 @@ def main():
             for round_ in range(args.rounds):
                 for name in services if round_ % 2 == 0 else services[::-1]:
                     row = {"round": round_, **window(name, layout, connections, args.path,
-                                                     args.warmup, args.seconds)}
+                                                     args.warmup, args.seconds, args.close)}
                     rows.append(row)
                     log.write(json.dumps(row) + "\n"); log.flush()
                     print(json.dumps(row), flush=True)
