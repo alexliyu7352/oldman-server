@@ -24,7 +24,8 @@ jobs:
       - name: Build the wheel
         run: |
           python -m pip install --quiet "uv==0.9.18"
-          OLDMAN_SERVER_PURE_WHEEL=1 uv build --wheel --out-dir dist
+          # This python, not .python-version's exact patch release (the wheel is pure).
+          OLDMAN_SERVER_PURE_WHEEL=1 uv build --wheel --python "$(command -v python)" --out-dir dist
           ls -l dist
           case "$(ls dist)" in *-py3-none-any.whl) ;; *) echo "::error::not a pure wheel"; exit 1 ;; esac
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
