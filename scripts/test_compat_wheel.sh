@@ -26,8 +26,7 @@ uv pip install --quiet --python "$py" "$wheel"
   || failed+=("declared requirements")
 "$py" -I scripts/compat_smoke.py || failed+=("serving")
 uv pip install --quiet --python "$py" "$wheel" --group test
-"$py" -m pytest -q -p no:cacheprovider -rf --continue-on-collection-errors tests/framework tests/ext \
-  || failed+=("framework suites")
+"$py" scripts/run_suites_by_file.py || failed+=("framework suites")
 if (( ${#failed[@]} )); then
   printf 'failed: %s\n' "${failed[@]}"
   exit 1

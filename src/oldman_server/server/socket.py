@@ -75,8 +75,9 @@ def bind_unix_socket(
             raise FileExistsError(f"Existing file is not a socket: {path}")
     except FileNotFoundError:
         pass
-    # Create new socket with a random temporary name
-    tmp_path = path.with_name(f"{path.name}.{secrets.token_urlsafe()}")
+    # Create new socket with a random temporary name: a short suffix, as the
+    # whole path must fit sun_path (108 bytes on Linux, 104 on macOS)
+    tmp_path = path.with_name(f"{path.name}.{secrets.token_urlsafe(8)}")
     sock = socket.socket(socket.AF_UNIX)
     try:
         # Critical section begins (filename races)

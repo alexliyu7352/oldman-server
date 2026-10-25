@@ -227,7 +227,7 @@ def test_a_worker_failing_while_it_stops_does_not_end_the_service(tmp_path):
     assert "expected stop failure" in text
     assert "failed after acknowledging" not in text
     assert "main process stopped" in text
-    assert process.returncode == 0
+    assert process.returncode == 0, text
 
 
 def test_a_restarted_worker_that_fails_to_start_leaves_the_others(tmp_path):
@@ -274,6 +274,7 @@ def test_a_restarted_worker_that_fails_to_start_leaves_the_others(tmp_path):
     assert "failed to start" in text
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the native host is Linux only")
 @pytest.mark.parametrize("groups, same_thread", [("0,4000;1,4001", False), ("4000;4001", True)],
                          ids=["shards", "same-thread"])
 def test_a_native_worker_whose_engine_cannot_start_ends_the_service(tmp_path, groups, same_thread):
