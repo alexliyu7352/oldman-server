@@ -11,6 +11,7 @@ from multiprocessing.context import BaseContext
 from random import choice
 from signal import SIGINT, SIGTERM, Signals
 from signal import signal as signal_func
+from threading import Thread
 from typing import Any, Callable
 
 from oldman_server.compat import OS_IS_WINDOWS
@@ -423,7 +424,14 @@ class WorkerManager:
 
         logger.info("Received signal %s. Shutting down.", Signals(signal).name)
         self.monitor_publisher.send(None)
-        self.shutdown()
+        # From another thread: this handler may have interrupted the main
+        # thread inside a call to the shared worker state, whose reply a call
+        # of its own on that thread's connection would take (the state's
+        # proxies keep a connection per thread). Waited for at most a second,
+        # in case it needs a lock the interrupted thread holds (logging's).
+        stopping = Thread(target=self.shutdown, name="shutdown", daemon=True)
+        stopping.start()
+        stopping.join(1)
 
     def shutdown(self):
         """Shutdown the worker manager."""

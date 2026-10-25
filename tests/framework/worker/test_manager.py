@@ -1,4 +1,11 @@
+import multiprocessing
+import signal
+import sys
+import threading
+import time
+
 from logging import ERROR, INFO
+from multiprocessing.managers import SyncManager
 from signal import SIGINT, SIGTERM
 from unittest.mock import Mock, call, patch
 
@@ -269,6 +276,52 @@ def test_shutdown_signal():
     manager.shutdown_signal(SIGINT, None)
     pub.send.assert_called_with(None)
     manager.shutdown.assert_called_once_with()
+
+
+class Slow:
+    def reply(self, seconds):
+        time.sleep(seconds)
+        return "slow reply"
+
+
+class SlowManager(SyncManager):
+    pass
+
+
+SlowManager.register("Slow", Slow)
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="POSIX signals")
+@pytest.mark.skipif(sys.platform == "darwin", reason="no fork for the manager process on macOS")
+@patch("oldman_server.worker.process.os")
+def test_a_shutdown_signal_during_a_shared_state_call_leaves_it_alone(process_os_mock):
+    # The signal comes while the main thread waits for the shared state's
+    # manager (as _sync_states does); the handler's own state updates must not
+    # take that call's reply on the main thread's connection.
+    shared = SlowManager(ctx=multiprocessing.get_context("fork"))
+    shared.start()
+    try:
+        state, slow = shared.dict(), shared.Slow()
+        process = Mock()
+        process.pid = 1234
+        context = Mock()
+        context.Process.return_value = process
+        manager = WorkerManager(1, fake_serve, {}, context, (Mock(), Mock()), state)
+        (worker_process,) = manager.processes
+        name = worker_process.name
+        previous = signal.signal(SIGTERM, manager.shutdown_signal)
+        timer = threading.Timer(.1, signal.pthread_kill, (threading.main_thread().ident, SIGTERM))
+        try:
+            timer.start()
+            assert slow.reply(.5) == "slow reply"
+        finally:
+            timer.join()
+            signal.signal(SIGTERM, previous)
+        assert manager._shutting_down
+        assert state[name]["state"] == "TERMINATED"
+        process_os_mock.kill.assert_called_once_with(1234, SIGINT)
+    finally:
+        shared.shutdown()
 
 
 def test_shutdown_servers(caplog):
