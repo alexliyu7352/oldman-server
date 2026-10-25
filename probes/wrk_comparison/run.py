@@ -102,7 +102,9 @@ def wrk(port, path, connections, seconds, client, close=False):
     return {"rps": float(found(r"Requests/sec:\s+([\d.]+)").group(1)),
             "non2xx": int(non2xx.group(1)) if non2xx else 0,
             "socket_errors": sum(map(int, errors.groups())) if errors else 0,
-            "p50": found(r"50%\s+(\S+)").group(1), "p99": found(r"99%\s+(\S+)").group(1)}
+            # The latency distribution's lines (a standard deviation column
+            # elsewhere can end in 50% too).
+            "p50": found(r"(?m)^\s+50%\s+(\S+)").group(1), "p99": found(r"(?m)^\s+99%\s+(\S+)").group(1)}
 
 
 def window(name, layout, connections, path, warmup, seconds, close=False):
