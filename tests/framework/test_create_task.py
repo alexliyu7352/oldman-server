@@ -11,8 +11,10 @@ from oldman_server.response import text
 def test_create_task(app):
     e = Event()
 
+    # Time for the server's start and the test client's first request before
+    # the task is done: 50 ms was not always enough on Windows CI machines.
     async def coro():
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.5)
         e.set()
 
     @app.route("/early")
@@ -21,7 +23,7 @@ def test_create_task(app):
 
     @app.route("/late")
     async def set(request):
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1)
         return text(str(e.is_set()))
 
     app.add_task(coro)
