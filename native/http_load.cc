@@ -1,27 +1,33 @@
-// Persistent HTTP lanes, closed-loop or bounded scheduled arrivals.
-#include <seastar/core/app-template.hh>
-#include <seastar/core/coroutine.hh>
-#include <seastar/core/gate.hh>
-#include <seastar/core/loop.hh>
-#include <seastar/core/sharded.hh>
-#include <seastar/core/sleep.hh>
-#include <seastar/http/client.hh>
-#include <seastar/http/request.hh>
-#include <seastar/net/inet_address.hh>
-#include <boost/range/irange.hpp>
+// Persistent HTTP lanes, closed-loop or bounded scheduled arrivals: the load
+// generator of the comparisons. One thread per --smp, each with its own
+// io_context and its share of the lanes (one connection each), pinned to its
+// CPU of --cpuset.
+#include <asio.hpp>
 #include <algorithm>
-#include <atomic>
+#include <cctype>
+#include <cerrno>
+#include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
+#include <string>
+#include <system_error>
 #include <thread>
+#include <vector>
+#include <pthread.h>
+#include <sched.h>
 #include <time.h>
-namespace ss=seastar;
 using Clock=std::chrono::steady_clock;
+using asio::awaitable;
+using asio::use_awaitable;
+using asio::ip::tcp;
 struct Config {
     unsigned port, concurrency;
     std::set<int> pids;
@@ -36,120 +42,246 @@ struct Stats {
     std::vector<uint64_t> latency_ns, dispatch_ns;
     std::map<int,uint64_t> shards, workers, pids;
 };
-class NodelayFactory final: public ss::http::connection_factory {
-    ss::socket_address address;
-public:
-    explicit NodelayFactory(unsigned port):address(ss::net::inet_address("127.0.0.1"),uint16_t(port)){}
-    ss::future<ss::connected_socket> make(ss::abort_source*) override {
-        auto socket=co_await ss::connect(address);
-        socket.set_nodelay(true);
-        co_return std::move(socket);
+static Clock::duration seconds_of(double seconds) {
+    return std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
+}
+static bool same_name(std::string_view a, std::string_view b) {
+    return a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin(),[](unsigned char x,unsigned char y){return std::tolower(x)==std::tolower(y);});
+}
+static bool to_int(std::string_view text, int& value) {
+    auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),value);
+    return error==std::errc() && end==text.data()+text.size();
+}
+// What of a response head the checks need.
+struct Head {
+    int status=0;
+    std::string_view pid, policy, result, shard, worker, length, encoding, connection;
+};
+static Head parse_head(std::string_view head) {
+    Head h;
+    if (head.size()<12 || !head.starts_with("HTTP/1.") || !to_int(head.substr(9,3),h.status))
+        throw std::runtime_error("invalid status line");
+    for (size_t at=head.find("\r\n")+2; at<head.size(); ) {
+        auto end=head.find("\r\n",at);
+        auto line=head.substr(at,end-at); at=end+2;
+        if (line.empty()) break;
+        auto colon=line.find(':');
+        if (colon==line.npos) throw std::runtime_error("invalid header");
+        auto name=line.substr(0,colon), value=line.substr(colon+1);
+        while (!value.empty() && (value.front()==' ' || value.front()=='\t')) value.remove_prefix(1);
+        while (!value.empty() && (value.back()==' ' || value.back()=='\t')) value.remove_suffix(1);
+        for (auto [field,target]: {std::pair{"X-Probe-Pid",&h.pid},{"X-Probe-Policy",&h.policy},{"X-App-Result",&h.result},
+                                   {"X-Probe-Shard",&h.shard},{"X-Probe-Worker",&h.worker},{"Content-Length",&h.length},
+                                   {"Transfer-Encoding",&h.encoding},{"Connection",&h.connection}})
+            if (same_name(name,field)) *target=value;
+    }
+    return h;
+}
+// The waits of a phase for the requests it started (Seastar's gate).
+struct Pending {
+    unsigned count=0;
+    asio::steady_timer timer;
+    explicit Pending(asio::io_context& context):timer(context) {}
+    void leave() { if (--count==0) timer.cancel(); }
+    awaitable<void> wait() {
+        while (count) {
+            timer.expires_at(Clock::time_point::max());
+            asio::error_code error;
+            co_await timer.async_wait(asio::redirect_error(use_awaitable,error));
+        }
     }
 };
 class Load {
-    Config config;
-    std::vector<std::unique_ptr<ss::http::client>> clients;
-    std::vector<bool> busy;
-    Stats stats;
+    struct Lane {
+        tcp::socket socket;
+        std::string buffer;
+        bool busy=false;
+    };
+    const Config& config;
+    asio::io_context& context;
+    unsigned id, count;
+    std::string request;
+    std::vector<std::unique_ptr<Lane>> lanes;
     unsigned active=0;
-    ss::future<> consume(const ss::http::reply& reply, ss::input_stream<char> input, bool& ok) {
-        bool success=int(reply._status)==200, bad=false;
+    uint64_t connects=0;
+    asio::steady_timer clock;
+    awaitable<void> sleep_until(Clock::time_point when) {
+        if (Clock::now()>=when) co_return;
+        clock.expires_at(when);
+        co_await clock.async_wait(use_awaitable);
+    }
+    // Reads one response: false for a status other than 200, an exception for
+    // a body, PID or framing the check does not accept.
+    awaitable<bool> consume(Lane& lane) {
+        auto& buffer=lane.buffer;
+        auto head_size=co_await asio::async_read_until(lane.socket,asio::dynamic_buffer(buffer),"\r\n\r\n",use_awaitable);
+        auto h=parse_head(std::string_view(buffer).substr(0,head_size));
+        bool success=h.status==200, bad=false, close=same_name(h.connection,"close");
         int pid=0;
         if (success) {
-            try { pid=std::stoi(std::string(reply.get_header("X-Probe-Pid"))); }
-            catch (...) { bad=true; }
-            if (!config.pids.contains(pid)) bad=true;
-            if (!config.policy_version.empty() && reply.get_header("X-Probe-Policy") != config.policy_version) bad=true;
-            if (!config.result_tag.empty() && reply.get_header("X-App-Result") != config.result_tag) bad=true;
+            if (!to_int(h.pid,pid) || !config.pids.contains(pid)) bad=true;
+            if (!config.policy_version.empty() && h.policy!=config.policy_version) bad=true;
+            if (!config.result_tag.empty() && h.result!=config.result_tag) bad=true;
         }
-        size_t offset=0;
-        std::exception_ptr failure;
-        try {
+        int shard=-1, worker=-1;
+        if (!h.shard.empty() && !to_int(h.shard,shard)) bad=true;
+        if (!h.worker.empty() && !to_int(h.worker,worker)) bad=true;
+        std::string body;
+        size_t at=head_size;
+        // At least `bytes` past `at` in the buffer; at least one more byte.
+        auto need=[&](size_t bytes)->awaitable<void> {
+            if (buffer.size()<at+bytes)
+                co_await asio::async_read(lane.socket,asio::dynamic_buffer(buffer),asio::transfer_at_least(at+bytes-buffer.size()),use_awaitable);
+        };
+        auto more=[&]()->awaitable<void> {
+            co_await asio::async_read(lane.socket,asio::dynamic_buffer(buffer),asio::transfer_at_least(1),use_awaitable);
+        };
+        std::string_view received;
+        if (same_name(h.encoding,"chunked")) {
             for (;;) {
-                auto b=co_await input.read();
-                if (b.empty()) break;
-                if (success && (offset>config.expected.size() || b.size()>config.expected.size()-offset ||
-                    std::memcmp(b.get(),config.expected.data()+offset,b.size())!=0)) bad=true;
-                offset+=b.size();
+                auto line_end=buffer.find("\r\n",at);
+                while (line_end==buffer.npos) {
+                    co_await more();
+                    line_end=buffer.find("\r\n",at);
+                }
+                size_t size=0;
+                auto [end,error]=std::from_chars(buffer.data()+at,buffer.data()+line_end,size,16);
+                if (error!=std::errc()) throw std::runtime_error("invalid chunk size");
+                at=line_end+2;
+                if (size==0) {
+                    // No trailers: the empty line ends the message.
+                    co_await need(2);
+                    at+=2;
+                    break;
+                }
+                co_await need(size+2);
+                body.append(buffer,at,size); at+=size+2;
             }
-        } catch (...) { failure=std::current_exception(); }
-        co_await input.close();
-        if (failure) std::rethrow_exception(failure);
-        if (!success) { ++stats.status_errors; co_return; }
-        if (bad || offset!=config.expected.size()) {
+            received=body;
+        } else {
+            int length=0;
+            if (!h.encoding.empty() || !to_int(h.length,length) || length<0) throw std::runtime_error("unsupported framing");
+            co_await need(size_t(length));
+            received=std::string_view(buffer).substr(at,length); at+=length;
+        }
+        if (success && received!=config.expected) bad=true;
+        auto bytes=received.size();
+        buffer.erase(0,at);
+        if (close) { asio::error_code ignored; lane.socket.close(ignored); }
+        if (!success) { ++stats.status_errors; co_return false; }
+        if (bad) {
             ++stats.integrity_errors;
             throw std::runtime_error("response body/PID mismatch");
         }
-        auto shard=reply.get_header("X-Probe-Shard"), worker=reply.get_header("X-Probe-Worker");
-        if (!shard.empty()) ++stats.shards[std::stoi(std::string(shard))];
-        if (!worker.empty()) ++stats.workers[std::stoi(std::string(worker))];
-        ++stats.pids[pid]; stats.bytes+=offset; ok=true;
+        if (shard>=0) ++stats.shards[shard];
+        if (worker>=0) ++stats.workers[worker];
+        ++stats.pids[pid]; stats.bytes+=bytes;
+        co_return true;
     }
-    ss::future<> once(unsigned lane, Clock::time_point due, Clock::time_point deadline) {
-        busy[lane]=true;
+    // A lane taken for a request, as the request starts.
+    void claim(Lane& lane, Clock::time_point due) {
+        lane.busy=true;
         ++active;
         stats.dispatch_ns.push_back(std::max<int64_t>(0,std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-due).count()));
+    }
+    awaitable<void> once(Lane& lane, Clock::time_point due, Clock::time_point deadline) {
+        bool ok=false;
         try {
-            auto req=ss::http::request::make(config.method,"127.0.0.1",config.path);
-            if (config.method=="POST") req.write_body("bin",ss::sstring(config.input));
-            bool ok=false;
-            co_await clients[lane]->make_request(std::move(req),[this,&ok](const ss::http::reply& r,ss::input_stream<char>&& in){return consume(r,std::move(in),ok);});
-            if (ok) { ++stats.requests; if (Clock::now()<deadline) ++stats.completed_in_window; }
-            else ++stats.errors;
-        } catch (...) { ++stats.errors; }
+            if (!lane.socket.is_open()) {
+                lane.buffer.clear();
+                co_await lane.socket.async_connect(tcp::endpoint(asio::ip::address_v4::loopback(),uint16_t(config.port)),use_awaitable);
+                lane.socket.set_option(tcp::no_delay(true));
+                ++connects;
+            }
+            co_await asio::async_write(lane.socket,asio::buffer(request),use_awaitable);
+            ok=co_await consume(lane);
+        } catch (...) {
+            asio::error_code ignored;
+            lane.socket.close(ignored);
+        }
+        if (ok) { ++stats.requests; if (Clock::now()<deadline) ++stats.completed_in_window; }
+        else ++stats.errors;
         stats.latency_ns.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-due).count());
         --active;
-        busy[lane]=false;
+        lane.busy=false;
     }
-    ss::future<> closed_lane(unsigned lane,Clock::time_point deadline) {
-        while (Clock::now()<deadline) { ++stats.scheduled; co_await once(lane,Clock::now(),deadline); }
+    void launch(Pending& pending, unsigned lane, Clock::time_point due, Clock::time_point deadline) {
+        claim(*lanes[lane],due);
+        ++pending.count;
+        asio::co_spawn(context,[this,&pending,lane,due,deadline]()->awaitable<void> {
+            co_await once(*lanes[lane],due,deadline);
+            pending.leave();
+        },asio::detached);
     }
-    ss::future<> open_phase(double seconds,Clock::time_point start,Clock::time_point deadline) {
-        ss::gate pending;
+    awaitable<void> closed_lane(Lane& lane, Clock::time_point deadline) {
+        while (Clock::now()<deadline) {
+            ++stats.scheduled;
+            auto due=Clock::now();
+            claim(lane,due);
+            co_await once(lane,due,deadline);
+        }
+    }
+    awaitable<void> open_phase(double seconds, Clock::time_point start, Clock::time_point deadline) {
+        Pending pending(context);
         unsigned lane=0;
         // Use one integer count for the half-open arrival window. Repeated
         // division can put an exact endpoint a fraction of an ULP before it
         // (e.g.7938/264.6<30), creating one false dropped arrival. The tiny
         // request-count tolerance is far below the timer's nanosecond resolution.
         const auto offered=uint64_t(std::ceil(config.rate*seconds-1e-8));
-        for (uint64_t ticket=ss::this_shard_id();ticket<offered;ticket+=ss::this_smp_shard_count()) {
-            auto due=start+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(double(ticket)/config.rate));
-            if (Clock::now()<due) co_await ss::sleep<Clock>(due-Clock::now());
+        for (uint64_t ticket=id; ticket<offered; ticket+=count) {
+            auto due=start+seconds_of(double(ticket)/config.rate);
+            co_await sleep_until(due);
             ++stats.scheduled;
-            if (active>=clients.size() || Clock::now()>=deadline) ++stats.dropped;
+            if (active>=lanes.size() || Clock::now()>=deadline) ++stats.dropped;
             else {
-                while (busy[lane]) lane=(lane+1)%clients.size();
-                // once consumes request errors; gate retains all admitted work.
-                (void)ss::with_gate(pending,[this,lane,due,deadline]{return once(lane,due,deadline);});
+                while (lanes[lane]->busy) lane=(lane+1)%lanes.size();
+                launch(pending,lane,due,deadline);
             }
-            lane=(lane+1)%clients.size();
+            lane=(lane+1)%lanes.size();
         }
-        if (Clock::now()<deadline) co_await ss::sleep<Clock>(deadline-Clock::now());
-        co_await pending.close();
-    }
-    uint64_t connections() const {
-        uint64_t n=0; for (const auto& c:clients) n+=c->total_new_connections_nr(); return n;
+        co_await sleep_until(deadline);
+        co_await pending.wait();
     }
 public:
-    explicit Load(Config c):config(std::move(c)) {
-        auto n=config.concurrency/ss::this_smp_shard_count()+(ss::this_shard_id()<config.concurrency%ss::this_smp_shard_count());
-        for (unsigned i=0;i<n;++i) clients.push_back(std::make_unique<ss::http::client>(std::make_unique<NodelayFactory>(config.port),1));
-        busy.resize(n,false);
+    Stats stats;
+    Load(const Config& c, asio::io_context& ctx, unsigned id, unsigned count)
+        :config(c), context(ctx), id(id), count(count), clock(ctx) {
+        request=config.method+" "+config.path+" HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        if (config.method=="POST")
+            request+="Content-Type: application/octet-stream\r\nContent-Length: "+std::to_string(config.input.size())+"\r\n";
+        request+="\r\n"+(config.method=="POST"?config.input:std::string());
+        auto n=config.concurrency/count+(id<config.concurrency%count);
+        for (unsigned i=0;i<n;++i) lanes.push_back(std::make_unique<Lane>(Lane{tcp::socket(ctx),{},false}));
     }
-    ss::future<> prime() {
+    awaitable<void> prime() {
         // Prime every lane even when the arrival rate is low, for prefork fairness.
-        return ss::parallel_for_each(boost::irange(0u,unsigned(clients.size())),[this](unsigned lane){return once(lane,Clock::now(),Clock::time_point::max());});
+        Pending pending(context);
+        for (unsigned lane=0;lane<lanes.size();++lane) launch(pending,lane,Clock::now(),Clock::time_point::max());
+        co_await pending.wait();
     }
-    ss::future<> phase(double seconds,Clock::time_point start) {
-        stats={}; auto before=connections();
-        auto deadline=start+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
-        if (Clock::now()<start) co_await ss::sleep<Clock>(start-Clock::now());
+    awaitable<void> phase(double seconds, Clock::time_point start) {
+        stats={}; auto before=connects;
+        auto deadline=start+seconds_of(seconds);
+        co_await sleep_until(start);
         if (config.rate>0) co_await open_phase(seconds,start,deadline);
-        else co_await ss::parallel_for_each(boost::irange(0u,unsigned(clients.size())),[this,deadline](unsigned lane){return closed_lane(lane,deadline);});
-        stats.total_connections=connections(); stats.new_connections=stats.total_connections-before;
+        else {
+            Pending pending(context);
+            for (auto& lane: lanes) {
+                ++pending.count;
+                asio::co_spawn(context,[this,&pending,&lane,deadline]()->awaitable<void> {
+                    co_await closed_lane(*lane,deadline);
+                    pending.leave();
+                },asio::detached);
+            }
+            co_await pending.wait();
+        }
+        stats.total_connections=connects; stats.new_connections=connects-before;
     }
-    Stats get() const { return stats; }
-    ss::future<> stop() { for (auto& c:clients) co_await c->close(); }
+    awaitable<void> stop() {
+        for (auto& lane: lanes) { asio::error_code ignored; lane->socket.close(ignored); }
+        co_return;
+    }
 };
 static std::string read_file(const std::string& path) {
     if (path.empty()) return {};
@@ -163,39 +295,76 @@ static void print_map(const std::map<int,uint64_t>& m) {
     for (auto [k,v]:m) { if (!first) std::cout<<','; first=false; std::cout<<'"'<<k<<"\":"<<v; }
     std::cout<<'}';
 }
-static ss::future<int> run(ss::app_template& app) {
-    auto& o=app.configuration();
-    Config cfg{o["port"].as<unsigned>(),o["concurrency"].as<unsigned>(),{},o["path"].as<std::string>(),o["method"].as<std::string>(),
-        read_file(o["input"].as<std::string>()),read_file(o["expected"].as<std::string>()),o["rate"].as<double>(),
-        o["policy-version"].as<std::string>(),o["result-tag"].as<std::string>()};
-    std::istringstream pids(o["target-pids"].as<std::string>()); std::string pid;
-    while (std::getline(pids,pid,',')) cfg.pids.insert(std::stoi(pid));
-    if (o["target-pid"].as<int>()>0) cfg.pids.insert(o["target-pid"].as<int>());
-    auto seconds=o["seconds"].as<double>(),warmup=o["warmup"].as<double>();
-    if (cfg.concurrency<ss::this_smp_shard_count() || cfg.pids.empty() || cfg.rate<0 || !std::isfinite(cfg.rate) ||
-        seconds<=0 || !std::isfinite(seconds) || warmup<0 || !std::isfinite(warmup)) throw std::runtime_error("invalid load settings");
-    ss::sharded<Load> loads;
-    co_await loads.start(cfg);
-    co_await loads.invoke_on_all(&Load::prime);
-    co_await loads.invoke_on_all(&Load::phase,warmup,Clock::now()+std::chrono::milliseconds(2));
-    std::cout<<"MEASURE_READY"<<std::endl;
-    {
-        // Wait for the controller's start line off the reactor: a blocking read
-        // here stalled shard 0, which then handled none of its connections'
-        // events (a server closing an idle one, say) until the line came.
-        std::string command;
-        std::atomic<bool> read{false};
-        std::thread reader([&] { std::getline(std::cin, command); read = true; });
-        while (!read) co_await ss::sleep(std::chrono::milliseconds(1));
-        reader.join();
+static std::vector<int> split_ints(const std::string& text) {
+    std::vector<int> values; std::istringstream items(text); std::string item;
+    while (std::getline(items,item,',')) values.push_back(std::stoi(item));
+    return values;
+}
+static void pin(int cpu) {
+    cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu,&set);
+    if (int error=pthread_setaffinity_np(pthread_self(),sizeof set,&set)) throw std::system_error(error,std::generic_category(),"pin");
+}
+static int run(std::map<std::string,std::string>& o) {
+    Config cfg{unsigned(std::stoul(o["port"])),unsigned(std::stoul(o["concurrency"])),{},o["path"],o["method"],
+        read_file(o["input"]),read_file(o["expected"]),std::stod(o["rate"]),o["policy-version"],o["result-tag"]};
+    for (int pid: split_ints(o["target-pids"])) cfg.pids.insert(pid);
+    if (std::stoi(o["target-pid"])>0) cfg.pids.insert(std::stoi(o["target-pid"]));
+    auto cpus=split_ints(o["cpuset"]);
+    unsigned smp=o["smp"].empty()?std::max<size_t>(1,cpus.size()):std::stoul(o["smp"]);
+    auto seconds=std::stod(o["seconds"]),warmup=std::stod(o["warmup"]);
+    if (smp==0 || (!cpus.empty() && cpus.size()<smp) || cfg.concurrency<smp || cfg.pids.empty() || cfg.rate<0 ||
+        !std::isfinite(cfg.rate) || seconds<=0 || !std::isfinite(seconds) || warmup<0 || !std::isfinite(warmup))
+        throw std::runtime_error("invalid load settings");
+    if (!cpus.empty()) {
+        // This thread too (the controller's lines), within the budget.
+        cpu_set_t set; CPU_ZERO(&set);
+        for (int cpu: cpus) CPU_SET(cpu,&set);
+        if (sched_setaffinity(0,sizeof set,&set)) throw std::system_error(errno,std::generic_category(),"cpuset");
     }
+    std::vector<std::unique_ptr<asio::io_context>> contexts;
+    std::vector<std::unique_ptr<Load>> loads;
+    for (unsigned i=0;i<smp;++i) {
+        contexts.push_back(std::make_unique<asio::io_context>(1));
+        loads.push_back(std::make_unique<Load>(cfg,*contexts[i],i,smp));
+    }
+    std::vector<asio::executor_work_guard<asio::io_context::executor_type>> guards;
+    std::vector<std::thread> threads;
+    std::vector<std::promise<void>> pinned(smp);
+    for (unsigned i=0;i<smp;++i) {
+        guards.push_back(asio::make_work_guard(*contexts[i]));
+        threads.emplace_back([&,i] {
+            try { if (!cpus.empty()) pin(cpus[i]); pinned[i].set_value(); }
+            catch (...) { pinned[i].set_exception(std::current_exception()); return; }
+            contexts[i]->run();
+        });
+    }
+    // On every thread at once; waits for all, rethrowing a failure.
+    auto on_all=[&](auto make) {
+        std::vector<std::future<void>> done;
+        for (unsigned i=0;i<smp;++i) done.push_back(asio::co_spawn(*contexts[i],make(*loads[i]),asio::use_future));
+        for (auto& d: done) d.get();
+    };
+    auto finish=[&] {
+        for (auto& guard: guards) guard.reset();
+        for (auto& thread: threads) thread.join();
+    };
+    try {
+        for (auto& p: pinned) p.get_future().get();
+        on_all([](Load& l){return l.prime();});
+        auto warm=Clock::now()+std::chrono::milliseconds(2);
+        on_all([&](Load& l){return l.phase(warmup,warm);});
+    } catch (...) { for (auto& c: contexts) c->stop(); finish(); throw; }
+    std::cout<<"MEASURE_READY"<<std::endl;
+    // The threads keep serving their connections' events meanwhile.
+    std::string command;
+    std::getline(std::cin,command);
     auto cpu0=cpu_seconds(); auto start=Clock::now()+std::chrono::milliseconds(2);
-    co_await loads.invoke_on_all(&Load::phase,seconds,start);
+    on_all([&](Load& l){return l.phase(seconds,start);});
     auto elapsed=std::chrono::duration<double>(Clock::now()-start).count(),cpu=cpu_seconds()-cpu0;
     std::cout<<"MEASURE_DONE"<<std::endl;
     Stats total;
-    for (unsigned s=0;s<ss::this_smp_shard_count();++s) {
-        auto r=co_await loads.invoke_on(s,&Load::get);
+    for (auto& load: loads) {
+        auto& r=load->stats;
 #define ADD(f) total.f+=r.f
         ADD(requests); ADD(errors); ADD(bytes); ADD(total_connections); ADD(new_connections);
         ADD(scheduled); ADD(dropped); ADD(completed_in_window); ADD(status_errors); ADD(integrity_errors);
@@ -206,7 +375,8 @@ static ss::future<int> run(ss::app_template& app) {
         for (auto [k,v]:r.workers) total.workers[k]+=v;
         for (auto [k,v]:r.pids) total.pids[k]+=v;
     }
-    co_await loads.stop();
+    on_all([](Load& l){return l.stop();});
+    finish();
     std::sort(total.latency_ns.begin(),total.latency_ns.end()); std::sort(total.dispatch_ns.begin(),total.dispatch_ns.end());
     auto pct=[](const auto& v,double p){return v.empty()?0.:v[size_t((v.size()-1)*p)]/1000.;};
     std::cout<<"{\"requests\":"<<total.requests<<",\"errors\":"<<total.errors
@@ -224,23 +394,25 @@ static ss::future<int> run(ss::app_template& app) {
     std::cout<<",\"server_workers\":"; print_map(total.workers);
     std::cout<<",\"server_pids\":"; print_map(total.pids);
     std::cout<<'}'<<std::endl;
-    co_return total.integrity_errors?1:0;
+    return total.integrity_errors?1:0;
 }
 int main(int argc,char**argv) {
-    namespace po=boost::program_options;
-    ss::app_template app;
-    app.add_options()("port",po::value<unsigned>()->required(),"server port")
-        ("target-pid",po::value<int>()->default_value(0),"single server PID")
-        ("target-pids",po::value<std::string>()->default_value(""),"comma-separated allowed PIDs")
-        ("path",po::value<std::string>()->required(),"path")
-        ("method",po::value<std::string>()->default_value("GET"),"method")
-        ("input",po::value<std::string>()->default_value(""),"POST payload file")
-        ("expected",po::value<std::string>()->required(),"expected response body")
-        ("policy-version",po::value<std::string>()->default_value(""),"required X-Probe-Policy value; empty disables")
-        ("result-tag",po::value<std::string>()->default_value(""),"required X-App-Result business result; empty disables")
-        ("concurrency",po::value<unsigned>()->default_value(32),"persistent lanes and outstanding cap")
-        ("rate",po::value<double>()->default_value(0),"scheduled arrivals/s; zero for closed-loop")
-        ("warmup",po::value<double>()->default_value(2),"warmup seconds")
-        ("seconds",po::value<double>()->default_value(5),"measurement seconds");
-    return app.run(argc,argv,[&app]{return run(app);});
+    // --name value; the defaults of the ones that have one.
+    std::map<std::string,std::string> options{{"port",""},{"target-pid","0"},{"target-pids",""},{"path",""},
+        {"method","GET"},{"input",""},{"expected",""},{"policy-version",""},{"result-tag",""},{"concurrency","32"},
+        {"rate","0"},{"warmup","2"},{"seconds","5"},{"smp",""},{"cpuset",""}};
+    try {
+        for (int i=1;i<argc;i+=2) {
+            std::string name=argv[i];
+            if (!name.starts_with("--") || !options.contains(name.substr(2)) || i+1>=argc)
+                throw std::runtime_error("unknown or incomplete option "+name);
+            options[name.substr(2)]=argv[i+1];
+        }
+        for (auto required: {"port","path","expected"})
+            if (options[required].empty()) throw std::runtime_error(std::string("--")+required+" is required");
+        return run(options);
+    } catch (const std::exception& e) {
+        std::cerr<<"http_load: "<<e.what()<<std::endl;
+        return 2;
+    }
 }

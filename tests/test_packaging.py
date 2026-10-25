@@ -18,7 +18,7 @@ import tarfile
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC = ("src/", "native/", "patches/", "upstream/", "scripts/", "LICENSES/",
+PUBLIC = ("src/", "native/", "upstream/", "scripts/", "LICENSES/",
           "CMakeLists.txt", "dependency-lock.json", "hatch_build.py", "LICENSE",
           "README.md", "pyproject.toml", "PKG-INFO", ".gitignore")
 

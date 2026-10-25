@@ -28,9 +28,7 @@ async def test_scheduled_client_exposes_overload_and_checks_pid_set(tmp_path, ra
     cpus = ",".join(map(str, sorted(os.sched_getaffinity(0))[:2]))
     async def run(pids):
         proc = await asyncio.create_subprocess_exec(str(ROOT / "build/http_load"),
-            "--smp", "2", "--cpuset", cpus, "--reactor-backend", "epoll", "--overprovisioned",
-            "--default-log-level", "error", "--enable-glibc-exception-scaling-workaround", "0",
-            "--port", str(port), "--target-pids", pids, "--path", "/", "--expected", str(expected),
+            "--smp", "2", "--cpuset", cpus, "--port", str(port), "--target-pids", pids, "--path", "/", "--expected", str(expected),
             "--rate", rate, "--concurrency", "2", "--warmup", ".02", "--seconds", seconds,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(proc.communicate(b"start\n"), 10)
@@ -69,9 +67,7 @@ async def test_scheduled_client_uses_free_connection_before_busy_lane(tmp_path):
     cpu = str(min(os.sched_getaffinity(0)))
     try:
         proc = await asyncio.create_subprocess_exec(str(ROOT/"build/http_load"),
-            "--smp", "1", "--cpuset", cpu, "--reactor-backend", "epoll", "--overprovisioned",
-            "--default-log-level", "error", "--enable-glibc-exception-scaling-workaround", "0",
-            "--port", str(port), "--target-pid", str(os.getpid()), "--path", "/", "--expected", str(expected),
+            "--smp", "1", "--cpuset", cpu, "--port", str(port), "--target-pid", str(os.getpid()), "--path", "/", "--expected", str(expected),
             "--rate", "50", "--concurrency", "2", "--warmup", ".15", "--seconds", ".4",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await asyncio.wait_for(proc.communicate(b"start\n"), 5)
@@ -80,5 +76,40 @@ async def test_scheduled_client_uses_free_connection_before_busy_lane(tmp_path):
         assert row["scheduled"] == 20 and row["dropped"] == 0, row
         assert row["new_connections"] == 0 and len(delays) == 2
         assert row["requests"] == 20 and row["p99_us"] < 120000
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_reads_chunked_bodies_on_kept_connections(tmp_path):
+    from aiohttp import web
+    async def chunked(request):
+        response = web.StreamResponse(headers={"X-Probe-Pid": str(os.getpid()), "X-Probe-Worker": "3"})
+        response.enable_chunked_encoding()
+        await response.prepare(request)
+        for part in (b"chun", b"ked ", b"body"):
+            await response.write(part)
+        await response.write_eof()
+        return response
+    app = web.Application(); app.router.add_post("/", chunked)
+    runner = web.AppRunner(app); await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0); await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    expected = tmp_path/"expected.bin"; expected.write_bytes(b"chunked body")
+    payload = tmp_path/"input.bin"; payload.write_bytes(b"x" * 100)
+    cpu = str(min(os.sched_getaffinity(0)))
+    try:
+        proc = await asyncio.create_subprocess_exec(str(ROOT/"build/http_load"),
+            "--smp", "1", "--cpuset", cpu, "--port", str(port), "--target-pid", str(os.getpid()),
+            "--path", "/", "--method", "POST", "--input", str(payload), "--expected", str(expected),
+            "--concurrency", "2", "--warmup", ".05", "--seconds", ".2",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(b"start\n"), 5)
+        row = [json.loads(line) for line in out.decode().splitlines() if line.startswith("{")][-1]
+        assert proc.returncode == 0, err
+        assert row["requests"] > 0 and row["errors"] == 0 and row["integrity_errors"] == 0, row
+        assert row["response_bytes"] == row["requests"] * len(b"chunked body")
+        assert row["total_connections"] == 2 and row["new_connections"] == 0
+        assert row["server_workers"] == {"3": row["requests"]}
     finally:
         await runner.cleanup()

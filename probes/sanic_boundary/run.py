@@ -253,8 +253,6 @@ def execute(out, mode, workload, diagnostic, *, budget, layout, seconds, warmup,
         row["preflight"] = preflight(port, server.pid, workload)
         cpus = ",".join(map(str, layout["client"]))
         client = start([str(ROOT / "build/http_load"), "--smp", "3", "--cpuset", cpus,
-            "--thread-affinity", "1", "--reactor-backend", "epoll", "--overprovisioned",
-            "--default-log-level", "warn", "--enable-glibc-exception-scaling-workaround", "0",
             "--port", str(port), "--target-pids", str(server.pid), "--path", "/" + workload,
             "--method", "POST" if workload == "body" else "GET", "--input", str(out / "input.bin"),
             "--expected", str(out / "expected.bin"), "--concurrency", str(concurrency),

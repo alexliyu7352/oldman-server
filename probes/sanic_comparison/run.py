@@ -1,6 +1,6 @@
 """Same CPU budget for both services: three CPUs (one Python thread and two
 shards against three stock workers) or four (candidate worker processes against
-four stock workers); and a pure Seastar reference on three."""
+four stock workers)."""
 import argparse
 import hashlib
 import itertools
@@ -27,22 +27,16 @@ from scripts.cpu_budget import _cpus, describe_cpu, cpu_snapshot, require_unthro
 from run_http_benchmarks import read_json, read_line, send
 from run_comparison import stop_process, process_sample
 
-MODES = ('candidate', 'stock', 'native')
+MODES = ('candidate', 'stock')
 
 
 def fingerprints():
     source = boundary.fingerprints()
     stock = verify_stock()
-    paths = [ROOT/'CMakeLists.txt', ROOT/'build/sanic_baseline_native',
-             *sorted((ROOT/'probes/sanic_comparison').glob('*.py')),
-             ROOT/'probes/sanic_comparison/native.cc', *sorted((stock/'sanic').rglob('*.py'))]
+    paths = [ROOT/'CMakeLists.txt', *sorted((ROOT/'probes/sanic_comparison').glob('*.py')),
+             *sorted((stock/'sanic').rglob('*.py'))]
     for p in paths:
         source[str(p.relative_to(ROOT))] = hashlib.sha256(p.read_bytes()).hexdigest()
-    # Resolve the standalone reference's shared libraries in this exact env.
-    import re
-    for filename in re.findall(r'(/[^\s]+)\s+\(', subprocess.check_output(
-            ['ldd', str(ROOT/'build/sanic_baseline_native')], text=True)):
-        p = Path(filename).resolve(); source[str(p)] = hashlib.sha256(p.read_bytes()).hexdigest()
     return source
 
 
@@ -151,18 +145,17 @@ def verify_ready(ready, mode, server, layout, runtime, workers=1):
         raise ValueError('incorrect service process set')
     if mode != 'stock' and workers == 1 and pids != [server.pid]:
         raise ValueError('unexpected service PID')
-    if mode != 'native':
-        # The framework in the service: the verified upstream source for
-        # stock, the oldman_server package otherwise.
-        package = (verify_stock()/'sanic' if mode == 'stock' else boundary.PACKAGE)/'__init__.py'
-        for worker in ready['workers']:
-            if (worker['runtime'] != runtime['state'] or 'uvloop.Loop' not in worker['event_loop'] or
-                worker['sanic_version'] != ('25.12.1' if mode == 'stock' else boundary.package_version()) or
-                worker['sanic_file'] != str(package) or
-                worker['sanic_sha256'] != hashlib.sha256(package.read_bytes()).hexdigest()):
-                raise ValueError('loaded Sanic/runtime mismatch')
-            if mode == 'candidate':
-                boundary.verify_modules(worker['loaded'])
+    # The framework in the service: the verified upstream source for
+    # stock, the oldman_server package otherwise.
+    package = (verify_stock()/'sanic' if mode == 'stock' else boundary.PACKAGE)/'__init__.py'
+    for worker in ready['workers']:
+        if (worker['runtime'] != runtime['state'] or 'uvloop.Loop' not in worker['event_loop'] or
+            worker['sanic_version'] != ('25.12.1' if mode == 'stock' else boundary.package_version()) or
+            worker['sanic_file'] != str(package) or
+            worker['sanic_sha256'] != hashlib.sha256(package.read_bytes()).hexdigest()):
+            raise ValueError('loaded Sanic/runtime mismatch')
+        if mode == 'candidate':
+            boundary.verify_modules(worker['loaded'])
     if [w['pid'] for w in ready['workers']] != pids:
         raise ValueError('worker metadata count/order mismatch')
     for index, worker in enumerate(ready['workers']):
@@ -249,21 +242,17 @@ def execute(out, mode, workload, *, layout, budget, runtime, warmup, seconds, ra
             bufsize=0, start_new_session=True, env=os.environ | {'UV_USE_IO_URING':'0'})
         processes.append(child); return child
     try:
-        command = ([str(ROOT/'build/sanic_baseline_native'),str(port),','.join(map(str,layout['server']))]
-            if mode == 'native' else [sys.executable,str(Path(__file__).with_name('server.py')),
-            '--mode',mode,'--port',str(port),'--workers',str(workers)])
+        command = [sys.executable,str(Path(__file__).with_name('server.py')),
+            '--mode',mode,'--port',str(port),'--workers',str(workers)]
         if diagnostic == 'cprofile': command += ['--profile-dir', str(out.resolve())]
         server = start(command, 'server'); ready = row['ready'] = read_json(server)
         verify_ready(ready,mode,server,layout,runtime,workers)
         identities = [process_identity(pid, os.getpid() if pid == server.pid else server.pid,
-            ROOT/'build/sanic_baseline_native' if mode == 'native' else Path(sys.executable))
-            for pid in ready['service_pids']]
+            Path(sys.executable)) for pid in ready['service_pids']]
         row['identities'] = identities
         row['preflight'] = preflight(port,ready['pids'],workload)
         cpus = ','.join(map(str,layout['client']))
-        client = start([str(ROOT/'build/http_load'),'--smp','3','--cpuset',cpus,'--thread-affinity','1',
-            '--reactor-backend','epoll','--overprovisioned','--default-log-level','warn',
-            '--enable-glibc-exception-scaling-workaround','0','--port',str(port),
+        client = start([str(ROOT/'build/http_load'),'--smp','3','--cpuset',cpus,'--port',str(port),
             '--target-pids',','.join(map(str,ready['pids'])),'--path','/'+workload,
             '--method','POST' if workload == 'body' else 'GET','--input',str(out/'input.bin'),
             '--expected',str(out/'expected.bin'),'--concurrency',str(row['concurrency']),'--rate',str(rate),

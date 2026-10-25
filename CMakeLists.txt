@@ -32,14 +32,8 @@ target_link_options(oldman_native_uring PRIVATE -Wl,--exclude-libs,ALL
                     -Wl,--version-script=${CMAKE_SOURCE_DIR}/native/uring_exports.map)
 set_property(TARGET oldman_native_uring APPEND PROPERTY LINK_DEPENDS ${CMAKE_SOURCE_DIR}/native/uring_exports.map)
 add_dependencies(_native oldman_native_uring)
-# Measurement tools of the comparison (its load generator and the native
-# reference server), built on Seastar where it is installed.
-find_package(Seastar QUIET)
-if(Seastar_FOUND)
-  add_executable(http_load native/http_load.cc)
-  target_link_libraries(http_load PRIVATE Seastar::seastar Threads::Threads)
-  target_compile_definitions(http_load PRIVATE SEASTAR_DEFAULT_ALLOCATOR)
-  add_executable(sanic_baseline_native probes/sanic_comparison/native.cc)
-  target_link_libraries(sanic_baseline_native PRIVATE Seastar::seastar Threads::Threads)
-  target_compile_definitions(sanic_baseline_native PRIVATE SEASTAR_DEFAULT_ALLOCATOR)
-endif()
+# The comparisons' load generator.
+add_executable(http_load native/http_load.cc)
+target_include_directories(http_load SYSTEM PRIVATE ${ASIO_INCLUDE_DIR})
+target_compile_definitions(http_load PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+target_link_libraries(http_load PRIVATE Threads::Threads)

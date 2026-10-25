@@ -2,8 +2,7 @@
 # Project bootstrap. Native lock compatibility is checked before any downloads.
 # Python is uv's (its shared installs, .python-version's release); the locked
 # GCC 14 toolchain goes to PROBE_TOOLCHAIN (/opt/tools/gcc-14), Asio and
-# liburing to PROBE_DEPS (build/deps). Seastar, only for the comparison's load
-# generator and native reference server, is not part of it (env.sh).
+# liburing to PROBE_DEPS (build/deps).
 set -euo pipefail
 PROBE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 toolchain="${PROBE_TOOLCHAIN:-/opt/tools/gcc-14}"

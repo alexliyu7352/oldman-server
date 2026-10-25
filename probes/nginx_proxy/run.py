@@ -200,9 +200,7 @@ def cell(out, *, transport, mode, workers, workload, concurrency, rate, repeat, 
 
         (work/'expected.bin').write_bytes(EXPECTED)
         client = start([str(ROOT/'build/http_load'), '--smp', str(len(LAYOUT['client'])),
-                        '--cpuset', ','.join(map(str, LAYOUT['client'])), '--thread-affinity', '1',
-                        '--reactor-backend', 'epoll', '--overprovisioned', '--default-log-level', 'warn',
-                        '--enable-glibc-exception-scaling-workaround', '0', '--port', str(port),
+                        '--cpuset', ','.join(map(str, LAYOUT['client'])), '--port', str(port),
                         '--target-pids', ','.join(map(str, pids)), '--path', '/'+workload,
                         '--expected', str(work/'expected.bin'), '--concurrency', str(concurrency),
                         '--rate', str(rate), '--warmup', str(warmup), '--seconds', str(seconds)],

@@ -1,7 +1,7 @@
 [project]
 name = "oldman-server"
 dynamic = ["version"]
-description = "Python web framework (forked from Sanic) on a C++/Seastar native HTTP host"
+description = "Python web framework (forked from Sanic) on a C++/Asio native HTTP host"
 readme = "README.md"
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -66,7 +66,7 @@ packages = ["src/oldman_server"]
 # which hatchling does not read (tests/test_packaging.py).
 [tool.hatch.build.targets.sdist]
 only-include = [
-    "src", "native", "patches", "upstream", "LICENSES", "CMakeLists.txt", "hatch_build.py",
+    "src", "native", "upstream", "LICENSES", "CMakeLists.txt", "hatch_build.py",
     "dependency-lock.json", "scripts/build_wheels.sh", "scripts/fetch_sources.py",
 ]
 

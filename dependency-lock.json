@@ -19,34 +19,16 @@
     "libcrypt1": "1:4.4.10-10ubuntu4",
     "libgcc-9-dev": "9.4.0-1ubuntu1~20.04.2",
     "libgmp10": "2:6.2.0+dfsg-4ubuntu0.1",
-    "libhwloc-dev": "2.1.0+dfsg-4",
-    "libhwloc15": "2.1.0+dfsg-4",
     "libisl22": "0.22.1-1",
-    "liblz4-1": "1.9.2-2ubuntu0.20.04.1",
-    "liblz4-dev": "1.9.2-2ubuntu0.20.04.1",
     "libmpc3": "1.1.0-1",
     "libmpfr6": "4.0.2-1",
-    "libnuma-dev": "2.0.12-1",
-    "libnuma1": "2.0.12-1",
-    "libpciaccess0": "0.16-0ubuntu1",
-    "libprotobuf-dev": "3.6.1.3-2ubuntu5.2",
-    "libprotobuf-lite17": "3.6.1.3-2ubuntu5.2",
-    "libprotobuf17": "3.6.1.3-2ubuntu5.2",
-    "libprotoc17": "3.6.1.3-2ubuntu5.2",
-    "libsctp-dev": "1.0.18+dfsg-1",
-    "libsctp1": "1.0.18+dfsg-1",
     "libstdc++-9-dev": "9.4.0-1ubuntu1~20.04.2",
-    "libudev1": "245.4-4ubuntu3.24",
-    "libuuid1": "2.34-0.1ubuntu9.6",
     "libzstd1": "1.4.4+dfsg-3ubuntu0.1",
     "linux-libc-dev": "5.4.0-216.236",
     "make": "4.2.1-1.2",
     "perl": "5.30.0-9ubuntu0.5",
     "pkg-config": "0.29.1-0ubuntu4",
-    "protobuf-compiler": "3.6.1.3-2ubuntu5.2",
     "tar": "1.30+dfsg-7ubuntu0.20.04.4",
-    "uuid-dev": "2.34-0.1ubuntu9.6",
-    "valgrind": "1:3.15.0-1ubuntu9.1",
     "xz-utils": "5.2.4-1ubuntu1.1",
     "zlib1g": "1:1.2.11.dfsg-2ubuntu1.5",
     "zlib1g-dev": "1:1.2.11.dfsg-2ubuntu1.5",
@@ -124,20 +106,6 @@
       "SHA256": "a3b0e951480375f1ad23fb2d66450e861b1679c767b406fb2aa2dda041bf4018",
       "URL": "https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/pool/main/g/gcc-14/libstdc++-14-dev_14.3.0-12ubuntu1~20~ppa1_amd64.deb",
       "Destination": "toolchain"
-    },
-    {
-      "Package": "ragel",
-      "Version": "6.10-1build1",
-      "Filename": "pool/universe/r/ragel/ragel_6.10-1build1_amd64.deb",
-      "SHA256": "ca4f7fa278c031de4e03567ed2559bb6b2415d9759dd92c746489484c180df08",
-      "Destination": "seastar-tools"
-    },
-    {
-      "Package": "xfslibs-dev",
-      "Version": "5.3.0-1ubuntu2",
-      "Filename": "pool/main/x/xfsprogs/xfslibs-dev_5.3.0-1ubuntu2_amd64.deb",
-      "SHA256": "7f661c1d6c1045421e13e4a2617b7ad1c6c2b158d7497475e508724cd77e1f35",
-      "Destination": "seastar-tools"
     }
   ],
   "archives": [
@@ -158,72 +126,6 @@
       "SHA256": "ee549953022da53692ae9a5da17a5d4a1829b9a173b68433e529279f0d2f9305",
       "Format": "conda",
       "Destination": "toolchain"
-    },
-    {
-      "Name": "boost",
-      "Version": "1.83.0",
-      "Filename": "boost-1.83.0.tar.bz2",
-      "URL": "https://archives.boost.io/release/1.83.0/source/boost_1_83_0.tar.bz2",
-      "SHA256": "6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e",
-      "Format": "tar",
-      "Destination": "sources/boost",
-      "StripComponents": 1
-    },
-    {
-      "Name": "openssl",
-      "Version": "openssl-3.5.8",
-      "Filename": "openssl-openssl-3.5.8.tar.gz",
-      "URL": "https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz",
-      "SHA256": "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2",
-      "Format": "tar",
-      "Destination": "sources/openssl",
-      "StripComponents": 1
-    },
-    {
-      "Name": "yaml-cpp",
-      "Version": "0.8.0",
-      "Filename": "yaml-cpp-0.8.0.tar.gz",
-      "URL": "https://codeload.github.com/jbeder/yaml-cpp/tar.gz/f7320141120f720aecc4c32be25586e7da9eb978",
-      "SHA256": "2fd3bf695ccc056835a70dd6d3046312cc1004e8338b8b5c91646918a27b7ef6",
-      "Format": "tar",
-      "Destination": "sources/yaml-cpp",
-      "StripComponents": 1
-    },
-    {
-      "Name": "fmt",
-      "Version": "8dc5d3f69f15417d13c60a4a21f7298ed24db41c",
-      "Filename": "fmt-8dc5d3f69f15417d13c60a4a21f7298ed24db41c.tar.gz",
-      "URL": "https://codeload.github.com/fmtlib/fmt/tar.gz/8dc5d3f69f15417d13c60a4a21f7298ed24db41c",
-      "SHA256": "1681c5f1b5b9a4e354a62fb8dba3509f38cb49321c7eabac7ab5dd98160bfb37",
-      "Format": "tar",
-      "Destination": "sources/fmt",
-      "StripComponents": 1
-    },
-    {
-      "Name": "seastar",
-      "Version": "f8ec4bd4178a5015ab7324a8cbbb3c8d65808fa8",
-      "Filename": "seastar-f8ec4bd4178a5015ab7324a8cbbb3c8d65808fa8.tar.gz",
-      "URL": "https://codeload.github.com/scylladb/seastar/tar.gz/f8ec4bd4178a5015ab7324a8cbbb3c8d65808fa8",
-      "SHA256": "e067a17c13fc3a12640059142916058a3a94446e5bc89d2cc7107e46ae46b283",
-      "Format": "tar",
-      "Destination": "sources/seastar-header-lines",
-      "StripComponents": 1,
-      "Patches": [
-        {
-          "File": "patches/seastar-header-lines.patch",
-          "SHA256": "8d9a0c96b812149060584d1038c28d329a700204b3de335bfbc56dc4b974d45a"
-        }
-      ]
-    },
-    {
-      "Name": "c-ares",
-      "Version": "1.27.0",
-      "Filename": "c-ares-1.27.0.tar.gz",
-      "URL": "https://github.com/c-ares/c-ares/releases/download/cares-1_27_0/c-ares-1.27.0.tar.gz",
-      "SHA256": "0a72be66959955c43e2af2fbd03418e82a2bd5464604ec9a62147e37aceb420b",
-      "Format": "tar",
-      "Destination": "sources/c-ares",
-      "StripComponents": 1
     },
     {
       "Name": "liburing",

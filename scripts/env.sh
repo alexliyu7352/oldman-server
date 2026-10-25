@@ -30,15 +30,6 @@ PROBE_CXX="$PROBE_TOOLCHAIN/usr/bin/g++-14"
 export PATH="$PROBE_ROOT/.venv/bin:$PROBE_TOOLCHAIN/usr/bin:$PATH"
 export LD_LIBRARY_PATH="$PROBE_TOOLCHAIN/lib:$PROBE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LIBRARY_PATH="$PROBE_TOOLCHAIN/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
-# Seastar (with io_uring, liburing in the prefix): not the native host's; only
-# the comparison's load generator and native reference server use it. Built
-# where its locked sources were extracted into PROBE_DEPS.
-if [[ -d "$PROBE_DEPS/sources/seastar-header-lines" ]]; then
-  export PROBE_SEASTAR_SOURCE="$PROBE_DEPS/sources/seastar-header-lines"
-  export PROBE_SEASTAR_BUILD="$PROBE_DEPS/build/seastar-uring"
-  export PATH="$PROBE_DEPS/seastar-tools/usr/bin:$PATH"
-  export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PROBE_SEASTAR_BUILD"
-fi
 export PKG_CONFIG_PATH="$PROBE_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 # Use host headers/glibc; a dependency prefix is not an alternate OS sysroot.
 unset PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_LIBDIR

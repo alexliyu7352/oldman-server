@@ -28,7 +28,7 @@ def test_python_only_order_balances_both_services_without_native():
         (mode, workload) for mode in ('candidate', 'stock') for workload in run.EXPECTED}
 
 
-def test_default_comparison_order_preserves_historical_windows():
+def test_default_comparison_order_alternates_both_services_once():
     import itertools
     from probes.sanic_comparison import run
     assert hasattr(run, 'case_order')
@@ -38,8 +38,8 @@ def test_default_comparison_order_preserves_historical_windows():
         for repeat, modes in enumerate(itertools.permutations(run.MODES)):
             expected.extend((f'{workload}-r{repeat}-{mode}', mode, workload) for mode in modes)
     assert run.case_order() == expected
-    assert len(run.case_order()) == 60
-    assert len(run.case_order(smoke=True)) == 9
+    assert len(run.case_order()) == 18
+    assert len(run.case_order(smoke=True)) == 6
 
 
 def test_stock_source_is_exact_upstream():
@@ -141,33 +141,6 @@ def test_counter_window_handles_non_numeric_engine_metadata():
     assert result['after']['shards'] == [{'id': 0}]
 
 
-def test_native_reference_starts_and_closes_in_fresh_process():
-    import json
-    import os
-    import subprocess
-    from probes.sanic_comparison.run import ROOT
-    from probes.sanic_spike.run import free_port
-    cpus = ','.join(map(str, sorted(os.sched_getaffinity(0))[:3]))
-    result = subprocess.run(['taskset', '-c', cpus, str(ROOT/'build/sanic_baseline_native'),
-        str(free_port()), cpus], input='quit\n', capture_output=True, text=True, timeout=20)
-    assert result.returncode == 0, result.stderr
-    rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
-    assert rows[0]['ready'] and rows[-1]['closed']
-    assert len(rows[0]['workers'][0]['shards']) == 3
-    assert rows[-1]['workers'][0]['active'] == 0
-
-
-def test_native_reference_serves_the_sleep_workload(tmp_path):
-    from probes.sanic_comparison.run import execute
-    from probes.sanic_boundary.run import layout_for
-    from probes.application_lifecycle.inputs import runtime_fingerprint
-    from scripts.cpu_budget import describe_cpu
-    budget = describe_cpu(); layout, _ = layout_for(budget)
-    row = execute(tmp_path/'sleep', 'native', 'sleep', layout=layout, budget=budget,
-                  runtime=runtime_fingerprint(), warmup=.1, seconds=.15)
-    assert row['validated'] and row['concurrency'] == 512 and row['client']['requests'] > 512
-
-
 def test_stock_source_rejects_changed_original_file(tmp_path, monkeypatch):
     import hashlib
     import json
@@ -206,22 +179,6 @@ def test_prefork_rejects_worker_failure_after_closed_snapshot(monkeypatch, capsy
         os.sched_setaffinity(0, affinity)
     result = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert not result['closed'] and result['worker_exits'][0]['exitcode'] == 7
-
-
-def test_native_reference_reports_busy_port_without_abort():
-    import os
-    import socket
-    import subprocess
-    from probes.sanic_comparison.run import ROOT
-    from probes.sanic_spike.run import free_port
-    cpus = ','.join(map(str, sorted(os.sched_getaffinity(0))[:3]))
-    with socket.socket() as listener:
-        listener.bind(('127.0.0.1', 0)); listener.listen()
-        port = listener.getsockname()[1]
-        result = subprocess.run(['taskset', '-c', cpus, str(ROOT/'build/sanic_baseline_native'),
-            str(port), cpus, str(free_port())], input='quit\n', capture_output=True, text=True, timeout=20)
-    assert result.returncode > 0, result.stderr
-    assert 'Assertion' not in result.stderr and 'Aborting on shard' not in result.stderr
 
 
 def test_forced_worker_exit_cannot_be_clean():
