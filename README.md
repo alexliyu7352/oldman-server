@@ -182,7 +182,7 @@ server {
 - 带 `Expect: 100-continue` 的请求：请求体还没到时，原生主机在请求交给 Python 之前就回 `100 Continue`（请求体已随请求头到齐时不回，RFC 9110 允许）。原版在第一次读请求体时回；非 stream 路由在 handler 之前就读请求体，所以同样是立即回，只有 `stream=True` 且 handler 不读请求体就回应时，原版把 100 与响应一起发出。
 - 请求头的 `REQUEST_TIMEOUT` 从请求的第一个字节起计，原版从最后一次收到数据起计：一个字节一个字节慢慢发请求头的客户端不能无限拖住连接。
 - 请求体超过 `REQUEST_MAX_SIZE` 时（`stream=True` 的 handler 照常读完），这个请求的响应之后连接关闭；原版在 stream handler 读完请求体时保持 keep-alive。
-- 优雅停止与原版一样先停止接受新连接、关闭空闲连接，忙的连接照常服务（已经送达的 pipelined 请求也服务），在 `GRACEFUL_SHUTDOWN_TIMEOUT` 内等在途请求结束、响应写完；不同的是忙的连接在最后一个响应之后关闭（响应带 `Connection: close`），原版则让它保持 keep-alive，到宽限期结束才断开。宽限期过后取消仍在运行的 handler，最多再等 1 秒：不理会取消、继续运行的 handler 被留下（记一条警告），服务器照常停止（原版关闭事件循环时同样不等它）。
+- 优雅停止与原版一样先停止接受新连接、关闭空闲连接，忙的连接照常服务（已经送达的 pipelined 请求也服务），在 `GRACEFUL_SHUTDOWN_TIMEOUT` 内等在途请求结束、响应写完；不同的是忙的连接在最后一个响应之后关闭（响应带 `Connection: close`），原版则让它保持 keep-alive，到宽限期结束才断开。宽限期过后取消仍在运行的 handler，最多再等 1 秒：不理会取消、继续运行的 handler 被留下（记一条警告），服务器照常停止（原版关闭事件循环时同样不等它）。asyncio 服务器在 Python 3.12 起 asyncio 自带的事件循环上（Windows、`USE_UVLOOP=False`）也按这个顺序停止；原版在那里先等所有连接自己关闭（包括空闲的 keep-alive 连接）才开始这些步骤，停止可能一直等下去。
 
 ## 测试与测量
 

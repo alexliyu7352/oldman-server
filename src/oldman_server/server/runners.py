@@ -565,9 +565,8 @@ def _serve_http_1(
         raise  # a failed start: app.run() raises, a worker reports it
 
     def _cleanup():
-        # Wait for event loop to finish and all connections to drain
+        # Stop accepting, then let the connections drain
         http_server.close()
-        loop.run_until_complete(http_server.wait_closed())
 
         # Complete all tasks on the loop
         signal.stopped = True
@@ -593,6 +592,10 @@ def _serve_http_1(
                 conn.websocket.fail_connection(code=1001)
             else:
                 conn.abort()
+        # asyncio's own loop (Windows; USE_UVLOOP=False) waits here, since
+        # Python 3.12, for every connection to close too, idle keep-alive ones
+        # included (uvloop does not): so only once they are closed.
+        loop.run_until_complete(http_server.wait_closed())
 
         try:
             app.set_serving(False)
