@@ -2,6 +2,7 @@
 backlog of 100, as a proxy opening many upstream connections at once makes:
 past the backlog, connect() on a unix socket fails (nginx answers 502)."""
 import socket
+import sys
 import tempfile
 from pathlib import Path
 
@@ -14,8 +15,9 @@ BURST = 300
 
 
 @pytest.mark.skipif(
-    int(Path("/proc/sys/net/core/somaxconn").read_text()) < BURST,
-    reason="net.core.somaxconn caps the backlog below the burst",
+    not sys.platform.startswith("linux")
+    or int(Path("/proc/sys/net/core/somaxconn").read_text()) < BURST,
+    reason="Linux, where net.core.somaxconn does not cap the backlog below the burst",
 )
 def test_a_burst_of_connections_waits_in_the_backlog(app):
     # Short: unix socket paths (with the temporary name's suffix) are limited.

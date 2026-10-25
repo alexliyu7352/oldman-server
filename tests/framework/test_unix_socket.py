@@ -19,6 +19,9 @@ from oldman_server.request import Request
 from oldman_server.response import text
 
 
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="no unix sockets on Windows")
+
+
 # import platform
 # import subprocess
 # import sys

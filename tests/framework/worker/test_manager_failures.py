@@ -17,6 +17,10 @@ from pathlib import Path
 import pytest
 
 
+# Each scenario has a session of its own and is ended by POSIX signals.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions and signals")
+
+
 APP = textwrap.dedent(
     """
     import asyncio
