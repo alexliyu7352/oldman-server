@@ -12,6 +12,7 @@ import os
 import statistics
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +30,8 @@ def main():
     if not base.exists():
         subprocess.check_call(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(base), sha],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    extension = next((ROOT / "src/oldman_server/native").glob("_native.*.so"))
+    # This interpreter's build (the tree may hold other versions' builds too).
+    extension = ROOT / "src/oldman_server/native" / ("_native" + sysconfig.get_config_var("EXT_SUFFIX"))
     if not (base / "src/oldman_server").is_dir():
         sys.exit("the base predates the oldman_server package layout")
     linked = base / "src/oldman_server/native" / extension.name
