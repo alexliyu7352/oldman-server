@@ -7,7 +7,7 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 # Standalone Asio (header-only), unpacked from dependency-lock.json.
 find_path(ASIO_INCLUDE_DIR asio.hpp REQUIRED NO_DEFAULT_PATH
-          PATHS ${ASIO_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/../seastar_deps/sources/asio/include)
+          PATHS ${ASIO_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/build/deps/sources/asio/include)
 add_library(probe_runtime STATIC native/runtime.cc native/server.cc native/http1.cc)
 target_include_directories(probe_runtime SYSTEM PUBLIC ${ASIO_INCLUDE_DIR})
 target_compile_definitions(probe_runtime PUBLIC ASIO_STANDALONE ASIO_NO_DEPRECATED)

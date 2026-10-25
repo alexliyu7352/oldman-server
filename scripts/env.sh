@@ -20,17 +20,25 @@ PY
 then
   return 1 2>/dev/null || exit 1
 fi
-PROBE_DEPS="$(cd "$PROBE_ROOT/../seastar_deps" && pwd)"
+# The locked GCC 14 toolchain is a shared tool (scripts/local_deps.py ROOT
+# --only toolchain); Asio and liburing are this project's (scripts/bootstrap.sh).
+PROBE_TOOLCHAIN="${PROBE_TOOLCHAIN:-/opt/tools/gcc-14}"
+PROBE_DEPS="${PROBE_DEPS:-$PROBE_ROOT/build/deps}"
 PROBE_PREFIX="$PROBE_DEPS/native-prefix"
-export PROBE_SEASTAR_SOURCE="$PROBE_DEPS/sources/seastar-header-lines"
-# Seastar with io_uring (liburing in the prefix); build/seastar-header-lines is
-# the earlier epoll/linux-aio-only build.
-export PROBE_SEASTAR_BUILD="$PROBE_DEPS/build/seastar-uring"
-PROBE_CC="$PROBE_DEPS/toolchain/usr/bin/gcc-14"
-PROBE_CXX="$PROBE_DEPS/toolchain/usr/bin/g++-14"
-export PATH="$PROBE_ROOT/.venv/bin:$PROBE_DEPS/toolchain/usr/bin:$PATH"
-export LD_LIBRARY_PATH="$PROBE_DEPS/toolchain/lib:$PROBE_PREFIX/lib:$PROBE_SEASTAR_BUILD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export LIBRARY_PATH="$PROBE_DEPS/toolchain/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+PROBE_CC="$PROBE_TOOLCHAIN/usr/bin/gcc-14"
+PROBE_CXX="$PROBE_TOOLCHAIN/usr/bin/g++-14"
+export PATH="$PROBE_ROOT/.venv/bin:$PROBE_TOOLCHAIN/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$PROBE_TOOLCHAIN/lib:$PROBE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$PROBE_TOOLCHAIN/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+# Seastar (with io_uring, liburing in the prefix): not the native host's; only
+# the comparison's load generator and native reference server use it. Built
+# where its locked sources were extracted into PROBE_DEPS.
+if [[ -d "$PROBE_DEPS/sources/seastar-header-lines" ]]; then
+  export PROBE_SEASTAR_SOURCE="$PROBE_DEPS/sources/seastar-header-lines"
+  export PROBE_SEASTAR_BUILD="$PROBE_DEPS/build/seastar-uring"
+  export PATH="$PROBE_DEPS/seastar-tools/usr/bin:$PATH"
+  export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PROBE_SEASTAR_BUILD"
+fi
 export PKG_CONFIG_PATH="$PROBE_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 # Use host headers/glibc; a dependency prefix is not an alternate OS sysroot.
 unset PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_LIBDIR

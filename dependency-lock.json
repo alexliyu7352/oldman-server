@@ -130,14 +130,14 @@
       "Version": "6.10-1build1",
       "Filename": "pool/universe/r/ragel/ragel_6.10-1build1_amd64.deb",
       "SHA256": "ca4f7fa278c031de4e03567ed2559bb6b2415d9759dd92c746489484c180df08",
-      "Destination": "toolchain"
+      "Destination": "seastar-tools"
     },
     {
       "Package": "xfslibs-dev",
       "Version": "5.3.0-1ubuntu2",
       "Filename": "pool/main/x/xfsprogs/xfslibs-dev_5.3.0-1ubuntu2_amd64.deb",
       "SHA256": "7f661c1d6c1045421e13e4a2617b7ad1c6c2b158d7497475e508724cd77e1f35",
-      "Destination": "toolchain"
+      "Destination": "seastar-tools"
     }
   ],
   "archives": [

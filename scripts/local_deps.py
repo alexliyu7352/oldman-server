@@ -43,7 +43,7 @@ def check_host(lock):
     return installed
 
 
-def install(root, lock_path):
+def install(root, lock_path, only=None):
     lock_bytes = lock_path.read_bytes()
     lock = json.loads(lock_bytes)
     installed = check_host(lock)
@@ -53,10 +53,19 @@ def install(root, lock_path):
     base = lock.get("archive_base_url", "https://archive.ubuntu.com/ubuntu/")
     entries = [dict(package, Format="deb") for package in lock["packages"]]
     entries.extend(lock.get("archives", []))
+    if only is not None:
+        entries = [entry for entry in entries if entry.get("Destination", "sysroot") == only]
+        if not entries:
+            raise RuntimeError("no locked entries for destination " + only)
+
+    def destination_of(entry):
+        # --only: that destination's entries go into ROOT itself.
+        return root if only is not None else root / entry.get("Destination", "sysroot")
+
     patch_data = {}
     for entry in entries:
-        destination = (root / entry.get("Destination", "sysroot")).resolve()
-        if root.resolve() not in destination.parents:
+        destination = destination_of(entry).resolve()
+        if destination != root.resolve() and root.resolve() not in destination.parents:
             raise RuntimeError("dependency destination must be inside the project dependency directory")
         if entry["Format"] not in ("deb", "tar", "conda"):
             raise RuntimeError("unsupported archive format: " + entry["Format"])
@@ -95,7 +104,7 @@ def install(root, lock_path):
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         archives = list(pool.map(fetch, entries))
     for entry, archive in zip(entries, archives):
-        destination = root / entry.get("Destination", "sysroot")
+        destination = destination_of(entry)
         destination.mkdir(parents=True, exist_ok=True)
         if entry["Format"] == "deb":
             subprocess.run(["dpkg-deb", "-x", str(archive), str(destination)], check=True)
@@ -127,8 +136,10 @@ def install(root, lock_path):
             if system.exists() and not destination.exists():
                 destination.symlink_to(system)
     observed = {"lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
-                "extracted": lock["packages"],
-                "archives": lock.get("archives", []),
+                "destination": only,
+                "extracted": [entry for entry in lock["packages"]
+                              if only is None or entry.get("Destination", "sysroot") == only],
+                "archives": [entry for entry in entries if entry["Format"] != "deb"],
                 "host_versions": {name: installed[name] for name in lock["host_requirements"]}}
     (root / "install-observed.json").write_text(json.dumps(observed, indent=2) + "\n")
     print(f"Extracted {len(archives)} locked archives into {root}")
@@ -139,6 +150,9 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("--lock", type=Path,
                         default=Path(__file__).resolve().parents[1] / "dependency-lock.json")
+    parser.add_argument("--only", metavar="DESTINATION",
+                        help="Extract only the entries of this destination, into ROOT itself "
+                             "(the GCC 14 toolchain: ROOT --only toolchain)")
     parser.add_argument("--check", action="store_true",
                         help="Check host compatibility without downloading or extracting packages")
     args = parser.parse_args()
@@ -146,7 +160,7 @@ def main():
         check_host(json.loads(args.lock.read_bytes()))
         print("Host dependency requirements satisfied")
     else:
-        install(args.root.absolute(), args.lock.absolute())
+        install(args.root.absolute(), args.lock.absolute(), args.only)
 
 
 if __name__ == "__main__":

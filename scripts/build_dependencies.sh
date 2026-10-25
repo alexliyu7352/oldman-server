@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
-# Build only missing/newer libraries, using the host ABI and a local prefix.
+# Build only missing/newer libraries, using the host ABI and a local prefix:
+# liburing, and Seastar's libraries where its sources are present (env.sh).
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 jobs="${PROBE_BUILD_JOBS:-2}"
 mkdir -p "$PROBE_DEPS/build" "$PROBE_PREFIX"
 
+# liburing (io_uring reactor backend); its own configure script, not CMake.
+cd "$PROBE_DEPS/sources/liburing"
+./configure --prefix="$PROBE_PREFIX" --includedir="$PROBE_PREFIX/include" \
+  --libdir="$PROBE_PREFIX/lib" --libdevdir="$PROBE_PREFIX/lib" \
+  --mandir="$PROBE_DEPS/build/liburing-man" --cc="$PROBE_CC" --cxx="$PROBE_CXX"
+make -C src -j "$jobs"
+make install
+
+[[ -n "${PROBE_SEASTAR_SOURCE:-}" ]] || exit 0
 cd "$PROBE_DEPS/sources/boost"
 ./bootstrap.sh --with-libraries=filesystem,program_options,thread,test --prefix="$PROBE_PREFIX"
 printf 'using gcc : 14 : "%s" ;\n' "$PROBE_CXX" > "$PROBE_DEPS/build/boost-user-config.jam"
@@ -35,11 +45,3 @@ for library in fmt yaml-cpp c-ares; do
   cmake --build "$PROBE_DEPS/build/$library" -j "$jobs"
   cmake --install "$PROBE_DEPS/build/$library"
 done
-
-# liburing (io_uring reactor backend); its own configure script, not CMake.
-cd "$PROBE_DEPS/sources/liburing"
-./configure --prefix="$PROBE_PREFIX" --includedir="$PROBE_PREFIX/include" \
-  --libdir="$PROBE_PREFIX/lib" --libdevdir="$PROBE_PREFIX/lib" \
-  --mandir="$PROBE_DEPS/build/liburing-man" --cc="$PROBE_CC" --cxx="$PROBE_CXX"
-make -C src -j "$jobs"
-make install

@@ -186,3 +186,26 @@ def test_inapplicable_patch_cannot_report_a_successful_install(tmp_path):
     run = run_install(deps, lock_path)
     assert run.returncode != 0
     assert not (deps / "install-observed.json").exists()
+
+
+def test_only_one_destination_extracts_into_the_root_itself(tmp_path):
+    deps, lock, lock_path = archive_fixture(tmp_path)
+    tool = tmp_path / "tool.tar"
+    with tarfile.open(tool, mode="w") as tar:
+        member = tarfile.TarInfo("usr/bin/compiler")
+        payload = b"locked compiler\n"
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+    lock["archives"].append({"Name": "tool", "Version": "1", "Filename": tool.name,
+                             "URL": tool.as_uri(), "SHA256": hashlib.sha256(tool.read_bytes()).hexdigest(),
+                             "Format": "tar", "Destination": "toolchain"})
+    lock_path.write_text(json.dumps(lock))
+    root = tmp_path / "tools/gcc"
+    run = subprocess.run([sys.executable, str(SCRIPT), str(root), "--lock", str(lock_path),
+                          "--only", "toolchain"], capture_output=True, text=True, timeout=15)
+    assert run.returncode == 0, run.stderr
+    assert (root / "usr/bin/compiler").read_bytes() == b"locked compiler\n"
+    assert not (root / "sources").exists() and not (root / "toolchain").exists()
+    run = subprocess.run([sys.executable, str(SCRIPT), str(root), "--lock", str(lock_path),
+                          "--only", "missing"], capture_output=True, text=True, timeout=15)
+    assert run.returncode != 0 and "no locked entries" in run.stderr

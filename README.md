@@ -21,7 +21,7 @@ PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 
 
 ## 快速开始
 
-开发环境：Ubuntu 20.04 宿主；CPython 3.14.7（普通 GIL 构建；支持 3.12–3.14），由 uv 管理；原生依赖（Asio、liburing，以及性能对照的压测客户端与参照服务器所用的 Seastar）位于 `../seastar_deps`。第一次先运行 `bash scripts/bootstrap.sh`：它按 `dependency-lock.json` 下载编译器与依赖到 `../seastar_deps` 并构建 Seastar，要求宿主的系统包与锁文件 `host_requirements` 的版本逐个相同（不同即拒绝，不会换用别的版本）。其他环境请用发布构建的容器流程（见「发布」，`scripts/build_wheels.sh` 在 manylinux_2_28 容器里从源码构建全部依赖）。
+开发环境：Ubuntu 20.04 宿主；CPython 3.14.7（普通 GIL 构建；支持 3.12–3.14），由 uv 管理（装在 uv 共用的 Python 目录，需要认得这个版本的 uv）；编译器是锁定的 GCC 14，放在 `/opt/tools/gcc-14`（`PROBE_TOOLCHAIN`）；原生依赖 Asio、liburing 在 `build/deps`（`PROBE_DEPS`）。第一次先运行 `bash scripts/bootstrap.sh`：它按 `dependency-lock.json` 下载编译器（已有则跳过）与依赖，构建 liburing 与扩展，要求宿主的系统包与锁文件 `host_requirements` 的版本逐个相同（不同即拒绝，不会换用别的版本）。原生主机不用 Seastar；性能对照的压测客户端与参照服务器还用它，只在它的源码解压进 `PROBE_DEPS` 时构建（`scripts/local_deps.py` 解压整个锁文件）。其他环境请用发布构建的容器流程（见「发布」，`scripts/build_wheels.sh` 在 manylinux_2_28 容器里从源码构建全部依赖）。
 
 ```sh
 bash scripts/bootstrap.sh               # 第一次：锁定的工具链与原生依赖、Seastar、扩展

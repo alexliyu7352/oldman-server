@@ -30,7 +30,7 @@ from probes.sanic_comparison.server import verify_stock
 from probes.sanic_spike.run import free_port
 from scripts.cpu_budget import describe_cpu
 
-WRK = Path(os.environ.get("WRK", ROOT.parent / "seastar_deps/sources/bench/wrk/wrk"))
+WRK = Path(os.environ.get("WRK", "/opt/tools/wrk/wrk"))
 SERVE = Path(__file__).with_name("serve.py")
 # name: serve.py arguments after the port, environment. Four server CPUs: the
 # candidate as planned for 4 workers (same-thread, one CPU each), and 2 workers
