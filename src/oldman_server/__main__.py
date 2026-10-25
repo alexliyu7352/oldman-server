@@ -9,7 +9,11 @@ except Exception as exc:
     ) from exc
 
 from oldman_server.cli.app import CLI
+from oldman_server.compat import OS_IS_WINDOWS, enable_windows_color_support
 from oldman_server.startup.errors import maybe_handle_startup_error
+
+if OS_IS_WINDOWS:
+    enable_windows_color_support()
 
 
 def main(args=None):

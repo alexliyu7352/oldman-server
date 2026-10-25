@@ -1,0 +1,61 @@
+name: Compatible wheel
+
+# The pure Python wheel (py3-none-any): the asyncio server only, for where no
+# native wheel installs (macOS, Windows, other Linux); pip prefers a native
+# wheel where one fits. Built once, then tested installed on macOS and Windows
+# with the framework suites. Called by ci.yml and release.yml; the wheel is
+# uploaded as the artifact wheels-pure.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: pure Python wheel
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Build the wheel
+        run: |
+          python -m pip install --quiet "uv==0.9.18"
+          OLDMAN_SERVER_PURE_WHEEL=1 uv build --wheel --out-dir dist
+          ls -l dist
+          case "$(ls dist)" in *-py3-none-any.whl) ;; *) echo "::error::not a pure wheel"; exit 1 ;; esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: wheels-pure
+          path: dist/*.whl
+          if-no-files-found: error
+
+  test:
+    name: compatible wheel (${{ matrix.os }}, ${{ matrix.python }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+        python: ["3.12", "3.14"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: wheels-pure
+          path: dist
+      - name: Test the wheel
+        run: |
+          python -m pip install --quiet "uv==0.9.18"
+          scripts/test_compat_wheel.sh dist/*-py3-none-any.whl

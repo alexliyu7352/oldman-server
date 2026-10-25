@@ -48,6 +48,7 @@ from oldman_server.application.state import ApplicationState, ServerStage
 from oldman_server.base.root import BaseApp
 from oldman_server.blueprint_group import BlueprintGroup
 from oldman_server.blueprints import Blueprint
+from oldman_server.compat import OS_IS_WINDOWS, enable_windows_color_support
 from oldman_server.config import ENV_PREFIX, Config
 from oldman_server.exceptions import (
     BadRequest,
@@ -95,6 +96,9 @@ if TYPE_CHECKING:
         Extend = TypeVar("Extend", type)  # type: ignore
     from oldman_server.testing.testing import TestClient
 
+
+if OS_IS_WINDOWS:  # no cov
+    enable_windows_color_support()
 
 ctx_type = TypeVar("ctx_type")
 config_type = TypeVar("config_type", bound=Config)

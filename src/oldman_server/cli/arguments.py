@@ -5,6 +5,7 @@ from argparse import ArgumentParser, _ArgumentGroup
 from sanic_routing import __version__ as __routing_version__
 
 from oldman_server import __version__
+from oldman_server.compat import OS_IS_WINDOWS
 
 
 class Group:
@@ -153,7 +154,7 @@ class SocketGroup(Group):
             type=int,
             help="Port to serve on [default 8000]",
         )
-        if not short:
+        if not OS_IS_WINDOWS and not short:
             self.container.add_argument(
                 "-u",
                 "--unix",

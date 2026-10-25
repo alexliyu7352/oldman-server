@@ -5,8 +5,9 @@ name: Release
 # tests the wheels, publishes them to PyPI through trusted publishing (OIDC, no
 # stored token; the PyPI project trusts this workflow and the environment
 # "pypi", which accepts only deployments from v* tags), then attaches them to a
-# GitHub release. Only wheels are published: a source distribution does not
-# build the native extension. Actions are pinned to commits.
+# GitHub release. Only wheels are published (the native ones, and the pure
+# Python wheel for the other platforms): a source distribution does not build
+# the native extension. Actions are pinned to commits.
 
 on:
   push:
@@ -42,9 +43,13 @@ jobs:
     needs: version
     uses: ./.github/workflows/wheels.yml
 
+  compat:
+    needs: version
+    uses: ./.github/workflows/compat.yml
+
   publish-pypi:
     name: publish to PyPI
-    needs: wheels
+    needs: [wheels, compat]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

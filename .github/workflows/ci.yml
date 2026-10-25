@@ -19,3 +19,5 @@ permissions:
 jobs:
   wheels:
     uses: ./.github/workflows/wheels.yml
+  compat:
+    uses: ./.github/workflows/compat.yml

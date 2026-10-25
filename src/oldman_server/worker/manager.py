@@ -9,15 +9,23 @@ from itertools import chain, count
 from multiprocessing.connection import Connection
 from multiprocessing.context import BaseContext
 from random import choice
-from signal import SIGINT, SIGKILL, SIGTERM, Signals
+from signal import SIGINT, SIGTERM, Signals
 from signal import signal as signal_func
 from typing import Any, Callable
 
+from oldman_server.compat import OS_IS_WINDOWS
 from oldman_server.exceptions import ServerKilled
 from oldman_server.log import error_logger, logger
 from oldman_server.worker.constants import RestartOrder
 from oldman_server.worker.process import ProcessState, Worker, WorkerProcess
 from oldman_server.worker.restarter import Restarter
+
+
+SIGKILL: int
+if not OS_IS_WINDOWS:
+    from signal import SIGKILL
+else:
+    SIGKILL = SIGINT
 
 
 class MonitorCycle(IntEnum):
@@ -295,13 +303,17 @@ class WorkerManager:
         """
         self.wait_for_ack()
         while True:
-            cycle = self._poll_monitor()
-            if cycle is MonitorCycle.BREAK:
-                break
-            elif cycle is MonitorCycle.CONTINUE:
-                continue
-            self._sync_states()
-            self._cleanup_non_tracked_workers()
+            try:
+                cycle = self._poll_monitor()
+                if cycle is MonitorCycle.BREAK:
+                    break
+                elif cycle is MonitorCycle.CONTINUE:
+                    continue
+                self._sync_states()
+                self._cleanup_non_tracked_workers()
+            except InterruptedError:
+                if not OS_IS_WINDOWS:
+                    raise
 
     def wait_for_ack(self):  # no cov
         """Wait for all of the workers to acknowledge that they are ready."""
@@ -380,6 +392,13 @@ class WorkerManager:
         shutdown: only a worker that leads a group of its own has the group
         killed. The main process then stops as usual and exits with 1.
         """
+        if OS_IS_WINDOWS:
+            # No process groups there; os.kill terminates the process.
+            for process in self.processes:
+                logger.info("Killing %s [%s]", process.name, process.pid)
+                with suppress(OSError):
+                    os.kill(process.pid, SIGTERM)
+            raise ServerKilled
         own_group = os.getpgrp()
         for process in self.processes:
             logger.info("Killing %s [%s]", process.name, process.pid)

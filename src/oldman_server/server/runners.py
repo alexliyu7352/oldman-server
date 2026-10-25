@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from oldman_server.compat import OS_IS_WINDOWS, ctrlc_workaround_for_windows
 from oldman_server.config import Config
 from oldman_server.constants import DEFAULT_BACKLOG
 from oldman_server.exceptions import ServerError
@@ -174,6 +175,11 @@ def _setup_system_signals(
     stop = _Stop(app, loop)
     os.environ["OLDMAN_SERVER_WORKER_PROCESS"] = "true"
     # Register signals for graceful termination
+    if OS_IS_WINDOWS:
+        # Its selector loop does not wake for a signal: frequent wakeups.
+        if register_sys_signals:
+            ctrlc_workaround_for_windows(app)
+        return stop
     for _signal in [SIGINT, SIGTERM]:
         signal_func(_signal, stop if register_sys_signals else SIG_IGN)
     if register_sys_signals and run_multiple:
@@ -354,7 +360,10 @@ def _serve_native(
     except ImportError as error:
         raise ServerError(
             "NATIVE_SERVER requires the native host extension "
-            "(oldman_server.native._native); build it with scripts/build.sh"
+            "(oldman_server.native._native), which this installation does not "
+            "have: the release wheels carry it for Linux x86_64 and aarch64 "
+            "(glibc 2.28 or later); from a source tree, build it with "
+            "scripts/build.sh"
         ) from error
     # The native host accepts on Sanic's socket (TCP or unix), which stays
     # open while serving and closes with the server, as asyncio's does; like
@@ -513,6 +522,9 @@ def _serve_http_1(
     asyncio_server_kwargs = (
         asyncio_server_kwargs if asyncio_server_kwargs else {}
     )
+    if OS_IS_WINDOWS and sock:
+        # A socket the main process passed: Windows shares it by handle.
+        sock = socket.fromshare(sock.share(os.getpid()))
     # UNIX sockets are always bound by us (to preserve semantics between modes)
     if unix:
         sock = bind_unix_socket(

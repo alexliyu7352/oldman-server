@@ -22,7 +22,9 @@ license-files = ["LICENSE", "LICENSES/*"]
 # The framework is a fork of Sanic 25.12.1 (MIT, src/oldman_server/LICENSE.sanic);
 # these are its runtime requirements.
 dependencies = [
-    "uvloop>=0.22.1",
+    # Not on Windows, which uvloop does not support: the asyncio server runs
+    # on its default selector loop there.
+    "uvloop>=0.22.1; sys_platform != 'win32'",
     "sanic-routing>=23.12.0",
     "httptools>=0.0.10",
     # json() and request.json (the default dumps/loads).

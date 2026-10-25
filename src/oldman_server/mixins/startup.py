@@ -25,7 +25,9 @@ from multiprocessing import (
 )
 from multiprocessing.context import BaseContext
 from pathlib import Path
-from socket import AF_UNIX, SHUT_RDWR, socket
+import socket as socket_module
+
+from socket import SHUT_RDWR, socket
 from time import sleep
 from typing import (
     TYPE_CHECKING,
@@ -38,7 +40,7 @@ from oldman_server.application.logo import get_logo
 from oldman_server.application.motd import MOTD
 from oldman_server.application.state import ApplicationServerInfo, Mode, ServerStage
 from oldman_server.base.meta import AppMeta
-from oldman_server.compat import StartMethod
+from oldman_server.compat import OS_IS_WINDOWS, StartMethod
 from oldman_server.constants import DEFAULT_BACKLOG
 from oldman_server.exceptions import ServerError, ServerKilled
 from oldman_server.helpers import Default, _default, is_atty
@@ -51,6 +53,7 @@ from oldman_server.native.cpus import fast_workers, worker_groups
 from oldman_server.native.listen import address as listen_address
 from oldman_server.server import Signal as ServerSignal
 from oldman_server.server import try_use_uvloop
+from oldman_server.server.loop import try_windows_loop
 from oldman_server.server.async_server import AsyncioServer
 from oldman_server.server.events import trigger_events
 from oldman_server.server.goodbye import get_goodbye
@@ -95,16 +98,18 @@ class StartupMixin(metaclass=AppMeta):
     def setup_loop(self) -> None:
         """Set up the event loop.
 
-        An internal method that sets up the event loop to uvloop unless
-        USE_UVLOOP is False.
+        An internal method that sets up the event loop to uvloop if
+        possible, or a Windows selector loop if on Windows.
 
         Returns:
             None
         """
-        if self.config.USE_UVLOOP is True or isinstance(
-            self.config.USE_UVLOOP, Default
+        if self.config.USE_UVLOOP is True or (
+            isinstance(self.config.USE_UVLOOP, Default) and not OS_IS_WINDOWS
         ):
             try_use_uvloop()
+        elif OS_IS_WINDOWS:
+            try_windows_loop()
 
     @property
     def m(self) -> WorkerMultiplexer:
@@ -987,11 +992,12 @@ class StartupMixin(metaclass=AppMeta):
                 "https://sanic.dev/en/guide/deployment/manager.html#"
                 "how-sanic-server-starts-processes\n"
             )
-            message += (
-                "\nAlternatively, you can set "
-                '`OldmanServer.start_method = "fork"` at the start of your '
-                "application to avoid this issue.\n"
-            )
+            if not OS_IS_WINDOWS:
+                message += (
+                    "\nAlternatively, you can set "
+                    '`OldmanServer.start_method = "fork"` at the start of your '
+                    "application to avoid this issue (Unix only).\n"
+                )
             raise ServerError(message, quiet=True) from None
         worker_state: Mapping[str, Any] = {"state": "NONE"}
         exit_code = 0
@@ -1260,7 +1266,7 @@ class StartupMixin(metaclass=AppMeta):
 
             if sock:
                 sock.close()
-            if sock and kwargs.get("sock") is sock and sock.family == AF_UNIX:
+            if sock and kwargs.get("sock") is sock and sock.family == getattr(socket_module, "AF_UNIX", None):
                 # The unix socket was passed to the native host (configure_socket
                 # with shared): bound here, so removed here.
                 remove_unix_socket(kwargs.get("unix"))

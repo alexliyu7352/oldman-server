@@ -1,6 +1,7 @@
 import asyncio
 import os
 import platform
+import signal
 import sys
 
 from collections.abc import Awaitable
@@ -18,6 +19,9 @@ StartMethod = (
     Default | Literal["fork"] | Literal["forkserver"] | Literal["spawn"]
 )
 
+# The asyncio server also runs on Windows (and macOS), for development and
+# small local services; the native host is Linux only (oldman_server.native).
+OS_IS_WINDOWS = os.name == "nt"
 PYPY_IMPLEMENTATION = platform.python_implementation() == "PyPy"
 UVLOOP_INSTALLED = False
 PYTHON_314_OR_LATER = sys.version_info >= (3, 14)
@@ -66,6 +70,13 @@ def use_context(method: StartMethod):
         yield
     finally:
         OldmanServer.start_method = orig
+
+
+def enable_windows_color_support():
+    import ctypes
+
+    kernel = ctypes.windll.kernel32
+    kernel.SetConsoleMode(kernel.GetStdHandle(-11), 7)
 
 
 def pypy_os_module_patch() -> None:
@@ -323,6 +334,30 @@ async def read_file_async(path, offset: int = 0, size: int | None = None) -> byt
         if offset:
             await f.seek(offset)
         return await (f.read() if size is None else f.read(size))
+
+
+def ctrlc_workaround_for_windows(app):
+    async def stay_active(app):
+        """Asyncio wakeups to allow receiving SIGINT in Python"""
+        while not die:
+            # If someone else stopped the app, just exit
+            if app.state.is_stopping:
+                return
+            # Windows Python blocks signal handlers while the event loop is
+            # waiting for I/O. Frequent wakeups keep interrupts flowing.
+            await asyncio.sleep(0.1)
+        # Can't be called from signal handler, so call it from here
+        app.stop()
+
+    def ctrlc_handler(sig, frame):
+        nonlocal die
+        if die:
+            raise KeyboardInterrupt("Non-graceful Ctrl+C")
+        die = True
+
+    die = False
+    signal.signal(signal.SIGINT, ctrlc_handler)
+    app.add_task(stay_active)
 
 
 def clear_function_annotate(*funcs):

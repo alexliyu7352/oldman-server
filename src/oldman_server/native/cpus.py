@@ -22,7 +22,10 @@ _WORKER_PREFIX = "Oldman-Server-"
 
 
 def _available():
-    return sorted(os.sched_getaffinity(0))
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except AttributeError:  # no affinity on this system (macOS, Windows)
+        return list(range(os.cpu_count() or 1))
 
 
 def parse_cpus(value):
