@@ -221,7 +221,7 @@ Additional commands:
             "motd": self.args.motd,
             "noisy_exceptions": self.args.noisy_exceptions,
             "port": self.args.port,
-            "unix": self.args.unix,
+            "unix": getattr(self.args, "unix", ""),  # no --unix on Windows
             "verbosity": self.args.verbosity or 0,
             "workers": self.args.workers,
             "single_process": self.args.single,

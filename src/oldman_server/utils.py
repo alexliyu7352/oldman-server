@@ -2,6 +2,8 @@ import types
 
 from importlib.util import module_from_spec, spec_from_file_location
 from os import environ as os_environ
+from os import path as os_path
+from os import sep as os_sep
 from pathlib import Path
 from re import findall as re_findall
 
@@ -83,7 +85,8 @@ def load_module_from_file_location(
     if isinstance(location, bytes):
         location = location.decode(encoding)
 
-    if isinstance(location, Path) or "/" in location or "$" in location:
+    if (isinstance(location, Path) or "/" in location or os_sep in location
+            or "$" in location):
         if not isinstance(location, Path):
             # A) Check if location contains any environment variables
             #    in format ${some_env_var}.
@@ -107,9 +110,8 @@ def load_module_from_file_location(
 
         location = str(location)
         if ".py" in location:
-            name = location.split("/")[-1].split(".")[
-                0
-            ]  # get just the file name without path and .py extension
+            # just the file name without path and .py extension
+            name = os_path.basename(location).split(".")[0]
             _mod_spec = spec_from_file_location(
                 name, location, *args, **kwargs
             )
