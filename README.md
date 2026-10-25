@@ -6,7 +6,7 @@
 
 - **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 11.6 万对 7.4 万 RPS（1.55 倍），回显请求体约 9.0 万对 6.4 万（1.42 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 9.3 万对 8.1 万（1.15 倍），每请求总 CPU 约为原版的 0.53–0.70 倍，每组配对都领先；io_uring 为 1.51 / 1.43 / 1.15 倍。
 - **多 worker**：同 4 个物理核，4 个同线程 worker 进程（默认布局，各一个 CPU，见「多 worker」）对原版 Sanic 4 个 worker：小 JSON 19.6 万对 9.4 万 RPS（2.10 倍，已接近这台机器上压测客户端的上限），回显请求体 16.8 万对 8.3 万（2.03 倍），sleep 16.0 万对 10.1 万（1.59 倍），每请求总 CPU 约为原版的 0.48–0.63 倍，每组配对都领先。（AMD Ryzen 7 3800X，Ubuntu 20.04，Linux 5.15，2026-10-25；客户端为本仓库基于 Asio 的 `build/http_load`，占另外 3 个核。）
-- **wrk 同机参照**（`probes/wrk_comparison`，web-frameworks-benchmark 的路由，256 连接，4 核）：空文本路由 21.5 万对原版 12.9 万 RPS；同样的布局里挂一个不经框架的裸函数 27.1 万，即原生主机自己的上限，框架每请求约多 4 µs；handler 自己花 25 µs CPU 时 9.0 万对原版 7.0 万；每个请求一条新连接时 4.4 万对 2.5 万；`app.static` 的 4 KiB 文件 2.4 万对 1.2 万，256 KiB 的文件则是 6.1 千对 7.1 千，比原版慢（原因与绕开的办法见对照页）。
+- **wrk 同机参照**（`probes/wrk_comparison`，web-frameworks-benchmark 的路由，256 连接，4 核）：空文本路由 21.5 万对原版 12.9 万 RPS；同样的布局里挂一个不经框架的裸函数 27.1 万，即原生主机自己的上限，框架每请求约多 4 µs；handler 自己花 25 µs CPU 时 9.0 万对原版 7.0 万；每个请求一条新连接时 4.4 万对 2.5 万；`app.static` 的 4 KiB 文件 2.4 万对 1.1 万，256 KiB 的文件 1.0 万对 7.1 千。
 - **完整对照**：各场景的吞吐、每请求 CPU、延迟，以及各阶段相对原版的变化，见 [BENCHMARKS.md](https://github.com/alexliyu7352/oldman-server/blob/main/BENCHMARKS.md)。
 - **测试**：Sanic 与 sanic-ext 的测试集已并入本项目（`tests/framework`、`tests/ext`），按本包的行为维护，经 asyncio 服务器和经原生主机（`OLDMAN_SERVER_NATIVE_SERVER=true`）两种方式都全部通过。与 Sanic 的差异见下文。
 
