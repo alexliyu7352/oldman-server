@@ -1,0 +1,3 @@
+# Test data is compared byte for byte: checked out as committed everywhere
+# (Git for Windows converts line endings otherwise).
+tests/** -text

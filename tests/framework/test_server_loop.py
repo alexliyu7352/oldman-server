@@ -4,12 +4,33 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from oldman_server.compat import UVLOOP_INSTALLED
+from oldman_server.compat import OS_IS_WINDOWS, UVLOOP_INSTALLED
 from oldman_server.server import loop
 
 
 @pytest.mark.skipif(
-    UVLOOP_INSTALLED,
+    not OS_IS_WINDOWS,
+    reason="Not testable with current client",
+)
+def test_raises_warning_if_os_is_windows(caplog):
+    with caplog.at_level(logging.WARNING):
+        loop.try_use_uvloop()
+
+    for record in caplog.records:
+        if record.message.startswith("You are trying to use"):
+            break
+
+    assert record.message == (
+        "You are trying to use uvloop, but uvloop is not compatible "
+        "with your system. You can disable uvloop completely by setting "
+        "the 'USE_UVLOOP' configuration value to false, or simply not "
+        "defining it and letting oldman-server handle it for you. "
+        "oldman-server will now continue to run using the default event loop."
+    )
+
+
+@pytest.mark.skipif(
+    OS_IS_WINDOWS or UVLOOP_INSTALLED,
     reason="Not testable with current client",
 )
 def test_raises_warning_if_uvloop_not_installed(caplog):
@@ -31,7 +52,7 @@ def test_raises_warning_if_uvloop_not_installed(caplog):
 
 
 @pytest.mark.skipif(
-    not UVLOOP_INSTALLED,
+    OS_IS_WINDOWS or not UVLOOP_INSTALLED,
     reason="Not testable with current client",
 )
 def test_logs_when_install_and_runtime_config_mismatch(caplog, monkeypatch):
@@ -64,7 +85,7 @@ def test_logs_when_install_and_runtime_config_mismatch(caplog, monkeypatch):
 
 
 @pytest.mark.skipif(
-    not UVLOOP_INSTALLED,
+    OS_IS_WINDOWS or not UVLOOP_INSTALLED,
     reason="Not testable with current client",
 )
 def test_sets_loop_policy_only_when_not_already_set(monkeypatch):

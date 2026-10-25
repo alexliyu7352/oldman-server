@@ -17,6 +17,10 @@ from oldman_server.worker.process import WorkerProcess
 from oldman_server.worker.reloader import Reloader
 
 
+# run_reloader stops the reloader with an alarm.
+needs_alarm = pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="no SIGALRM on Windows")
+
+
 @pytest.fixture
 def reloader(): ...
 
@@ -155,6 +159,7 @@ def test_reload_delayed(monkeypatch):
     monkeypatch.setattr(threading.Thread, "start", orig)
 
 
+@needs_alarm
 def test_reloader_triggers_start_stop_listeners(
     app: OldmanServer, app_loader: AppLoader
 ):
@@ -174,6 +179,7 @@ def test_reloader_triggers_start_stop_listeners(
     assert results == ["reload_process_start", "reload_process_stop"]
 
 
+@needs_alarm
 def test_not_triggered(app_loader):
     reload_dir = Path(__file__).parent.parent / "fake"
     publisher = Mock()
@@ -183,6 +189,7 @@ def test_not_triggered(app_loader):
     publisher.send.assert_not_called()
 
 
+@needs_alarm
 def test_triggered(app_loader):
     paths = set()
 
@@ -210,6 +217,7 @@ def test_triggered(app_loader):
         assert str(path) in call_arg
 
 
+@needs_alarm
 def test_reloader_triggers_reload_listeners(app: OldmanServer, app_loader: AppLoader):
     before = Event()
     after = Event()

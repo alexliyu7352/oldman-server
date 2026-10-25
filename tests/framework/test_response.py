@@ -795,7 +795,7 @@ def test_file_validate(app: OldmanServer, static_file_directory: str):
     file_path = file_path.absolute()
     test_max_age = 10
 
-    with open(file_path, "w+") as f:
+    with open(file_path, "w+", newline="\n") as f:
         f.write("foo\n")
 
     @app.route("/validate", methods=["GET"])
@@ -813,7 +813,7 @@ def test_file_validate(app: OldmanServer, static_file_directory: str):
     last_modified = response.headers["Last-Modified"]
 
     time.sleep(1)
-    with open(file_path, "a") as f:
+    with open(file_path, "a", newline="\n") as f:
         f.write("bar\n")
     _, response = app.test_client.get(
         "/validate", headers={"If-Modified-Since": last_modified}

@@ -10,6 +10,7 @@ import pytest
 from oldman_server.testing.reusable import ReusableClient
 
 from oldman_server import OldmanServer
+from oldman_server.compat import OS_IS_WINDOWS
 from oldman_server.response import text
 
 
@@ -67,7 +68,7 @@ async def handler_disabled(request):
 
 
 @pytest.mark.skipif(
-    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")) or OS_IS_WINDOWS,
     reason="Not testable with current client",
 )
 def test_keep_alive_timeout_reuse(port):
@@ -146,7 +147,7 @@ def test_keep_alive_client_timeout(port):
 
 
 @pytest.mark.skipif(
-    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")) or OS_IS_WINDOWS,
     reason="Not testable with current client",
 )
 def test_keep_alive_server_timeout(port):
@@ -186,7 +187,7 @@ def test_keep_alive_server_timeout(port):
 
 
 @pytest.mark.skipif(
-    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")) or OS_IS_WINDOWS,
     reason="Not testable with current client",
 )
 def test_keep_alive_connection_context(port):
@@ -223,7 +224,7 @@ def test_keep_alive_connection_context(port):
 
 
 @pytest.mark.skipif(
-    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")),
+    bool(environ.get("OLDMAN_SERVER_NO_UVLOOP")) or OS_IS_WINDOWS,
     reason="Not testable with current client",
 )
 def test_keep_alive_config_false(port):

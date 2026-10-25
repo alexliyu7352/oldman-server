@@ -140,6 +140,7 @@ async def test_trigger_before_events_create_server_missing_event(app):
     assert not hasattr(app.ctx, "db")
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="no SIGALRM on Windows")
 def test_create_server_trigger_events(loop, app):
     """Test if create_server can trigger server events"""
 

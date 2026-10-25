@@ -2,6 +2,7 @@
 addresses, networks, or (with "unix") a unix socket. Unset, Sanic's rules
 apply to every connection."""
 import os
+import sys
 
 from pathlib import Path
 
@@ -102,6 +103,7 @@ def test_a_malformed_entry_fails_startup(app):
 SOCKPATH = Path("/tmp/oldman-server-trusted.sock")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="no unix sockets on Windows")
 @pytest.mark.parametrize("trusted,expected", [("unix", "203.0.113.9"),
                                               ("127.0.0.1", "")])
 def test_unix_socket_connections(app, trusted, expected):

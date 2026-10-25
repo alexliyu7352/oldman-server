@@ -1,16 +1,23 @@
 from logging import ERROR, INFO
-from signal import SIGINT
+from signal import SIGINT, SIGTERM
 from unittest.mock import Mock, call, patch
 
 import pytest
 
+from oldman_server.compat import OS_IS_WINDOWS
 from oldman_server.exceptions import ServerKilled
 from oldman_server.worker.constants import RestartOrder
 from oldman_server.worker.manager import WorkerManager
 from oldman_server.worker.process import Worker
 
 
-from signal import SIGKILL
+if not OS_IS_WINDOWS:
+    from signal import SIGKILL
+else:
+    SIGKILL = SIGINT
+
+# Kills by process group: POSIX only.
+posix_kill = pytest.mark.skipif(OS_IS_WINDOWS, reason="no process groups on Windows")
 
 
 def fake_serve(): ...
@@ -56,6 +63,7 @@ def test_shutown(os_mock: Mock):
     os_mock.kill.assert_called_once_with(1234, SIGINT)
 
 
+@posix_kill
 @patch("oldman_server.worker.manager.os")
 def test_kill(os_mock: Mock):
     process = Mock()
@@ -70,6 +78,7 @@ def test_kill(os_mock: Mock):
     os_mock.killpg.assert_called_once_with(5678, SIGKILL)
 
 
+@posix_kill
 @patch("oldman_server.worker.manager.os")
 def test_kill_spares_the_main_process_group(os_mock: Mock):
     # Workers in the main process's group: killpg would kill main too.
@@ -85,6 +94,22 @@ def test_kill_spares_the_main_process_group(os_mock: Mock):
     os_mock.killpg.assert_not_called()
 
 
+@patch("oldman_server.worker.manager.OS_IS_WINDOWS", True)
+@patch("oldman_server.worker.manager.os")
+def test_kill_on_windows(os_mock: Mock):
+    # No process groups: each worker is terminated by itself.
+    process = Mock()
+    process.pid = 1234
+    context = Mock()
+    context.Process.return_value = process
+    manager = WorkerManager(1, fake_serve, {}, context, (Mock(), Mock()), {})
+    with pytest.raises(ServerKilled):
+        manager.kill()
+    os_mock.kill.assert_called_once_with(1234, SIGTERM)
+    os_mock.killpg.assert_not_called()
+
+
+@posix_kill
 @patch("oldman_server.worker.process.os")
 @patch("oldman_server.worker.manager.os")
 def test_shutdown_signal_send_kill(

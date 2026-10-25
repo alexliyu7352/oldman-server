@@ -12,6 +12,7 @@ import pytest
 import oldman_server
 
 from oldman_server import OldmanServer
+from oldman_server.compat import OS_IS_WINDOWS
 from oldman_server.config import Config
 from oldman_server.exceptions import OldmanServerException
 from oldman_server.helpers import Default
@@ -436,7 +437,10 @@ def test_uvloop_config(app: OldmanServer, monkeypatch, use):
 
     # Default config
     app.test_client.get("/test")
-    try_use_uvloop.assert_called_once()
+    if OS_IS_WINDOWS:
+        try_use_uvloop.assert_not_called()
+    else:
+        try_use_uvloop.assert_called_once()
 
     try_use_uvloop.reset_mock()
     app.config["USE_UVLOOP"] = use

@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from collections import Counter
 from pathlib import Path
 from time import gmtime, strftime
@@ -660,6 +661,10 @@ def test_resource_type_unknown(app, static_file_directory, caplog):
         app.static("/static", static_file_directory, resource_type="unknown")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows does not support double dotted directories",
+)
 def test_dotted_dir_ok(
     app: OldmanServer, static_file_directory: str, double_dotted_directory_file: Path
 ):
@@ -679,4 +684,18 @@ def test_breakout(app: OldmanServer, static_file_directory: str):
     assert response.status == 404
 
     _, response = app.test_client.get("/foo/..%2Fstatic/test.file")
+    assert response.status == 404
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Block backslash on Windows only"
+)
+def test_double_backslash_prohibited_on_win32(
+    app: OldmanServer, static_file_directory: str
+):
+    app.static("/foo", static_file_directory)
+
+    _, response = app.test_client.get("/foo/static/..\\static/test.file")
+    assert response.status == 404
+    _, response = app.test_client.get("/foo/static\\../static/test.file")
     assert response.status == 404

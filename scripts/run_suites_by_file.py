@@ -1,8 +1,9 @@
 """The framework suites (tests/framework, tests/ext) one test file per process,
 each with a time limit, for the compatible wheel on macOS and Windows: a hung
 test there ends its whole process (pytest-timeout's thread method on Windows),
-so the other files still report. Prints each file's result, then the failed
-tests and the files that timed out or crashed; exits non-zero if any."""
+so the other files still report. Prints each file's result (and the end of
+the output of one that did not pass), then the failed tests and the files that
+timed out or crashed; exits non-zero if any."""
 import re
 import subprocess
 import sys
@@ -39,7 +40,7 @@ def main():
             failed += ids
         else:
             broken.append(name)
-            print(output[-6000:], flush=True)
+        print(output[-8000:], flush=True)
     if failed:
         print(f"\n{len(failed)} failed:")
         for test in failed:
