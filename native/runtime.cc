@@ -503,6 +503,7 @@ uint64_t AsioRuntime::start_server(ServerConfig config) {
     }
     std::unique_ptr<NetworkServer> previous;  // stopped already
     uint64_t generation;
+    bool published;
     {
         std::lock_guard lock(p->mutex);
         previous = std::move(p->server);
@@ -510,8 +511,13 @@ uint64_t AsioRuntime::start_server(ServerConfig config) {
         p->adopt(config);
         p->server_config = std::move(config);
         generation = ++p->server_generation;
+        published = p->server->has_events();
     }
     p->server_running = true;
+    // The server accepts from start(): a request it published since then woke
+    // a drain that found no server yet (a connection queued on a shared
+    // listening socket, say), and nothing else would wake one again.
+    if (published) p->notify();
     return generation;
 }
 void AsioRuntime::drain_server(uint64_t generation) {
