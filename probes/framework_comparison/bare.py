@@ -1,6 +1,6 @@
-"""bare.py PORT: the native host's bare function with the site's three routes
+"""bare.py PORT [WORKERS]: the native host's bare function with the site's three routes
 (as its bare WSGI entries: a hand-written check of the path), 4 same-thread
-workers on this process's CPUs; the machinery of probes/wrk_comparison/serve.py."""
+workers (default 4) on this process's CPUs; the machinery of probes/wrk_comparison/serve.py."""
 import sys
 from pathlib import Path
 
@@ -29,4 +29,4 @@ def handler(request):
 serve.bare_handler = handler  # bare_worker looks it up when it opens the Engine
 
 if __name__ == "__main__":
-    serve.bare(int(sys.argv[1]), 4, True)
+    serve.bare(int(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 2 else 4, True)

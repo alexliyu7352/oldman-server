@@ -4,7 +4,9 @@ callables on a server, and frameworks with routing; and stock Sanic with
 sanic-ext against oldman-server with its ext, both with oldman's five
 extensions (ext_app.py). Server: 4 CPUs (taskset), 4 workers or processes
 each (PYTHON_CPU_COUNT=4 where the app sizes itself by cpu_count); wrk on 3
-other CPUs, as probes/wrk_comparison.
+other CPUs, as probes/wrk_comparison. --server-cpus 2 gives every service 2 CPUs
+and 2 workers, so that the server, not wrk, is the bottleneck for the
+fastest ones.
 
   drive.py OUT [--services a,b] [--routes root,user,post] [--connections 64,256] [--rounds 2]
 
@@ -37,24 +39,24 @@ VENVS = Path(os.environ.get("VENVS", SETUP / "venvs"))
 PORT = 3000  # the site's port; several apps hard-code it
 OURS = str(ROOT / ".venv/bin/python")
 UVICORN = ["-m", "uvicorn", "--log-level", "critical", "--host", "0.0.0.0", "--port", "3000",
-           "--workers", "4", "server:app"]
+           "--workers", "{workers}", "server:app"]
 WEFT = lambda protocol: ["-m", "weft", "--log-level", "error", "--protocol", protocol, "--host", "0.0.0.0",
-                         "--port", "3000", "--workers", "4", "server:app"]
+                         "--port", "3000", "--workers", "{workers}", "server:app"]
 # name: (group, venv or None for ours, cwd, arguments after the interpreter, engine, extra environment)
 SERVICES = {
-    "oldman-server-bare": ("bare", None, HERE, [str(HERE / "bare.py"), "3000"], "oldman-server native host", {}),
+    "oldman-server-bare": ("bare", None, HERE, [str(HERE / "bare.py"), "3000", "{workers}"], "oldman-server native host", {}),
     "fastpysgi-wsgi": ("bare", "fastpysgi-wsgi", "fastpysgi-wsgi",
-                       ["server.py", "--host", "0.0.0.0", "--port", "3000", "--workers", "4"], "fastpysgi", {}),
+                       ["server.py", "--host", "0.0.0.0", "--port", "3000", "--workers", "{workers}"], "fastpysgi", {}),
     "weft-wsgi": ("bare", "weft", "weft-wsgi", WEFT("wsgi"), "weft", {}),
     "weft-asgi": ("bare", "weft", "weft-asgi", WEFT("asgi"), "weft", {}),
-    "oldman-server": ("framework", None, ROOT, ["probes/wrk_comparison/serve.py", "candidate", "3000", "4"],
+    "oldman-server": ("framework", None, ROOT, ["probes/wrk_comparison/serve.py", "candidate", "3000", "{workers}"],
                       "oldman-server native host, 4 same-thread workers", {}),
     "wred": ("framework", "wred", "wred", WEFT("asgi"), "weft", {}),
     "oxapy": ("framework", "oxapy", "oxapy", ["server.py"], "oxapy", {}),
     "robyn": ("framework", "robyn", "robyn",
-              ["server.py", "--workers=4", "--processes=4", "--log-level=CRITICAL"], "robyn", {}),
+              ["server.py", "--workers={workers}", "--processes={workers}", "--log-level=CRITICAL"], "robyn", {}),
     "emmett": ("framework", "emmett", "emmett",
-               ["-m", "emmett", "serve", "--host", "0.0.0.0", "--port", "3000", "--workers", "4"], "emmett (granian)", {}),
+               ["-m", "emmett", "serve", "--host", "0.0.0.0", "--port", "3000", "--workers", "{workers}"], "emmett (granian)", {}),
     "sanic": ("framework", "sanic", "sanic", ["server.py"], "sanic", {}),
     "blacksheep": ("framework", "blacksheep", "blacksheep", UVICORN, "uvicorn", {}),
     "starlette": ("framework", "starlette", "starlette", UVICORN, "uvicorn", {}),
@@ -63,9 +65,9 @@ SERVICES = {
     "lihil": ("framework", "lihil", "lihil", UVICORN, "uvicorn", {}),
     "asgineer": ("framework", "asgineer", "asgineer", UVICORN, "uvicorn", {}),
     # oldman's five extensions on each side (ext_app.py), beside the plain sanic / oldman-server rows.
-    "sanic-ext5": ("ext", "sanic-ext", HERE, [str(HERE / "ext_app.py"), "stock", "3000", "4"],
+    "sanic-ext5": ("ext", "sanic-ext", HERE, [str(HERE / "ext_app.py"), "stock", "3000", "{workers}"],
                    "sanic + sanic-ext, oldman's five extensions", {}),
-    "oldman-server-ext5": ("ext", None, HERE, [str(HERE / "ext_app.py"), "candidate", "3000", "4"],
+    "oldman-server-ext5": ("ext", None, HERE, [str(HERE / "ext_app.py"), "candidate", "3000", "{workers}"],
                            "oldman-server native host + ext, oldman's five extensions", {}),
 }
 # Services with a /loop route, checked to run on uvloop: ours, and both sides of the ext pair.
@@ -90,7 +92,9 @@ def start(name, layout):
     group, venv, cwd, arguments, engine, extra = SERVICES[name]
     python = OURS if venv is None else str(VENVS / venv / "bin/python")
     cwd = cwd if isinstance(cwd, Path) else APPS / cwd
-    env = {**os.environ, "PYTHON_CPU_COUNT": "4", **extra}
+    workers = str(len(layout["server"]))
+    arguments = [argument.replace("{workers}", workers) for argument in arguments]
+    env = {**os.environ, "PYTHON_CPU_COUNT": workers, **extra}
     if venv is not None:
         env = {k: v for k, v in env.items() if not k.startswith(("OLDMAN_SERVER_", "PYTHONPATH"))}
         env["PATH"] = f"{VENVS / venv / 'bin'}:{env['PATH']}"
@@ -192,12 +196,15 @@ def main():
     parser.add_argument("--seconds", type=int, default=10)
     parser.add_argument("--no-quiet", action="store_true")
     parser.add_argument("--quiet-limit", type=int, default=1800, help="longest wait for a quiet machine (s)")
+    parser.add_argument("--server-cpus", type=int, default=4, choices=(1, 2, 3, 4),
+                        help="the server's CPUs and each service's workers")
     parser.add_argument("--check", action="store_true", help="start each service and check its routes only")
     args = parser.parse_args()
     services = args.services.split(",")
     if not set(services) <= SERVICES.keys():
         raise SystemExit(f"services: {', '.join(SERVICES)}")
     layout, _ = layout_for(describe_cpu(), 4)
+    layout = {**layout, "server": layout["server"][:args.server_cpus]}
     os.sched_setaffinity(0, set(layout["controller"]))
     if args.check:
         for name in services:
