@@ -11,6 +11,13 @@
 namespace asio { class io_context; }
 
 namespace probe {
+// A response the host writes itself, without Python (a fixed or cached one):
+// its Content-Length, Date and Connection headers are added as for any other.
+struct StoredResponse {
+    int status = 200;
+    std::string body;
+    std::vector<std::pair<std::string, std::string>> headers;
+};
 struct ServerConfig {
     unsigned http_port = 0;
     size_t max_requests = 256, max_bytes = 64 * 1024 * 1024, max_body_bytes = 1024 * 1024;
@@ -61,6 +68,13 @@ struct ServerConfig {
     bool framework_errors = false;
     // The framework owns all HTTP routing; required with any listener.
     bool application_dispatch_all = false;
+    // Answered by the host, without Python: complete GET and HEAD requests
+    // for these paths (the request target up to any query string).
+    std::map<std::string, StoredResponse, std::less<>> fixed_responses;
+    // Python may let a shard keep a complete response to a GET (a cached
+    // decision) and answer requests for the same target with it until it
+    // expires (see Service::stored_response).
+    bool response_cache = false;
     bool enabled() const { return http_port || listen_fd >= 0 || worker_listen_fd >= 0; }
 };
 // One worker process's line in the shared accept counts. connections: the
@@ -106,8 +120,10 @@ struct RequestEvent {
 // stream_file writes part of a file into an open stream (Sanic's file_stream):
 // body "<offset> <length> <chunk size> <path>"; the shard reads it and reports
 // application_file when done.
+// cached: a complete response the shard may keep for its cache_ms (response_cache).
 enum DecisionKind : int { complete = 0, stream_start = 1, stream_data = 2, stream_end = 3, stream_abort = 4,
-                          tunnel_pause = 5, tunnel_resume = 6, stream_file = 7, body_read = 8 };
+                          tunnel_pause = 5, tunnel_resume = 6, stream_file = 7, body_read = 8,
+                          cached = 9 };
 struct RequestDecision {
     uint64_t id;
     unsigned shard;
@@ -117,6 +133,7 @@ struct RequestDecision {
     std::vector<std::pair<std::string, std::string>> headers;
     int kind = DecisionKind::complete;
     int64_t content_length = -1;  // stream_start: application Content-Length, or -1
+    uint32_t cache_ms = 0;  // a complete response the shard may keep this long
 };
 // upgrade: the status of a framework host stream start, where a 101 begins a tunnel.
 bool valid_http_response(int status,

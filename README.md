@@ -100,6 +100,11 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 python app.py
 
 协议错误（如非法请求行、请求头过大、坏的 chunked 编码、请求体超限）与原版报出相同的状态码和消息，并交给应用的错误处理器。
 
+两个不经 Python 的回答方式，都要明确设置：
+
+- **固定响应**：`app.add_fixed_response("/health", "ok")`（可选 `status`、`content_type`、`headers`）。这个路径的 GET 与 HEAD 请求（不管查询字符串）在一切之前回答：不改写路径、不路由、不跑中间件、不触发信号、没有 Request 对象、不记访问日志；带请求体的请求和其他方法照常路由，同一路径的路由收不到这两个方法。原生主机直接写出，不进 Python；asyncio 服务器按同样的规则回答（只在读到请求行之前触发的连接级信号除外）。在服务器启动之前设置。
+- **原生微缓存**：`@native_cache(seconds)`（`from oldman_server.native import native_cache`，加在 handler 上、路由装饰器之下）。这个 handler 对 GET 的完整 200 响应，没有 Set-Cookie、Vary，Cache-Control 也允许共享缓存保存（没有 private、no-store、no-cache）时，原生主机保存 `seconds` 秒，期间同一请求目标（路径加查询字符串）的 GET 直接由它回答：不进 Python，所以中间件（包括认证）、信号、handler 都不运行，请求头也不看；带 Cookie 或 Authorization 的请求既不从缓存回答，响应也不保存。只适合公开内容。每个 shard（同线程模式即每个 worker 进程）各有一份，最多 1024 条、每条 1 MiB。asyncio 服务器忽略它。
+
 ## 放在 nginx 之后
 
 多 worker 放在 nginx（或 OpenResty）之后时，推荐让每个 worker 另外监听自己的地址，由 nginx 按请求均衡：

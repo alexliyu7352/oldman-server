@@ -35,7 +35,7 @@ from sanic_routing.exceptions import NotFound
 
 from . import _native
 from .cpus import parse_cpus, same_thread, shard_count, worker_group
-from .engine import (BodyError, Config, Engine, ServerConfig, STREAM_DATA, STREAM_END,
+from .engine import (BodyError, CACHED, Config, Engine, ServerConfig, STREAM_DATA, STREAM_END,
                      STREAM_START)
 from oldman_server.request import form as _form
 
@@ -759,6 +759,7 @@ class NativeApplication:
         # Host-free router.get() results by (raw path bytes, method) for one
         # route-table generation; misses and errors always use router.get().
         self._routes, self._routes_router, self._routes_generation = {}, None, None
+        self._cached_routes = cached_routes(app)
 
     @staticmethod
     def _flat_supported(app):
@@ -855,6 +856,14 @@ class NativeApplication:
         except Exception as failure:
             await app.handle_exception(request, failure, False)
 
+    def _cached(self, request, result):
+        """A complete response to a GET for a native_cache route: one the shard
+        may keep (engine.CACHED; it checks the rest)."""
+        ms = self._cached_routes.get(id(request.route))
+        if ms is None or result is None or len(result) != 3:
+            return result
+        return (*result, CACHED, ms)
+
     @property
     def entry(self):
         """The coroutine function the Engine awaits for each native request."""
@@ -883,6 +892,8 @@ class NativeApplication:
             result = exchange.finish()
             if self._access_log:
                 _log_access(request, exchange, started)
+            if self._cached_routes and request.method == "GET":
+                result = self._cached(request, result)
             return result
         finally:
             request_class._current.reset(token)
@@ -1070,11 +1081,12 @@ class NativeApplication:
                 await self._cancelled(request, exchange, error)
             except Exception as error:
                 await app.handle_exception(request, error, run_middleware=run_middleware)
+            result = exchange.finish()
             if self._access_log:
-                result = exchange.finish()
                 _log_access(request, exchange, started)
-                return result
-            return exchange.finish()
+            if self._cached_routes and request.method == "GET":
+                result = self._cached(request, result)
+            return result
         finally:
             Request._current.reset(token)
             if exchange.streaming is not None:
@@ -1099,6 +1111,13 @@ def _shard_cpus(config):
         return explicit
     available = sorted(os.sched_getaffinity(0))
     return tuple(available[-shard_count(config, len(available)):])
+
+
+def cached_routes(app):
+    """{id(route): ms} of the routes whose handler native_cache marked (a
+    Route compares by its path and is not hashable)."""
+    return {id(route): round(seconds * 1000) for route in app.router.routes
+            if (seconds := getattr(route.handler, "__native_cache__", None))}
 
 
 def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=None, accept=None,
@@ -1154,6 +1173,8 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
                                       int(config.REQUEST_BUFFER_SIZE) - 4096,
                                       max_body, _http1.Http.HEADER_CEILING)),
         keep_alive=bool(config.KEEP_ALIVE), framework_errors=True,
+        fixed_responses=tuple((path, *response) for path, response in app.fixed_responses.items()),
+        response_cache=bool(cached_routes(app)),
         keep_alive_timeout_ms=_timeout_ms(config.KEEP_ALIVE_TIMEOUT),
         # Sanic hands a response to its transport and closes an idle connection
         # after KEEP_ALIVE_TIMEOUT, waiting GRACEFUL_TCP_CLOSE_TIMEOUT for the

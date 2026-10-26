@@ -95,6 +95,12 @@ class ServerConfig:
     # Protocol errors are rendered by application_error_handler and request body
     # errors raised from Engine.receive, instead of plain native error responses.
     framework_errors: bool = False
+    # Answered by the host without Python: ((path, status, body, ((name, value),
+    # ...)), ...), for complete GET and HEAD requests for each path (the target
+    # up to any query string).
+    fixed_responses: tuple = ()
+    # A shard may keep a complete response sent as CACHED (see that).
+    response_cache: bool = False
 
 
 # Python owns this extension object; its plain native data outlives the request
@@ -241,6 +247,11 @@ STREAM_START, STREAM_DATA, STREAM_END, STREAM_ABORT = 1, 2, 3, 4
 TUNNEL_PAUSE, TUNNEL_RESUME = 5, 6
 STREAM_FILE = 7
 BODY_READ = 8  # the handler read this many bytes of a request body still arriving
+# A complete response to a GET the shard may keep for this many ms and answer
+# requests for the same target with (ServerConfig.response_cache): (status,
+# body, headers, CACHED, ms). Only a 200 without Set-Cookie or Vary that a
+# shared cache may store, to a request without Cookie or Authorization.
+CACHED = 9
 FILE_STAT, FILE_READ, FILE_OPEN = 0, 1, 2  # native file operations
 
 

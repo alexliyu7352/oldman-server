@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <unordered_map>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -237,6 +238,8 @@ WheelEntry::~WheelEntry() {
 struct alignas(64) Counts {
     std::atomic<uint64_t> active_requests{0}, reserved_bytes{0}, peak_requests{0}, peak_bytes{0};
     std::atomic<uint64_t> accepted{0}, rejected{0}, responses{0}, errors{0}, pending_decisions{0};
+    // Of responses: written without Python (a fixed or cached one).
+    std::atomic<uint64_t> stored_responses{0};
     std::atomic<uint64_t> decisions{0}, decision_timeouts{0}, decision_wait_ns{0};
     std::atomic<uint64_t> python_terminal_events{0};
     std::atomic<uint64_t> body_bytes_to_python{0}, body_bytes_from_python{0}, response_bytes{0};
@@ -250,6 +253,7 @@ struct alignas(64) Counts {
 #define FIELD(x) d[#x] = x.load(std::memory_order_relaxed)
         FIELD(active_requests); FIELD(reserved_bytes); FIELD(peak_requests); FIELD(peak_bytes);
         FIELD(accepted); FIELD(rejected); FIELD(responses); FIELD(errors); FIELD(pending_decisions);
+        FIELD(stored_responses);
         FIELD(decisions); FIELD(decision_timeouts); FIELD(decision_wait_ns);
         FIELD(python_terminal_events);
         FIELD(body_bytes_to_python); FIELD(body_bytes_from_python); FIELD(response_bytes);
@@ -342,6 +346,7 @@ struct Decision {
     int64_t content_length = -1;
     int reject_status = 503;  // the answer when code is 3 (not answered by Python)
     bool timed_out = false;   // answered after the response deadline was reported
+    uint32_t cache_ms = 0;    // a complete response the shard may keep this long
 };
 struct Waiter {
     explicit Waiter(asio::io_context& io) : decided(io), more(io), resumed(io) {}
@@ -623,6 +628,70 @@ class Service {
 
     std::string_view date() {
         return shared.config.generate_date_header ? date_line.get() : std::string_view{};
+    }
+    // The response cache (ServerConfig::response_cache): by request target.
+    struct CachedResponse {
+        uint64_t expires_ms;
+        StoredResponse response;
+    };
+    std::unordered_map<std::string, CachedResponse> cached_responses;
+    static constexpr size_t cached_entries = 1024, cached_body_bytes = 1 << 20;
+    static bool named(std::string_view name, std::string_view lower) {
+        return name.size() == lower.size() &&
+               std::equal(name.begin(), name.end(), lower.begin(),
+                          [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a + 32 : a) == b; });
+    }
+    // A request whose answer may depend on who sends it: the response cache
+    // neither answers it nor keeps its response.
+    static bool credentialed(const ApplicationInput& input) {
+        return std::ranges::any_of(input.headers, [](const auto& header) {
+            return named(header.first, "cookie") || named(header.first, "authorization");
+        });
+    }
+    // What the host answers itself to a complete request, without Python: a
+    // fixed response for its path, or a cached one for its target that has
+    // not expired; nullptr otherwise.
+    const StoredResponse* stored_response(const std::string& method, const ApplicationInput& input) {
+        if (method != "GET" && method != "HEAD") return nullptr;
+        const auto& fixed = shared.config.fixed_responses;
+        if (!fixed.empty()) {
+            const std::string_view target(input.target);
+            if (auto found = fixed.find(target.substr(0, target.find('?'))); found != fixed.end())
+                return &found->second;
+        }
+        if (method != "GET" || cached_responses.empty()) return nullptr;
+        auto found = cached_responses.find(input.target);
+        if (found == cached_responses.end()) return nullptr;
+        if (found->second.expires_ms <= monotonic_ms()) {
+            cached_responses.erase(found);
+            return nullptr;
+        }
+        return credentialed(input) ? nullptr : &found->second.response;
+    }
+    // Whether a response Python let the shard keep (cache_ms) may be: a 200
+    // of at most cached_body_bytes, without Set-Cookie or Vary, that a shared
+    // cache may store (no private, no-store or no-cache).
+    static bool cacheable(const Decision& answer) {
+        if (answer.code != 200 || answer.body.size() > cached_body_bytes) return false;
+        for (const auto& [name, value] : answer.headers) {
+            if (named(name, "set-cookie") || named(name, "vary")) return false;
+            if (named(name, "cache-control")) {
+                std::string lower(value);
+                std::ranges::transform(lower, lower.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; });
+                for (const char* directive : {"private", "no-store", "no-cache"})
+                    if (lower.find(directive) != std::string::npos) return false;
+            }
+        }
+        return true;
+    }
+    void keep_response(std::string target, const Decision& answer) {
+        const auto now = monotonic_ms();
+        if (cached_responses.size() >= cached_entries) {
+            std::erase_if(cached_responses, [now](const auto& entry) { return entry.second.expires_ms <= now; });
+            if (cached_responses.size() >= cached_entries) cached_responses.clear();
+        }
+        cached_responses.insert_or_assign(
+            std::move(target), CachedResponse{now + answer.cache_ms, {answer.code, answer.body, answer.headers}});
     }
     // What the peer sent next, appended to `buffer`: false at its end (EOF,
     // or this side shut the input). A failure (a reset) throws.
@@ -1009,6 +1078,20 @@ public:
                 }
                 consumed = start;
                 request_started = monotonic_ms();  // for a pipelined successor
+                if (complete && body.empty()) {
+                    if (const auto* stored = stored_response(method, input)) {
+                        // Not a request Python sees: their sequence numbers count those.
+                        --sequence;
+                        if (draining && buffer.size() == consumed) close = true;
+                        ++counts.responses;
+                        ++counts.stored_responses;
+                        counts.response_bytes += head_request ? 0 : stored->body.size();
+                        http1::append_response(output, stored->status, stored->body, stored->headers,
+                                               head_request, close, date(), probe_lines);
+                        keep = !close && !connection.peer_gone;
+                        continue;
+                    }
+                }
                 if (complete) {
                     co_await respond_application(connection, method, std::move(input), std::move(body),
                                                  head_request, http11, close, output, 0);
@@ -1233,6 +1316,11 @@ public:
         };
         if (!lease) { reject(error_status ? error_status : 503); co_return; }
         std::optional<Decision> answer;
+        // The target a cached decision is kept for (response_cache).
+        std::string cache_target;
+        if (shared.config.response_cache && method == "GET" && !streamed_id && size == 0 &&
+            !credentialed(input))
+            cache_target = input.target;
         try {
             if (closing) { reject(error_status ? error_status : 503); co_return; }
             // Publishes the request (and sets root) before it waits.
@@ -1293,6 +1381,8 @@ public:
                                         close, output, retired);
             co_return;
         }
+        if (answer->cache_ms && !cache_target.empty() && cacheable(*answer))
+            keep_response(std::move(cache_target), *answer);
         const bool write_body = !head_request && http1::status_has_body(answer->code);
         counts.response_bytes += write_body ? answer->body.size() : 0;
         if (head_request && answer->content_length >= 0) {
@@ -1753,7 +1843,7 @@ public:
     }
     void resolve(uint64_t id, int code, std::string body, bool retire = false,
                  std::vector<std::pair<std::string, std::string>> headers = {},
-                 int kind = DecisionKind::complete, int64_t content_length = -1) {
+                 int kind = DecisionKind::complete, int64_t content_length = -1, uint32_t cache_ms = 0) {
         if (kind == DecisionKind::body_read) {
             if (auto flow = body_flows.find(id); flow != body_flows.end()) {
                 auto& unread = flow->second->unread;
@@ -1781,7 +1871,9 @@ public:
         }
         if (waiter.replied) return;
         waiter.replied = true;
-        settle(waiter, Decision{code, std::move(body), 0, retire, std::move(headers), kind, content_length});
+        Decision decision{code, std::move(body), 0, retire, std::move(headers), kind, content_length};
+        decision.cache_ms = cache_ms;
+        settle(waiter, std::move(decision));
     }
     // The framework host's listeners accept no more connections (again: a
     // no-op). A listener of this process's own is shut down, as Sanic's
@@ -1970,7 +2062,8 @@ void NetworkServer::resolve_batch(std::vector<RequestDecision> decisions) {
             if (!impl->shared.running || !service) return;
             for (auto& decision : batch) {
                 service->resolve(decision.id, decision.code, std::move(decision.body), decision.retire,
-                                 std::move(decision.headers), decision.kind, decision.content_length);
+                                 std::move(decision.headers), decision.kind, decision.content_length,
+                                 decision.cache_ms);
             }
         });
         p->shared.decision_return_items.fetch_add(count, std::memory_order_relaxed);

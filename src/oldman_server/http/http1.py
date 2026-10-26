@@ -71,6 +71,7 @@ class Http(Stream, metaclass=TouchUpMeta):
         "recv_buffer",
         "protocol",
         "expecting_continue",
+        "fixed",
         "stage",
         "keep_alive",
         "head_only",
@@ -111,6 +112,8 @@ class Http(Stream, metaclass=TouchUpMeta):
         self.upgrade_websocket = False
         self.url = None
         self.perft0 = None
+        # app.add_fixed_response's (status, body, headers) for this request.
+        self.fixed = None
 
     def __bool__(self):
         """Test if request handling is in progress"""
@@ -133,7 +136,10 @@ class Http(Stream, metaclass=TouchUpMeta):
 
                 self.stage = Stage.HANDLER
                 self.perft0 = perf_counter()
-                await self.protocol.request_handler(self.request)
+                if self.fixed is not None:
+                    await self.fixed_response()
+                else:
+                    await self.protocol.request_handler(self.request)
 
                 # Handler finished, response should've been sent
                 if self.stage is Stage.HANDLER and not self.upgrade_websocket:
@@ -215,11 +221,17 @@ class Http(Stream, metaclass=TouchUpMeta):
             reqline, *split_headers = raw_headers.split("\r\n")
             method, self.url, protocol = reqline.split(" ")
 
-            await self.dispatch(
-                "http.lifecycle.read_head",
-                inline=True,
-                context={"head": bytes(head)},
-            )
+            # A fixed response (app.add_fixed_response) dispatches no signal;
+            # one for a request with a body is not used.
+            fixed = self.protocol.app.fixed_responses
+            if fixed and method in ("GET", "HEAD"):
+                self.fixed = fixed.get(self.url.split("?", 1)[0])
+            if self.fixed is None:
+                await self.dispatch(
+                    "http.lifecycle.read_head",
+                    inline=True,
+                    context={"head": bytes(head)},
+                )
 
             if protocol == "HTTP/1.1":
                 self.keep_alive = True
@@ -260,6 +272,14 @@ class Http(Stream, metaclass=TouchUpMeta):
         except Exception:
             raise BadRequest("Bad Request")
 
+        if self.fixed is not None and request_body:
+            self.fixed = None
+            await self.dispatch(
+                "http.lifecycle.read_head",
+                inline=True,
+                context={"head": bytes(head)},
+            )
+
         if not self.protocol.app.config.KEEP_ALIVE:
             self.keep_alive = False
 
@@ -287,11 +307,12 @@ class Http(Stream, metaclass=TouchUpMeta):
         # address, which TRUSTED_PROXIES decides from the connection.
         request.conn_info = self.protocol.conn_info
         self.protocol.request_class._current.set(request)
-        await self.dispatch(
-            "http.lifecycle.request",
-            inline=True,
-            context={"request": request},
-        )
+        if self.fixed is None:
+            await self.dispatch(
+                "http.lifecycle.request",
+                inline=True,
+                context={"request": request},
+            )
 
         # Prepare for request body
         self.request_bytes_left = self.request_bytes = 0
@@ -390,7 +411,7 @@ class Http(Stream, metaclass=TouchUpMeta):
                 ret = HTTP_CONTINUE + ret
 
         # Send response
-        if self.protocol.access_log:
+        if self.protocol.access_log and self.fixed is None:
             self.log_response()
 
         await self._send(ret)
@@ -621,6 +642,15 @@ class Http(Stream, metaclass=TouchUpMeta):
         return data
 
     # Response methods
+
+    async def fixed_response(self) -> None:
+        """Send the request's fixed response (app.add_fixed_response) in place
+        of the request handler."""
+        from oldman_server.response import HTTPResponse
+
+        status, body, headers = self.fixed
+        response = HTTPResponse(body, status=status, headers=Header(headers), content_type=None)
+        await self.respond(response).send(end_stream=True)
 
     def respond(self, response: BaseHTTPResponse) -> BaseHTTPResponse:
         """Initiate new streaming response.

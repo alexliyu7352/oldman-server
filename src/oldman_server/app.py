@@ -189,6 +189,7 @@ class OldmanServer(
         "configure_logging",
         "ctx",
         "error_handler",
+        "fixed_responses",
         "go_fast",
         "listeners",
         "multiplexer",
@@ -329,6 +330,7 @@ class OldmanServer(
         self.configure_logging: bool = configure_logging
         self.ctx: ctx_type = cast(ctx_type, ctx or SimpleNamespace())
         self.error_handler: ErrorHandler = error_handler or ErrorHandler()
+        self.fixed_responses: dict[str, tuple[int, bytes, tuple[tuple[str, str], ...]]] = {}
         self.listeners: dict[str, list[ListenerType[Any]]] = defaultdict(list)
         self.named_request_middleware: dict[str, deque[Middleware]] = {}
         self.named_response_middleware: dict[str, deque[Middleware]] = {}
@@ -453,6 +455,42 @@ class OldmanServer(
             path = rewriter(request)
             if path is not None:
                 request._set_path(path)
+
+    def add_fixed_response(
+        self,
+        path: str,
+        body: str | bytes,
+        *,
+        status: int = 200,
+        content_type: str = "text/plain; charset=utf-8",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        """Answer GET and HEAD requests for `path` with this response, before
+        anything else: no path rewriting, routing, middleware, signal, handler
+        or access log, and no Request object. The query string does not matter
+        (`/health?probe=1` is `/health`); a route for the same path is not
+        reached by those methods. The native host writes it without running
+        Python; the asyncio server answers it the same way. Set before the
+        server starts.
+
+        Examples:
+            ```python
+            app.add_fixed_response("/health", "ok")
+            ```
+        """
+        if not isinstance(path, str) or not path.startswith("/") or "?" in path:
+            raise ValueError(f"A fixed response's path starts with '/' and has no query: {path!r}")
+        if self.state.is_started:
+            raise OldmanServerException("Fixed responses are set before the server starts")
+        if isinstance(body, str):
+            body = body.encode()
+        if not isinstance(status, int) or not 200 <= status <= 599:
+            raise ValueError(f"A fixed response's status is 200 to 599: {status!r}")
+        fields = [("content-type", content_type), *(headers or {}).items()]
+        for name, value in fields:
+            if any(c in f"{name}{value}" for c in "\r\n\x00") or not name or ":" in name:
+                raise ValueError(f"Invalid fixed response header: {name!r}")
+        self.fixed_responses[path] = (status, bytes(body), tuple(fields))
 
     def register_middleware(
         self,

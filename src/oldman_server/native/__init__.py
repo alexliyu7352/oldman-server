@@ -21,6 +21,36 @@ def _note(message, *args):
         error_logger.warning(message, *args)
 
 
+def native_cache(seconds: float):
+    """Let the native host keep this handler's responses for `seconds` (a
+    decorator): a complete 200 to a GET, without Set-Cookie or Vary, that a
+    shared cache may store (Cache-Control without private, no-store or
+    no-cache), answers GET requests for the same target (path and query)
+    until then, written by the host without running Python: no middleware
+    (authentication included), signal or handler, and the request headers are
+    not looked at, except that requests with Cookie or Authorization are
+    neither answered from it nor kept. For public content only. Each shard
+    (each worker process in the same-thread mode) keeps its own. The asyncio
+    server ignores it.
+
+    Examples:
+        ```python
+        @app.get("/news")
+        @native_cache(1.0)
+        async def news(request):
+            ...
+        ```
+    """
+    if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or not 0.001 <= seconds <= 3600):
+        raise ValueError(f"native_cache takes 0.001 to 3600 seconds: {seconds!r}")
+
+    def mark(handler):
+        handler.__native_cache__ = seconds
+        return handler
+    return mark
+
+
 def native_server(config) -> bool:
     """Whether the native host serves. NATIVE_SERVER unset (None, the default):
     on Linux when the extension is installed (without it, noted once). On

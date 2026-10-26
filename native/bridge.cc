@@ -372,7 +372,29 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("write_timeout_ms", &probe::ServerConfig::write_timeout_ms)
         .def_readwrite("body_window_bytes", &probe::ServerConfig::body_window_bytes)
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
-        .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors);
+        .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors)
+        .def_readwrite("response_cache", &probe::ServerConfig::response_cache)
+        // (path, status, body bytes, ((name, value), ...)) for each path.
+        .def_property("fixed_responses",
+            [](const probe::ServerConfig& c) {
+                py::list out;
+                for (const auto& [path, response] : c.fixed_responses)
+                    out.append(py::make_tuple(path, response.status, py::bytes(response.body),
+                                              py::cast(response.headers)));
+                return py::tuple(out);
+            },
+            [](probe::ServerConfig& c, py::iterable items) {
+                std::map<std::string, probe::StoredResponse, std::less<>> fixed;
+                for (auto item : items) {
+                    auto [path, status, body, headers] =
+                        item.cast<std::tuple<std::string, int, py::bytes, std::vector<std::pair<std::string, std::string>>>>();
+                    if (!probe::valid_http_response(status, headers, true))
+                        throw py::value_error("invalid fixed response for " + path);
+                    fixed.insert_or_assign(std::move(path),
+                                           probe::StoredResponse{status, std::string(body), std::move(headers)});
+                }
+                c.fixed_responses = std::move(fixed);
+            });
     // Sanic's parse_multipart_form for the forms native/multipart.hh accepts:
     // (fields, files) dicts of lists, file parts as file_type(type, body, name);
     // None means Sanic's parser decides.
@@ -498,7 +520,7 @@ PYBIND11_MODULE(_native, m) {
                 if (size >= 6) {
                     if (!PyLong_CheckExact(item[5].ptr())) throw py::type_error("decision kind must be int");
                     kind = py::cast<int>(item[5]);
-                    if (kind < probe::DecisionKind::complete || kind > probe::DecisionKind::body_read)
+                    if (kind < probe::DecisionKind::complete || kind > probe::DecisionKind::cached)
                         throw py::value_error("unknown decision kind");
                 }
                 if (kind == probe::DecisionKind::body_read) {
@@ -508,6 +530,15 @@ PYBIND11_MODULE(_native, m) {
                     decision.kind = kind;
                     decision.code = 0;
                     decision.content_length = py::cast<int64_t>(item[6]);
+                } else if (kind == probe::DecisionKind::cached) {
+                    // A complete response the shard may keep for item[6] ms.
+                    if (size != 7 || !PyLong_CheckExact(item[6].ptr()))
+                        throw py::value_error("a cached response needs its lifetime");
+                    if (checked_http_response(item, max_response_bytes, decision, bytes_headers,
+                                              no_body_statuses, false))
+                        decision.cache_ms = py::cast<uint32_t>(item[6]);
+                    else
+                        ++invalid;
                 } else if (kind >= probe::DecisionKind::stream_data) {
                     // A later piece of a streamed response: its data only.
                     auto* data = item[3].ptr();
