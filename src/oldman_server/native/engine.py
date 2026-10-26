@@ -961,17 +961,22 @@ class Engine:
             # Eager task factories may finish the coroutine, and its bookkeeping,
             # before create_task returns; only a pending Task is registered.
             if not task.done():
-                self._application_tasks[request_id] = (task, shard)
-                if task.cancelling():
-                    # A task factory cancelled it before its first step: its body
-                    # will never run, so answer as soon as the cancellation lands.
-                    task.add_done_callback(
-                        lambda _, rid=request_id: self._reap_unstarted_application(rid))
+                self._register_application(task, request_id, shard)
         except Exception:
-            if self._application_inbound:
-                self._application_inbound.pop(request_id, None)
-            self._decision_stats["python_application_errors"] += 1
-            self._queue_application(request_id, shard, 500)
+            self._application_not_started(request_id, shard)
+
+    def _register_application(self, task, request_id, shard):
+        self._application_tasks[request_id] = (task, shard)
+        if task.cancelling():
+            # A task factory cancelled it before its first step: its body
+            # will never run, so answer as soon as the cancellation lands.
+            task.add_done_callback(lambda _, rid=request_id: self._reap_unstarted_application(rid))
+
+    def _application_not_started(self, request_id, shard):
+        if self._application_inbound:
+            self._application_inbound.pop(request_id, None)
+        self._decision_stats["python_application_errors"] += 1
+        self._queue_application(request_id, shard, 500)
 
     def _drain(self):
         self._native.clear_notification()
@@ -994,10 +999,29 @@ class Engine:
         # A complete request for a coroutine handler, the usual event, is
         # started here as _application_event would start it.
         coroutine_handler = handler is not None and not self._application_handler_sync
+        # In the same-thread mode the Task of a handler that settles its requests
+        # is made here, as _start_application makes it, without a call per request.
+        settling = coroutine_handler and self._application_settles and self._same_thread
+        loop, task_type, stats = self._loop, asyncio.Task, self._decision_stats
         for values in self._native.drain_requests_owned(self.config.completion_batch,
                                                         self.application_connections):
             if coroutine_handler and len(values) == 3 and not self._closed:
-                start(*values, handler)
+                if settling and loop.get_task_factory() is None:
+                    request_id, shard, request = values
+                    try:
+                        coroutine = handler(request, self, request_id, shard)
+                        try:
+                            task = task_type(coroutine, loop=loop, eager_start=True)
+                        except BaseException:
+                            coroutine.close()
+                            raise
+                        stats["python_application_started"] += 1
+                        if not task.done():
+                            self._register_application(task, request_id, shard)
+                    except Exception:
+                        self._application_not_started(request_id, shard)
+                else:
+                    start(*values, handler)
             else:
                 event(values)
 
