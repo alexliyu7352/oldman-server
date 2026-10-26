@@ -99,6 +99,16 @@ class BaseHTTPResponse:
     def headers(self, value: Header) -> None:
         self._headers = value
 
+    def _has_header(self, name: str) -> bool:
+        """Whether `name` (lower case) is among the headers, without creating
+        them as `headers` would."""
+        headers = self._headers
+        if headers is None:
+            return False
+        if type(headers) is _SentContentType:
+            return name == "content-type"
+        return name in headers
+
     @property
     def cookies(self) -> CookieJar:
         """The response cookies.

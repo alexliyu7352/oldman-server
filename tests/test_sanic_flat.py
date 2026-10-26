@@ -17,9 +17,29 @@ def native(method, target, body=b"", headers=()):
                               client=("127.0.0.1", 40000), server=("127.0.0.1", 8000))
 
 
-def build(name, log, kept):
+# The http.* events the native host dispatches (on either path).
+SIGNALS = ("http.lifecycle.request", "http.lifecycle.handle", "http.routing.before",
+           "http.routing.after", "http.handler.before", "http.handler.after",
+           "http.lifecycle.response", "http.lifecycle.exception")
+
+
+def build(name, log, kept, signals=False):
     app = OldmanServer(name, configure_logging=False)
     bp = Blueprint("bp", url_prefix="/bp")
+
+    def record(event, attach_to=None):
+        async def observe(**context):
+            response = context.get("response")
+            log.append(("signal", event, attach_to, context["request"].path, sorted(context),
+                        getattr(response, "status", response)))
+        return observe
+
+    if signals:
+        for event in SIGNALS:
+            app.signal(event)(record(event))
+        for event in ("http.middleware.before", "http.middleware.after"):
+            for attach_to in ("request", "response"):
+                app.signal(event, condition={"attach_to": attach_to})(record(event, attach_to))
 
     @app.on_request
     async def enter(request):
@@ -164,11 +184,11 @@ REQUESTS = [
 ]
 
 
-def run_all(flat):
+def run_all(flat, signals=False):
     log, kept = [], []
 
     async def scenario():
-        app = build(f"flat_equivalence_{flat}", log, kept)
+        app = build(f"flat_equivalence_{flat}_{signals}", log, kept, signals)
         app.state.native_loop = asyncio.get_running_loop()
         await app._startup()
         adapter = NativeApplication(app, 65536)
@@ -186,9 +206,10 @@ def run_all(flat):
     return results, log, [list(response.headers.items()) for response in kept]
 
 
-def test_flat_path_matches_generic_handle_request():
-    flat, flat_log, flat_kept = run_all(True)
-    generic, generic_log, generic_kept = run_all(False)
+@pytest.mark.parametrize("signals", [False, True])
+def test_flat_path_matches_generic_handle_request(signals):
+    flat, flat_log, flat_kept = run_all(True, signals)
+    generic, generic_log, generic_kept = run_all(False, signals)
     assert flat_kept == generic_kept
     assert flat_kept == [[("content-type", "application/json")], []]
     for request, left, right in zip(REQUESTS, flat, generic, strict=True):
@@ -200,6 +221,10 @@ def test_flat_path_matches_generic_handle_request():
     assert statuses["GET", b"/short"] == 202 and statuses["GET", b"/replace"] == 201
     assert statuses["GET", b"/keyerror"] == 409 and statuses["GET", b"/missing"] == 404
     assert statuses["GET", b"/raise"] == 500 and statuses["GET", b"/bp/item/7?q=1&q=2"] == 200
+    events = {entry[1:3] for entry in flat_log if entry[0] == "signal"}
+    assert events == ({(event, None) for event in SIGNALS} | {
+        (event, attach_to) for event in ("http.middleware.before", "http.middleware.after")
+        for attach_to in ("request", "response")} if signals else set())
 
 
 @pytest.mark.parametrize("change", ["signal", "request_class", "handle_request"])
@@ -218,8 +243,9 @@ def test_flat_path_is_not_used_outside_its_contract(change):
         else:
             app = OldmanServer(f"flat_off_{change}", configure_logging=False)
 
-            @app.signal("http.lifecycle.response")
-            async def observe(request, response):
+            # One named by a parameter: TouchUp cannot tell which dispatches it receives.
+            @app.signal("http.lifecycle.<stage>")
+            async def observe(stage, **context):
                 pass
 
         @app.get("/")

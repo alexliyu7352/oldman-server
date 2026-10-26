@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from inspect import isawaitable
+from logging import DEBUG
 from typing import Any, cast
 
 from sanic_routing import BaseRouter, Route, RouteGroup
@@ -136,6 +137,9 @@ class SignalRouter(BaseRouter):
         )
         self.allow_fail_builtin = True
         self.ctx.loop = None
+        # What get() finds for each event registered without a parameter,
+        # from the finalized router (see _find_static).
+        self._static: dict[str, tuple[tuple[Signal, ...], tuple[Signal, ...], dict[str, Any]]] = {}
 
     @staticmethod
     def format_event(event: str | Enum) -> str:
@@ -211,24 +215,30 @@ class SignalRouter(BaseRouter):
         reverse: bool = False,
     ) -> Any:
         event = self.format_event(event)
-        try:
-            group, handlers, params = self.get(event, condition=condition)
-        except NotFound as e:
-            is_reserved = event.split(".", 1)[0] in RESERVED_NAMESPACES
-            if fail_not_found and (not is_reserved or self.allow_fail_builtin):
-                raise e
-            else:
-                if self.ctx.app.debug and self.ctx.app.state.verbosity >= 1:
-                    error_logger.warning(str(e))
-                return None
+        static = self._static.get(event)
+        if static is not None:
+            signals = static[1] if reverse else static[0]
+            params = dict(static[2])
+        else:
+            try:
+                group, handlers, params = self.get(event, condition=condition)
+            except NotFound as e:
+                is_reserved = event.split(".", 1)[0] in RESERVED_NAMESPACES
+                if fail_not_found and (not is_reserved or self.allow_fail_builtin):
+                    raise e
+                else:
+                    if self.ctx.app.debug and self.ctx.app.state.verbosity >= 1:
+                        error_logger.warning(str(e))
+                    return None
+
+            signals = group.routes
+            if not reverse:
+                signals = signals[::-1]
 
         if context:
             params.update(context)
         params.pop("__trigger__", None)
 
-        signals = group.routes
-        if not reverse:
-            signals = signals[::-1]
         try:
             for signal in signals:
                 for waiter in signal.ctx.waiters:
@@ -297,7 +307,8 @@ class SignalRouter(BaseRouter):
             fail_not_found=fail_not_found and inline,
             reverse=reverse,
         )
-        logger.debug(f"Dispatching signal: {event}", extra={"verbosity": 1})
+        if logger.isEnabledFor(DEBUG):
+            logger.debug(f"Dispatching signal: {event}", extra={"verbosity": 1})
 
         if inline:
             return await dispatch
@@ -392,7 +403,45 @@ class SignalRouter(BaseRouter):
         for signal in self.routes:
             signal.ctx.waiters = deque()
 
-        return super().finalize(do_compile=do_compile, do_optimize=do_optimize)
+        finalized = super().finalize(do_compile=do_compile, do_optimize=do_optimize)
+        self._static = self._find_static()
+        return finalized
+
+    def reset(self):
+        self._static = {}
+        super().reset()
+
+    def _find_static(self):
+        """get() of each event registered without a parameter, for _dispatch:
+        (its routes in dispatch order, in reverse order, the params left once
+        the trigger is dropped). The router is finalized, so get() answers the
+        same each time. An event whose namespace (its first two parts) also has
+        a parameterized one, or whose routes have requirements, is left to get().
+        """
+        dynamic = {
+            signal.ctx.definition.rsplit(".", 1)[0]
+            for signal in self.routes
+            if signal.ctx.trigger
+        }
+        found = {}
+        for signal in self.routes:
+            event = signal.ctx.definition
+            if (
+                signal.ctx.trigger
+                or event in found
+                or event.rsplit(".", 1)[0] in dynamic
+            ):
+                continue
+            try:
+                group, _, params = self.get(event)
+            except NotFound:
+                continue
+            if group.requirements:
+                continue
+            params.pop("__trigger__", None)
+            routes = tuple(group.routes)
+            found[event] = (routes[::-1], routes, params)
+        return found
 
     def _build_event_parts(self, event: str) -> tuple[str, str, str]:
         parts = path_to_parts(event, self.delimiter)

@@ -29,6 +29,7 @@ from oldman_server.request.types import _NATIVE_UNSET
 from oldman_server.response import BaseHTTPResponse, HTTPResponse, JSONResponse, ResponseStream
 from oldman_server.response.types import HEADER_TRANSLATION_TABLE, _SentContentType
 from oldman_server.router import Router
+from oldman_server.signals import RESERVED_NAMESPACES
 from oldman_server.touchup.schemes.base import BaseScheme
 from sanic_routing.exceptions import NotFound
 
@@ -60,6 +61,8 @@ _engine = None
 _COMPLETE_TYPES = frozenset((HTTPResponse, JSONResponse))
 # Values that are never awaitable; skips inspect's ABC check on the hot path.
 _NOT_AWAITABLE = frozenset((HTTPResponse, JSONResponse, type(None)))
+# The http.* events a signal can name without a parameter.
+_HTTP_EVENTS = frozenset(RESERVED_NAMESPACES["http"])
 # (name, value) str header pairs -> processed_headers encoding and lowered name.
 # Common pairs repeat across responses; cleared when full to stay bounded.
 _ENCODED_HEADERS = {}
@@ -745,6 +748,11 @@ class NativeApplication:
                 handler = BaseScheme.build(handler, globals(), app)
         self._handle_request = handler.__get__(self)
         self._flat = self._flat_supported(app)
+        if self._flat:
+            # Compiled for this app as TouchUp compiles handle_request: the
+            # dispatch of each http.* event without a signal is removed, so an
+            # app with none dispatches nothing.
+            self._call_flat = BaseScheme.build(NativeApplication._call_flat, globals(), app).__get__(self)
         # Route tables may be reset and refinalized; their Host demand is read
         # per request. Router methods replaced after startup are not supported.
         self._standard_router = self._flat and app.router._native_routing_methods_standard
@@ -766,10 +774,12 @@ class NativeApplication:
                 and all(getattr(app_class, name) is getattr(OldmanServer, name) for name in (
                     "handle_request", "handle_exception", "dispatch",
                     "_run_request_middleware", "_run_response_middleware"))
-                # handle_request, the middleware runners and Request.respond only
-                # dispatch http.* events; TouchUp removes them when unregistered.
-                and not any(route.name.startswith(("http", "<"))
-                            for route in app.signal_router.routes))
+                # _call_flat dispatches the http.* events handle_request, the
+                # middleware runners and _dispatch_request do, at the same points
+                # (the others the native host dispatches on neither path). A
+                # parameterized one ("http.lifecycle.<name>") TouchUp cannot match.
+                and all(route.name in _HTTP_EVENTS or not route.name.startswith(("http", "<"))
+                        for route in app.signal_router.routes))
 
     async def _dispatch_request(self, request):
         await self.app.dispatch("http.lifecycle.request", inline=True,
@@ -882,13 +892,14 @@ class NativeApplication:
                 exchange.response.stream = None
 
     async def _call_flat(self, native):
-        """__call__ for an app without http.* signals (see _flat_supported), with
+        """__call__ for an app _flat_supported accepts, with _dispatch_request,
         OldmanServer.handle_request, Request.respond, both middleware runners and
         BaseHTTPResponse.send inlined into this one coroutine.
 
-        Each step keeps the original order, state changes, exception handling
-        and log messages; only the per-stage coroutines, the dispatch calls that
-        TouchUp removes, and ABC awaitable checks on known types are gone.
+        Each step keeps the original order, state changes, exception handling,
+        log messages and http.* dispatches; only the per-stage coroutines and
+        ABC awaitable checks on known types are gone. Compiled per app by
+        TouchUp (see __init__), which removes the dispatches nothing receives.
         """
         app = self.app
         started = perf_counter() if self._access_log else 0.0
@@ -904,8 +915,14 @@ class NativeApplication:
         token = Request._current.set(request)
         try:
             # ---- Sanic.handle_request ----
+            # An exception from the first two dispatches reaches __call__'s
+            # handle_exception(request, error) on the other path: the same call.
             run_middleware = True
             try:
+                await app.dispatch("http.lifecycle.request", inline=True,
+                                   context={"request": request}, fail_not_found=False)
+                await app.dispatch("http.lifecycle.handle", inline=True, context={"request": request})
+                await app.dispatch("http.routing.before", inline=True, context={"request": request})
                 if app.path_rewriters:
                     app._rewrite_request_path(request)
                 router = app.router
@@ -930,6 +947,9 @@ class NativeApplication:
                         request.path, request.method, request._get_routing_host())
                 request._match_info = {**kwargs}
                 request.route = route
+                # kwargs as router.get() (lru_cache) gave it on the other path.
+                await app.dispatch("http.routing.after", inline=True, context={
+                    "request": request, "route": route, "kwargs": kwargs, "handler": handler})
                 extra = route.extra
                 if exchange.request_body and not extra.ignore_body:
                     if hasattr(handler, "is_stream"):
@@ -953,10 +973,16 @@ class NativeApplication:
                     # ---- Sanic._run_request_middleware ----
                     request._request_middleware_started = True
                     for item in middleware:
+                        await app.dispatch("http.middleware.before", inline=True,
+                                           context={"request": request, "response": None},
+                                           condition={"attach_to": "request"})
                         result = item.func(request) if type(item) is Middleware else item(request)
                         if type(result) is CoroutineType or (
                                 type(result) not in _NOT_AWAITABLE and isawaitable(result)):
                             result = await result
+                        await app.dispatch("http.middleware.after", inline=True,
+                                           context={"request": request, "response": None},
+                                           condition={"attach_to": "request"})
                         if result:
                             response = result
                             break
@@ -965,10 +991,12 @@ class NativeApplication:
                     if handler is None:
                         raise ServerError(
                             "'None' was returned while requesting a handler from the router")
+                    await app.dispatch("http.handler.before", inline=True, context={"request": request})
                     response = handler(request, **request._match_info)
                     if type(response) is CoroutineType or (
                             type(response) not in _NOT_AWAITABLE and isawaitable(response)):
                         response = await response
+                    await app.dispatch("http.handler.after", inline=True, context={"request": request})
 
                 if request.responded:
                     if response is not None:
@@ -1000,12 +1028,19 @@ class NativeApplication:
                         # as with the original assignment of its result.
                         final = response
                         for item in middleware:
+                            await app.dispatch("http.middleware.before", inline=True,
+                                               context={"request": request, "response": final},
+                                               condition={"attach_to": "response"})
                             result = (item.func(request, final) if type(item) is Middleware
                                       else item(request, final))
                             if type(result) is CoroutineType or (
                                     type(result) not in _NOT_AWAITABLE
                                     and isawaitable(result)):
                                 result = await result
+                            await app.dispatch("http.middleware.after", inline=True,
+                                               context={"request": request,
+                                                        "response": result if result else final},
+                                               condition={"attach_to": "response"})
                             if result:
                                 final = result
                                 if isinstance(final, BaseHTTPResponse):
@@ -1017,13 +1052,17 @@ class NativeApplication:
                     response = request.stream.response
 
                 if isinstance(response, BaseHTTPResponse):
+                    await app.dispatch("http.lifecycle.response", inline=True,
+                                       context={"request": request, "response": response})
                     if (response.stream is exchange and type(response) in _COMPLETE_TYPES
                             and exchange.streaming is None):
                         exchange.complete()  # BaseHTTPResponse.send(end_stream=True)
                     else:
                         await response.send(end_stream=True)
                 elif isinstance(response, ResponseStream):
-                    await response(request)
+                    resp = await response(request)
+                    await app.dispatch("http.lifecycle.response", inline=True,
+                                       context={"request": request, "response": resp})
                     await response.eof()
                 elif not hasattr(handler, "is_websocket"):
                     raise ServerError(f"Invalid response type {response!r} (need HTTPResponse)")

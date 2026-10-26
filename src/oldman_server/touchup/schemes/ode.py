@@ -1,4 +1,4 @@
-from ast import Attribute, Await, Expr, NodeTransformer
+from ast import Attribute, Await, Expr, NodeTransformer, Pass, copy_location
 from typing import Any
 
 from oldman_server.log import logger
@@ -73,7 +73,8 @@ class RemoveDispatch(NodeTransformer):
                         f"Disabling event: {event_name}",
                         extra={"verbosity": 2},
                     )
-                    return None
+                    # A pass keeps a block that held only the dispatch valid.
+                    return copy_location(Pass(), node)
         return node
 
     def _not_registered(self, event_name):

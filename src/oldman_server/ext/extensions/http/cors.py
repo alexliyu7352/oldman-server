@@ -41,8 +41,10 @@ class CORSSettings:
 def add_cors(app: OldmanServer) -> None:
     _setup_cors_settings(app)
 
+    # Not a coroutine: it awaits nothing, and every middleware runner calls
+    # a plain function as well.
     @app.on_response
-    async def _add_cors_headers(request, response):
+    def _add_cors_headers(request, response):
         preflight = (
             request.app.ctx.cors.automatic_options
             and request.method == "OPTIONS"
@@ -57,7 +59,10 @@ def add_cors(app: OldmanServer) -> None:
 
         _add_origin_header(request, response)
 
-        if ORIGIN_HEADER not in response.headers:
+        # Looked up without creating the response's headers when it has none
+        # (a response the handler returned as it was).
+        has_header = getattr(response, "_has_header", None)
+        if not (has_header(ORIGIN_HEADER) if has_header else ORIGIN_HEADER in response.headers):
             return
 
         _add_expose_header(request, response)
