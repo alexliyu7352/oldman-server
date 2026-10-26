@@ -343,7 +343,8 @@ class _BufferedExchange:
     def __init__(self, body, max_body, native=None, more_body=False, request_max_size=float("inf")):
         self.stage = Stage.HANDLER
         self.response = None
-        self.request_body = True
+        # A request without a body has none to read (Http.request_body unset).
+        self.request_body = bool(body) or more_body
         self.body, self.max_body = body, max_body
         self.result = self.failure = None
         # Streamed responses (send with end_stream=False) go through the native
@@ -1003,7 +1004,8 @@ class NativeApplication:
                         raise ServerError(
                             "'None' was returned while requesting a handler from the router")
                     await app.dispatch("http.handler.before", inline=True, context={"request": request})
-                    response = handler(request, **request._match_info)
+                    match_info = request._match_info
+                    response = handler(request, **match_info) if match_info else handler(request)
                     if type(response) is CoroutineType or (
                             type(response) not in _NOT_AWAITABLE and isawaitable(response)):
                         response = await response
@@ -1024,10 +1026,21 @@ class NativeApplication:
                             raise ServerError("Second respond call is not allowed.")
                     except AttributeError:
                         pass
-                    if isinstance(response, BaseHTTPResponse) and request.stream:
-                        response = request.stream.respond(response)
-                        if type(response) not in _NOT_AWAITABLE and isawaitable(response):
-                            response = await response
+                    stream = request.stream
+                    if isinstance(response, BaseHTTPResponse) and stream:
+                        if stream is exchange:
+                            # ---- _BufferedExchange.respond ----
+                            if exchange.stage is not Stage.HANDLER:
+                                exchange.stage = Stage.FAILED
+                                raise RuntimeError("Response already started")
+                            if exchange.response is not None:
+                                exchange.response.stream = None
+                            exchange.response = response
+                            response.stream = exchange
+                        else:
+                            response = stream.respond(response)
+                            if type(response) not in _NOT_AWAITABLE and isawaitable(response):
+                                response = await response
                     # An exception from response middleware goes to
                     # app.handle_exception below (not handling an exception yet).
                     middleware = (request.route and request.route.extra.response_middleware
