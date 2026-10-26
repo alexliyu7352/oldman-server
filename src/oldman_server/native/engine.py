@@ -6,6 +6,7 @@ Use `await engine.aclose()` before loop exit.
 import asyncio
 import atexit
 from collections import deque
+import contextvars
 from dataclasses import dataclass
 import logging
 import os
@@ -378,6 +379,10 @@ class Engine:
         self._same_thread = config.same_thread
         self._reactor_fd = -1  # same-thread mode: the shard's reactor, while this loop watches it
         self._application_handler = application_handler
+        # A plain function (the bare host's) is called as its request is
+        # drained, without a Task (_serve_now).
+        self._application_handler_sync = (application_handler is not None
+                                          and not inspect.iscoroutinefunction(application_handler))
         self._application_error_handler = application_error_handler
         self.application_connections = (application_connections
                                         if application_connections is not None else {})
@@ -660,6 +665,41 @@ class Engine:
             if self._same_thread and self._reactor_fd >= 0:
                 self._pump()  # write the responses now
 
+    def _serve_now(self, request_id, shard, request, handler):
+        """_serve_application for a plain function handler: called at once, in
+        a copy of the context as a Task would run it, and its answer queued
+        without a Task; an awaitable answer is awaited in one as before."""
+        stats = self._decision_stats
+        result = (500, b"", ())
+        try:
+            answer = contextvars.copy_context().run(handler, request)
+            if type(answer) is not tuple and answer is not None and inspect.isawaitable(answer):
+                self._start_application(request_id, shard, request, lambda _: answer)
+                return
+            stats["python_application_started"] += 1
+            if answer is None:
+                result = answer  # the handler streamed its response
+            elif len(answer) == 3:
+                status, body, headers = answer
+                result = (status, body, headers)
+            else:
+                status, body, headers, kind, length = answer
+                result = (status, body, headers, kind, length)
+        except TimeoutError:
+            stats["python_application_started"] += 1
+            result = (504, b"", ())
+        except Exception:
+            stats["python_application_started"] += 1
+            stats["python_application_errors"] += 1
+            result = (500, b"", ())
+        except BaseException:
+            stats["python_application_started"] += 1
+            stats["python_application_errors"] += 1
+            raise
+        if result is not None:
+            self._queue_application_result(request_id, shard, result)
+        stats["python_application_finished"] += 1
+
     async def _serve_application(self, request_id, shard, request, handler):
         """Queue a complete owned response while the Task still owns its wrapper."""
         result = (500, b"", ())
@@ -669,7 +709,8 @@ class Engine:
             # application_timeout, which cancels this Task for the handler to
             # answer; without an answer it replies 503 and sends application_done.
             answer = handler(request)
-            if type(answer) is CoroutineType or inspect.isawaitable(answer):
+            if type(answer) is CoroutineType or (type(answer) is not tuple
+                                                 and inspect.isawaitable(answer)):
                 answer = await answer
             if answer is None:
                 result = answer  # the handler streamed its response
@@ -829,10 +870,24 @@ class Engine:
                 self._application_inbound.pop(request_id, None)
             self._queue_application(request_id, shard, 503)
             return
+        if len(values) == 3 and self._application_handler_sync and handler is self._application_handler:
+            self._serve_now(request_id, shard, request, handler)
+            return
+        self._start_application(request_id, shard, request, handler)
+
+    def _start_application(self, request_id, shard, request, handler):
+        """A Task running _serve_application for the request."""
         try:
             coroutine = self._serve_application(request_id, shard, request, handler)
             try:
-                task = self._loop.create_task(coroutine)
+                if self._same_thread and self._loop.get_task_factory() is None:
+                    # Started at once: a handler that does not suspend answers
+                    # in this drain, without a turn of the loop. (Not with
+                    # shard threads: answering sooner makes their batches,
+                    # and what each costs, smaller.)
+                    task = asyncio.Task(coroutine, loop=self._loop, eager_start=True)
+                else:
+                    task = self._loop.create_task(coroutine)
             except BaseException:
                 coroutine.close()
                 raise
