@@ -7,7 +7,7 @@ import pstats
 import pytest
 from oldman_server import OldmanServer
 from oldman_server.compat import Header, NativeHeaders
-from oldman_server.exceptions import URITooLong
+from oldman_server.exceptions import BadURL, URITooLong
 from oldman_server.models.server_types import ConnInfo, _ConnectionInfo
 from oldman_server.request import Request
 from oldman_server.request.parameters import RequestParameters
@@ -567,6 +567,23 @@ def test_native_fields_constructor_matches_general_constructor():
         with pytest.raises(error) as fast_error:
             Request._from_native_fields(url, "1.1", "GET", app, native)
         assert type(general_error.value) is type(fast_error.value)
+
+
+def test_native_targets_share_their_parse_but_not_a_rewrite(query_app):
+    def make(target):
+        return Request._from_native_fields(target, "1.1", "GET", query_app, ObservedRequest(target=target))
+    first, second = make(b"/same?q=1"), make(b"/same?q=1")
+    assert first._parsed_url is second._parsed_url  # parsed once
+    first._set_path("/other")
+    assert (first.path, second.path) == ("/other", "/same")
+    assert (first.query_string, second.query_string) == ("q=1", "q=1")
+    assert make(b"/same?q=1").path == "/same"
+    # Long targets are parsed for each request; invalid ones are never kept.
+    long = b"/" + b"x" * 300
+    assert make(long)._parsed_url is not make(long)._parsed_url
+    for _ in range(2):
+        with pytest.raises(BadURL):
+            make(b"/bad url")
 
 
 def test_native_fields_constructor_keeps_subclass_initializers():

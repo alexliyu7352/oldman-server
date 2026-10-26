@@ -82,6 +82,13 @@ else:
 
 _NATIVE_UNSET = object()
 
+# Request target bytes -> its parse_url() result, for the native host's
+# requests: a URL is immutable (a rewrite replaces it), so requests for the same
+# target share one. Bounded in entries and in target length; invalid targets
+# are not kept.
+_PARSED_URLS: dict[bytes, Any] = {}
+_PARSED_URL_MAX = 256
+
 
 class Request(Generic[sanic_type, ctx_type]):
     """State of HTTP request.
@@ -241,11 +248,18 @@ class Request(Generic[sanic_type, ctx_type]):
         if len(url_bytes) > 65535:
             raise URITooLong("URL exceeds the maximum size of 65535 bytes")
         self = object.__new__(cls)
-        try:
-            self._parsed_url = parse_url(url_bytes)
-        except HttpParserInvalidURLError:
-            url = url_bytes.decode(errors="backslashreplace")
-            raise BadURL(f"Bad URL: {url}")
+        parsed = _PARSED_URLS.get(url_bytes)
+        if parsed is None:
+            try:
+                parsed = parse_url(url_bytes)
+            except HttpParserInvalidURLError:
+                url = url_bytes.decode(errors="backslashreplace")
+                raise BadURL(f"Bad URL: {url}")
+            if len(url_bytes) <= _PARSED_URL_MAX:
+                if len(_PARSED_URLS) >= 1024:
+                    _PARSED_URLS.clear()
+                _PARSED_URLS[url_bytes] = parsed
+        self._parsed_url = parsed
         self.raw_url = url_bytes
         self._id = self._name = None
         self.app = app

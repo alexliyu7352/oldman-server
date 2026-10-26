@@ -1080,7 +1080,19 @@ class NativeApplication:
                                        context={"request": request, "response": response})
                     if (response.stream is exchange and type(response) in _COMPLETE_TYPES
                             and exchange.streaming is None):
-                        exchange.complete()  # BaseHTTPResponse.send(end_stream=True)
+                        # BaseHTTPResponse.send(end_stream=True): exchange.complete(),
+                        # its usual case (headers never accessed) inlined.
+                        body, status = response.body, response.status
+                        if (response._headers is None and exchange.result is None
+                                and exchange.failure is None and type(body) is bytes
+                                and len(body) <= exchange.max_body and type(status) is int
+                                and status >= 200 and status != 204 and status != 304
+                                and response.content_type is not None):
+                            response._headers, headers = _sent_content_type(response.content_type)
+                            exchange.result = status, body, headers
+                            exchange.stage = Stage.IDLE
+                        else:
+                            exchange.complete()
                     else:
                         await response.send(end_stream=True)
                 elif isinstance(response, ResponseStream):
@@ -1094,7 +1106,9 @@ class NativeApplication:
                 await self._cancelled(request, exchange, error)
             except Exception as error:
                 await app.handle_exception(request, error, run_middleware=run_middleware)
-            result = exchange.finish()
+            result = exchange.result
+            if result is None or exchange.streaming is not None or exchange.failure is not None:
+                result = exchange.finish()
             if self._access_log:
                 _log_access(request, exchange, started)
             if self._cached_routes and request.method == "GET":

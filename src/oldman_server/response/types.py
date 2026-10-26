@@ -291,9 +291,13 @@ class HTTPResponse(BaseHTTPResponse):
         # assignments, without building and discarding an empty Header first.
         self.stream = None
         self.content_type: str | None = content_type
-        # _encode_body returns bytes unchanged; skip the call for the exact class.
-        self.body = (body if type(body) is bytes and type(self) is HTTPResponse
-                     else self._encode_body(body))
+        # _encode_body for the exact class without the call: bytes unchanged,
+        # str encoded.
+        kind = type(body)
+        if type(self) is HTTPResponse and (kind is bytes or kind is str):
+            self.body = body if kind is bytes else body.encode()
+        else:
+            self.body = self._encode_body(body)
         self.status = status
         self._headers = Header(headers) if headers else None
         self._cookies = None
