@@ -29,9 +29,10 @@ class Router(BaseRouter):
     ALLOWED_METHODS = HTTP_METHODS
     # Unfinalized and reset routers must read the actual Host conservatively.
     _routing_requires_host = True
-    # Changes whenever the route table is finalized or reset, so callers can
-    # tell whether results they cached from get() still apply.
-    _native_generation = 0
+    # The native host's cache of get(path, method, None) results by (raw path,
+    # method) while the finalized route table stands and needs no Host; None
+    # otherwise. A new one with each finalize, none after a reset.
+    _native_routes = None
 
     def _get(
         self, path: str, method: str, host: str | None
@@ -284,11 +285,11 @@ class Router(BaseRouter):
                 )
 
         self._routing_requires_host = any(route.requirements for route in self.routes)
-        self._native_generation += 1
+        self._native_routes = None if self._routing_requires_host else {}
 
     def reset(self) -> None:
         self._routing_requires_host = True
-        self._native_generation += 1
+        self._native_routes = None
         super().reset()
 
     def _normalize(self, uri: str, handler: RouteHandler) -> str:

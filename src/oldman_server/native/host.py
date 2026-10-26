@@ -763,9 +763,6 @@ class NativeApplication:
         # Route tables may be reset and refinalized; their Host demand is read
         # per request. Router methods replaced after startup are not supported.
         self._standard_router = self._flat and app.router._native_routing_methods_standard
-        # Host-free router.get() results by (raw path bytes, method) for one
-        # route-table generation; misses and errors always use router.get().
-        self._routes, self._routes_router, self._routes_generation = {}, None, None
         self._cached_routes = cached_routes(app)
         # Nothing after the send changes the answer (an access log line or a
         # cached route): sanic_finish may settle the request too.
@@ -962,14 +959,11 @@ class NativeApplication:
                     if app.path_rewriters:
                         app._rewrite_request_path(request)
                     router = app.router
-                    if (self._standard_router and not router._routing_requires_host
+                    # Host-free router.get() results, kept by the router while its
+                    # route table stands (None: the Host is read).
+                    routes = router._native_routes
+                    if (self._standard_router and routes is not None
                             and request._headers is _NATIVE_UNSET):
-                        routes = self._routes
-                        if (router is not self._routes_router
-                                or router._native_generation != self._routes_generation):
-                            routes.clear()
-                            self._routes_router = router
-                            self._routes_generation = router._native_generation
                         key = (request._parsed_url.path, request.method)
                         found = routes.get(key)
                         if found is None:
