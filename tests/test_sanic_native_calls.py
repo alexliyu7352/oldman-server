@@ -3,7 +3,7 @@ import asyncio
 import types
 
 import pytest
-from oldman_server import OldmanServer
+from oldman_server import Blueprint, OldmanServer
 from oldman_server.exceptions import URITooLong
 from oldman_server.http.constants import Stage
 from oldman_server.response import HTTPResponse, empty, html, json, raw, redirect, text
@@ -196,12 +196,26 @@ def test_sanic_finish_changes_nothing_it_does_not_finish(case):
     assert after == before
 
 
-def finishing_app(name, receiver=False):
+def finishing_app(name, receiver=False, middleware=None):
     app = OldmanServer(name, configure_logging=False)
     if receiver:
         @app.signal("http.lifecycle.response")
         async def observe(request, response):
             response.headers["x-seen"] = "1"
+    if middleware == "app":
+        @app.on_response
+        async def leave(request, response):
+            response.headers["x-left"] = request.path
+    bp = Blueprint("bp", url_prefix="/bp")
+    if middleware == "route":
+        @bp.on_response
+        def bp_leave(request, response):
+            response.headers["x-bp"] = "1"
+
+    @bp.get("/text")
+    async def bp_text(request):
+        return text("bp")
+    app.blueprint(bp)
 
     @app.get("/text")
     async def text_route(request):
@@ -239,16 +253,16 @@ def finishing_app(name, receiver=False):
     return app
 
 
-FINISHING = [("GET", b"/text", b""), ("GET", b"/json/3", b""), ("GET", b"/cookie", b""),
+FINISHING = [("GET", b"/bp/text", b""), ("GET", b"/text", b""), ("GET", b"/json/3", b""), ("GET", b"/cookie", b""),
              ("GET", b"/large", b""), ("GET", b"/empty", b""), ("GET", b"/streamed", b""),
              ("GET", b"/raise", b""), ("POST", b"/echo", b"body"), ("GET", b"/missing", b""),
              ("POST", b"/text", b""), ("HEAD", b"/text", b"")]
 
 
-@pytest.mark.parametrize("receiver", [False, True])
-def test_the_flat_path_answers_the_same_with_and_without_sanic_finish(receiver):
+@pytest.mark.parametrize("receiver, middleware", [(False, None), (True, None), (False, "app"), (False, "route")])
+def test_the_flat_path_answers_the_same_with_and_without_sanic_finish(receiver, middleware):
     async def scenario(natively):
-        app = finishing_app(f"finish_{receiver}_{natively}", receiver)
+        app = finishing_app(f"finish_{receiver}_{middleware}_{natively}", receiver, middleware)
         app.state.native_loop = asyncio.get_running_loop()
         await app._startup()
         adapter = NativeApplication(app, 2048)
@@ -266,7 +280,10 @@ def test_the_flat_path_answers_the_same_with_and_without_sanic_finish(receiver):
     for request, left, right in zip(FINISHING * 2, natively, in_python, strict=True):
         assert left == right, request
     statuses = [result[0] if result else None for result in natively[:len(FINISHING)]]
-    assert statuses == [200, 200, 200, "raised", 204, 200, 500, 200, 404, 405, 405]
+    assert statuses == [200, 200, 200, 200, "raised", 204, 200, 500, 200, 404, 405, 405]
+    if middleware:  # it ran, on the route it applies to
+        name = b"x-bp" if middleware == "route" else b"x-left"
+        assert dict(natively[0][2]).get(name) and (middleware == "route") != bool(dict(natively[1][2]).get(name))
 
 
 class Settling:
