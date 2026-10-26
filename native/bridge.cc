@@ -377,6 +377,7 @@ struct SanicTypes {
     PyObject* parsed_urls = nullptr;  // _PARSED_URLS: target bytes -> parse_url()
     PyObject* empty = nullptr;
     PyObject* minus_one = nullptr;
+    PyObject *zero = nullptr, *one = nullptr, *two = nullptr;
     PyTypeObject* http_response = nullptr;  // HTTPResponse
     PyTypeObject* json_response = nullptr;  // JSONResponse (its body is a property)
     PyObject* stage_idle = nullptr;  // Stage.IDLE
@@ -448,6 +449,9 @@ void set_sanic_types(py::handle request, py::handle exchange, py::handle unset, 
     sanic.parsed_urls = keep(parsed_urls);
     sanic.empty = py::bytes().release().ptr();
     sanic.minus_one = py::int_(-1).release().ptr();
+    sanic.zero = py::int_(0).release().ptr();
+    sanic.one = py::int_(1).release().ptr();
+    sanic.two = py::int_(2).release().ptr();
     sanic.http_response = reinterpret_cast<PyTypeObject*>(keep(http_response));
     sanic.json_response = reinterpret_cast<PyTypeObject*>(keep(json_response));
     sanic.stage_idle = keep(stage_idle);
@@ -553,15 +557,108 @@ PyObject* request_sanic_prepare(PyObject* self, PyObject* const* args, Py_ssize_
     });
 }
 
-// request.sanic_finish(request, exchange, response): the flat path's
+// The serving Engine's request registries and answer queue, while it serves
+// (set_application_state): sanic_finish settles a request there as
+// Engine._application_finished does.
+struct ApplicationState {
+    PyObject *engine = nullptr, *tasks = nullptr, *inbound = nullptr, *timeouts = nullptr, *lost = nullptr,
+             *terminal = nullptr, *returns = nullptr, *stats = nullptr, *call_soon = nullptr;
+    PyObject *scheduled = nullptr, *flush = nullptr, *finished = nullptr;  // attribute and stats names
+} application;
+
+void clear_application_state(py::handle engine) {
+    if (application.engine != engine.ptr()) return;
+    for (auto* field : {&application.engine, &application.tasks, &application.inbound, &application.timeouts,
+                        &application.lost, &application.terminal, &application.returns, &application.stats,
+                        &application.call_soon})
+        Py_CLEAR(*field);
+}
+
+void set_application_state(py::handle engine, py::handle tasks, py::handle inbound, py::handle timeouts,
+                           py::handle lost, py::handle terminal, py::handle returns, py::handle stats,
+                           py::handle call_soon) {
+    if (!PyDict_CheckExact(tasks.ptr()) || !PyDict_CheckExact(inbound.ptr()) || !PySet_CheckExact(timeouts.ptr())
+            || !PySet_CheckExact(lost.ptr()) || !PySet_CheckExact(terminal.ptr())
+            || !PyList_CheckExact(returns.ptr()) || !PyDict_CheckExact(stats.ptr())
+            || !PyCallable_Check(call_soon.ptr()))
+        throw py::type_error("set_application_state(engine, dict, dict, set, set, set, list, dict, call_soon)");
+    if (!application.scheduled) {
+        application.scheduled = PyUnicode_InternFromString("_application_flush_scheduled");
+        application.flush = PyUnicode_InternFromString("_flush_application");
+        application.finished = PyUnicode_InternFromString("python_application_finished");
+        if (!application.scheduled || !application.flush || !application.finished)
+            throw py::error_already_set();
+    }
+    auto set = [](PyObject*& field, py::handle value) { Py_XSETREF(field, Py_NewRef(value.ptr())); };
+    set(application.engine, engine);
+    set(application.tasks, tasks);
+    set(application.inbound, inbound);
+    set(application.timeouts, timeouts);
+    set(application.lost, lost);
+    set(application.terminal, terminal);
+    set(application.returns, returns);
+    set(application.stats, stats);
+    set(application.call_soon, call_soon);
+}
+
+// Engine._application_finished(id, shard, (status, body, headers)) for the
+// Engine in `application`; -1 with an exception set on failure.
+int settle(PyObject* id, PyObject* shard, PyObject* status, PyObject* body, PyObject* headers) {
+    auto discard_key = [&](PyObject* dict) {
+        if (!PyDict_GET_SIZE(dict)) return 0;
+        if (PyDict_GetItemWithError(dict, id)) return PyDict_DelItem(dict, id);
+        return PyErr_Occurred() ? -1 : 0;
+    };
+    auto discard = [&](PyObject* set) { return PySet_GET_SIZE(set) ? PySet_Discard(set, id) : 0; };
+    if (discard_key(application.tasks) < 0 || discard_key(application.inbound) < 0
+            || discard(application.timeouts) < 0 || discard(application.lost) < 0)
+        return -1;
+    const int answered = discard(application.terminal);  // already answered natively
+    if (answered < 0) return -1;
+    if (!answered) {
+        PyObject* item = PyTuple_Pack(5, id, shard, status, body, headers);
+        if (!item) return -1;
+        const int appended = PyList_Append(application.returns, item);
+        Py_DECREF(item);
+        if (appended < 0) return -1;
+        PyObject* scheduled = PyObject_GetAttr(application.engine, application.scheduled);
+        if (!scheduled) return -1;
+        const int truth = PyObject_IsTrue(scheduled);
+        Py_DECREF(scheduled);
+        if (truth < 0) return -1;
+        if (!truth) {  // the Engine's flush as it is now (once per batch)
+            if (PyObject_SetAttr(application.engine, application.scheduled, Py_True) < 0) return -1;
+            PyObject* flush = PyObject_GetAttr(application.engine, application.flush);
+            if (!flush) return -1;
+            PyObject* handle = PyObject_CallOneArg(application.call_soon, flush);
+            Py_DECREF(flush);
+            if (!handle) return -1;
+            Py_DECREF(handle);
+        }
+    }
+    PyObject* count = PyDict_GetItemWithError(application.stats, application.finished);
+    if (!count) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_KeyError, "python_application_finished");
+        return -1;
+    }
+    PyObject* next = PyNumber_Add(count, sanic.one);
+    if (!next) return -1;
+    const int stored = PyDict_SetItem(application.stats, application.finished, next);
+    Py_DECREF(next);
+    return stored;
+}
+
+// request.sanic_finish(request, exchange, response, engine=None): the flat path's
 // Request.respond(response) followed by send(end_stream=True), for the case
 // _BufferedExchange.complete takes at once (a plain response, its headers
 // never read, a bytes body within max_body, a status with a body): the
-// state both leave, and True. False, with nothing changed, for anything else
-// (the Python path then runs, and raises where it raises).
-PyObject* request_sanic_finish(PyObject*, PyObject* const* args, Py_ssize_t nargs) {
-    if (nargs != 3) {
-        PyErr_SetString(PyExc_TypeError, "sanic_finish(request, exchange, response)");
+// state both leave, and 1; with the Engine set_application_state named, the
+// request also settled there (its answer queued), and 2. 0, with nothing
+// changed, for anything else (the Python path then runs, and raises where it
+// raises).
+PyObject* request_sanic_finish(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 3 && nargs != 4) {
+        PyErr_SetString(PyExc_TypeError, "sanic_finish(request, exchange, response, engine=None)");
         return nullptr;
     }
     if (!sanic.http_response) {
@@ -573,19 +670,20 @@ PyObject* request_sanic_finish(PyObject*, PyObject* const* args, Py_ssize_t narg
     PyObject* response = args[2];
     const auto& o = sanic.r;
     const auto& e = sanic.x;
+    PyObject* const declined = sanic.zero;
     // Request.respond's checks and _BufferedExchange.complete's.
     if (Py_TYPE(q) != sanic.request || Py_TYPE(x) != sanic.exchange || slot(q, o.responded) != Py_False
             || slot(q, o.stream) != x || slot(x, e.response) != Py_None || slot(x, e.stage) != sanic.stage_handler
             || slot(x, e.streaming) != Py_None || slot(x, e.result) != Py_None || slot(x, e.failure) != Py_None)
-        Py_RETURN_FALSE;
+        return Py_NewRef(declined);
     const bool plain = Py_TYPE(response) == sanic.http_response;
-    if (!plain && Py_TYPE(response) != sanic.json_response) Py_RETURN_FALSE;
+    if (!plain && Py_TYPE(response) != sanic.json_response) return Py_NewRef(declined);
     py::object body, status, content_type, headers;
     if (plain) {
         PyObject* values[] = {slot(response, sanic.h.body), slot(response, sanic.h.status),
                               slot(response, sanic.h.content_type), slot(response, sanic.h.headers)};
         for (auto* value : values)
-            if (!value) Py_RETURN_FALSE;  // unassigned: the Python path raises
+            if (!value) return Py_NewRef(declined);  // unassigned: the Python path raises
         body = py::reinterpret_borrow<py::object>(values[0]);
         status = py::reinterpret_borrow<py::object>(values[1]);
         content_type = py::reinterpret_borrow<py::object>(values[2]);
@@ -600,19 +698,19 @@ PyObject* request_sanic_finish(PyObject*, PyObject* const* args, Py_ssize_t narg
         headers = content_type ? read("_headers") : py::object();
         if (!headers) {
             PyErr_Clear();  // raised again where the Python path reads it
-            Py_RETURN_FALSE;
+            return Py_NewRef(declined);
         }
     }
     if (!headers.is_none() || !PyBytes_CheckExact(body.ptr()) || !PyLong_CheckExact(status.ptr())
             || content_type.is_none())
-        Py_RETURN_FALSE;
+        return Py_NewRef(declined);
     PyObject* max_body = slot(x, e.max_body);
-    if (!PyLong_CheckExact(max_body)) Py_RETURN_FALSE;
+    if (!PyLong_CheckExact(max_body)) return Py_NewRef(declined);
     int overflow = 0;
     const long long limit = PyLong_AsLongLongAndOverflow(max_body, &overflow);
-    if (overflow < 0 || (overflow == 0 && PyBytes_GET_SIZE(body.ptr()) > limit)) Py_RETURN_FALSE;
+    if (overflow < 0 || (overflow == 0 && PyBytes_GET_SIZE(body.ptr()) > limit)) return Py_NewRef(declined);
     const long code = PyLong_AsLongAndOverflow(status.ptr(), &overflow);
-    if (overflow || code < 200 || code == 204 || code == 304) Py_RETURN_FALSE;
+    if (overflow || code < 200 || code == 204 || code == 304) return Py_NewRef(declined);
     // _sent_content_type(response.content_type): (the response's headers, the sent pair).
     py::object entry;
     if (PyUnicode_CheckExact(content_type.ptr())) {
@@ -624,7 +722,7 @@ PyObject* request_sanic_finish(PyObject*, PyObject* const* args, Py_ssize_t narg
         entry = py::reinterpret_steal<py::object>(PyObject_CallOneArg(sanic.sent_content_type, content_type.ptr()));
         if (!entry) {
             PyErr_Clear();  // raised again by the Python path
-            Py_RETURN_FALSE;
+            return Py_NewRef(declined);
         }
     }
     if (!PyTuple_CheckExact(entry.ptr()) || PyTuple_GET_SIZE(entry.ptr()) != 2) {
@@ -647,7 +745,14 @@ PyObject* request_sanic_finish(PyObject*, PyObject* const* args, Py_ssize_t narg
     replace(q, o.responded, Py_True);
     Py_SETREF(*reinterpret_cast<PyObject**>(reinterpret_cast<char*>(x) + e.result), result);
     replace(x, e.stage, sanic.stage_idle);
-    Py_RETURN_TRUE;
+    if (nargs < 4 || args[3] == Py_None || args[3] != application.engine) return Py_NewRef(sanic.one);
+    const Request& r = request_of(self);
+    auto id = py::reinterpret_steal<py::object>(PyLong_FromUnsignedLongLong(r.id));
+    auto shard = py::reinterpret_steal<py::object>(PyLong_FromUnsignedLong(r.shard));
+    if (!id || !shard
+            || settle(id.ptr(), shard.ptr(), status.ptr(), body.ptr(), PyTuple_GET_ITEM(result, 2)) < 0)
+        return nullptr;
+    return Py_NewRef(sanic.two);
 }
 
 PyMethodDef request_methods[] = {
@@ -860,6 +965,8 @@ int inline_call(const probe::ServerConfig& config, probe::RequestEvent& event,
 PYBIND11_MODULE(_native, m) {
     add_request_type(m);
     m.def("set_sanic_types", &set_sanic_types);
+    m.def("set_application_state", &set_application_state);
+    m.def("clear_application_state", &clear_application_state);
     py::class_<probe::ServerConfig>(m, "ServerConfig")
         .def(py::init<>())
         .def_readwrite("http_port", &probe::ServerConfig::http_port)

@@ -1,5 +1,6 @@
 """The flat path's native calls must leave the same state as the Python they replace."""
 import asyncio
+import types
 
 import pytest
 from oldman_server import OldmanServer
@@ -8,7 +9,8 @@ from oldman_server.http.constants import Stage
 from oldman_server.response import HTTPResponse, empty, html, json, raw, redirect, text
 import uvloop
 
-from oldman_server.native.engine import ApplicationRequest
+from oldman_server.native import _native
+from oldman_server.native.engine import ApplicationRequest, Engine
 from oldman_server.native.host import NativeApplication, _BufferedExchange, _sent_content_type
 from oldman_server.request import Request
 from oldman_server.request.types import _PARSED_URLS
@@ -129,7 +131,7 @@ def state(*values):
 ])
 def test_sanic_finish_leaves_what_respond_and_send_leave(make):
     left, right = made(make()), made(make())
-    assert left[0].sanic_finish(*left[1:]) is True
+    assert left[0].sanic_finish(*left[1:]) == 1
     python_finish(*right[1:])
     for got, want in zip(state(*left[1:]), state(*right[1:])):
         assert got.keys() == want.keys()
@@ -186,7 +188,7 @@ def test_sanic_finish_changes_nothing_it_does_not_finish(case):
     elif case == "other stream":
         made_request.stream = None
     before = state(made_request, exchange, response) if case != "not a response" else state(made_request, exchange)
-    assert request.sanic_finish(made_request, exchange, response) is False
+    assert request.sanic_finish(made_request, exchange, response) == 0
     after = state(made_request, exchange, response) if case != "not a response" else state(made_request, exchange)
     assert after == before
 
@@ -262,3 +264,66 @@ def test_the_flat_path_answers_the_same_with_and_without_sanic_finish(receiver):
         assert left == right, request
     statuses = [result[0] if result else None for result in natively[:len(FINISHING)]]
     assert statuses == [200, 200, 200, "raised", 204, 200, 500, 200, 404, 405, 405]
+
+
+class Settling:
+    """The Engine's registries and answer queue, as _application_finished uses them."""
+
+    def __init__(self, case, request_id):
+        self._application_tasks = {request_id: "task"} if case == "registered" else {7: "other"}
+        self._application_inbound = {request_id: "inbound"} if case == "inbound" else {}
+        self._application_timeouts = {request_id} if case == "timed out" else set()
+        self._application_lost = {request_id, 7} if case == "lost" else set()
+        self._application_terminal = {request_id} if case == "answered" else set()
+        self._application_returns = [("earlier",)]
+        self._application_flush_scheduled = case != "first"
+        self._decision_stats = {"python_application_finished": 3}
+        self.scheduled = []
+        self._loop = types.SimpleNamespace(call_soon=self.scheduled.append)
+
+    def _flush_application(self):
+        pass
+
+    _application_finished = Engine._application_finished
+
+    def state(self):
+        return (self._application_tasks, self._application_inbound, self._application_timeouts,
+                self._application_lost, self._application_terminal, self._application_returns,
+                self._application_flush_scheduled, self._decision_stats, len(self.scheduled))
+
+
+@pytest.mark.parametrize("case", ["first", "batched", "registered", "inbound", "timed out", "lost", "answered"])
+def test_sanic_finish_settles_as_application_finished(case):
+    request, made_request, exchange, response = made(text("settled"))
+    engine = Settling(case, request.request_id)
+    _native.set_application_state(
+        engine, engine._application_tasks, engine._application_inbound, engine._application_timeouts,
+        engine._application_lost, engine._application_terminal, engine._application_returns,
+        engine._decision_stats, engine._loop.call_soon)
+    try:
+        assert request.sanic_finish(made_request, exchange, response, engine) == 2
+    finally:
+        _native.clear_application_state(engine)
+    expected = Settling(case, request.request_id)
+    python_finish(*made(text("settled"))[1:])
+    expected._application_finished(request.request_id, request.shard, exchange.result)
+    assert engine.state() == expected.state()
+    if case == "first":
+        assert engine.scheduled == [engine._flush_application]
+
+
+def test_sanic_finish_settles_only_for_the_engine_serving():
+    request, made_request, exchange, response = made(text("x"))
+    engine, other = Settling("batched", 1), Settling("batched", 1)
+    _native.set_application_state(
+        engine, engine._application_tasks, engine._application_inbound, engine._application_timeouts,
+        engine._application_lost, engine._application_terminal, engine._application_returns,
+        engine._decision_stats, engine._loop.call_soon)
+    _native.clear_application_state(other)  # not the one set: nothing changes
+    try:
+        assert request.sanic_finish(made_request, exchange, response, other) == 1
+        assert engine._application_returns == [("earlier",)]
+    finally:
+        _native.clear_application_state(engine)
+    request, made_request, exchange, response = made(text("x"))
+    assert request.sanic_finish(made_request, exchange, response, engine) == 1  # cleared

@@ -460,6 +460,7 @@ class Engine:
                 self._loop.add_reader(self._native.reactor_fd(), self._pump)
                 self._reactor_fd = self._native.reactor_fd()
             await self._ready
+            self._serving_applications()
             return self
         except Exception:
             # Registration can fail, so cleanup cannot require a working reader.
@@ -499,7 +500,18 @@ class Engine:
             raise
         if not self._ready.done():
             self._ready.set_result(None)
+        self._serving_applications()
         return self
+
+    def _serving_applications(self):
+        """A handler that settles its requests (application_settles) may have
+        the native finish settle them for it, as _application_finished would,
+        while this Engine serves (until _close or abandon)."""
+        if self._application_settles:
+            _native.set_application_state(
+                self, self._application_tasks, self._application_inbound, self._application_timeouts,
+                self._application_lost, self._application_terminal, self._application_returns,
+                self._decision_stats, self._loop.call_soon)
 
     async def _cancel_start(self, startup):
         try:
@@ -680,7 +692,10 @@ class Engine:
     def _flush_application(self):
         self._application_flush_scheduled = False
         if self._application_returns:
-            batch, self._application_returns = self._application_returns, []
+            # The list stays one object: the native finish appends to it (see
+            # _serving_applications).
+            batch = self._application_returns.copy()
+            self._application_returns.clear()
             # User-field validation is per response at the native boundary.
             # One bad reply becomes an empty 500 without dropping its siblings.
             # The framework host writes HTTP/1.1 itself, including 204/304.
@@ -1106,6 +1121,7 @@ class Engine:
         if not self._persistent:
             await _off_loop(self._native.join)
             self._native.close_fd()
+        _native.clear_application_state(self)
 
     def abandon(self):
         """Stop a persistent Engine's network server without its event loop, when
@@ -1114,6 +1130,7 @@ class Engine:
         if self._close_task is not None and self._close_task.done():
             return
         self._closed = True
+        _native.clear_application_state(self)
         try:
             self._remove_readers()
         except Exception:

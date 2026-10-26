@@ -767,6 +767,9 @@ class NativeApplication:
         # route-table generation; misses and errors always use router.get().
         self._routes, self._routes_router, self._routes_generation = {}, None, None
         self._cached_routes = cached_routes(app)
+        # Nothing after the send changes the answer (an access log line or a
+        # cached route): sanic_finish may settle the request too.
+        self._settle_natively = not self._access_log and not self._cached_routes
 
     @staticmethod
     def _flat_supported(app):
@@ -924,6 +927,7 @@ class NativeApplication:
         Engine._serve_application would around it.
         """
         answer = (500, b"", ())
+        settled = False  # by sanic_finish, the answer queued as _application_finished queues it
         try:
             app = self.app
             started = perf_counter() if self._access_log else 0.0
@@ -1033,10 +1037,12 @@ class NativeApplication:
                     if (self._finish_natively
                             and not ((request.route and request.route.extra.response_middleware)
                                      or app.response_middleware)
-                            and native.sanic_finish(request, exchange, response)):
+                            and (finished := native.sanic_finish(
+                                request, exchange, response, engine if self._settle_natively else None))):
                         # Request.respond(response), then send(end_stream=True) completing
-                        # the exchange at once, as below: for a plain response, natively.
-                        pass
+                        # the exchange at once, as below: for a plain response, natively;
+                        # 2: and the request settled (nothing below changes its answer).
+                        settled = finished == 2
                     else:
                         if request.responded:
                             if response is not None:
@@ -1133,6 +1139,8 @@ class NativeApplication:
                     await self._cancelled(request, exchange, error)
                 except Exception as error:
                     await app.handle_exception(request, error, run_middleware=run_middleware)
+                if settled:
+                    return None
                 result = exchange.result
                 if result is None or exchange.streaming is not None or exchange.failure is not None:
                     result = exchange.finish()
@@ -1153,7 +1161,7 @@ class NativeApplication:
                 raise
             answer = engine._application_error(request_id, error)
         finally:
-            if engine is not None:
+            if engine is not None and not settled:
                 engine._application_finished(request_id, shard, answer)
         return answer
 
