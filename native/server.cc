@@ -1400,8 +1400,11 @@ public:
         // Sanic closes the connection after a response timeout's error response.
         if (answer->timed_out) close = true;
         if (answer->code == 3) { reject(answer->reject_status); co_return; }
-        if (!valid_http_response(answer->code, answer->headers, true, streamed) ||
-            answer->body.size() > shared.config.max_response_bytes) {
+        // The status and headers were checked where Python handed them over
+        // (resolve_http_responses_checked and the direct call, with
+        // valid_http_response at least as strictly as here): an invalid one is
+        // already an empty 500.
+        if (answer->body.size() > shared.config.max_response_bytes) {
             ++counts.errors;
             if (streamed) {
                 // Python believes it is streaming: the terminal event cancels it.
