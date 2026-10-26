@@ -1103,6 +1103,34 @@ public:
                         continue;
                     }
                 }
+                if (complete && shared.config.inline_call && !closing) {
+                    // Same-thread mode: Python is called here; an answer is
+                    // written at once, without respond_application's coroutine.
+                    std::string cache_target;
+                    if (shared.config.response_cache && method == "GET" && body.empty() &&
+                        !credentialed(input))
+                        cache_target = input.target;
+                    const uint64_t root = (++next_id << 16) | shard;
+                    std::optional<Decision> answer;
+                    const int outcome = call_inline(root, method, body, input, answer);
+                    if (outcome == 1) {
+                        if (draining && buffer.size() == consumed) close = true;
+                        ++counts.responses;
+                        if (answer->cache_ms && !cache_target.empty() && cacheable(*answer))
+                            keep_response(std::move(cache_target), *answer);
+                        if (!append_complete(*answer, head_request, close, output))
+                            co_await write_large_body(connection, *answer, output);
+                        keep = !close && !connection.peer_gone;
+                        continue;
+                    }
+                    if (outcome == 0) {
+                        co_await respond_application(connection, method, std::move(input), std::move(body),
+                                                     head_request, http11, close, output, 0, {}, 0, nullptr,
+                                                     root);
+                        keep = !close && !connection.peer_gone;
+                        continue;
+                    }
+                }
                 if (complete) {
                     co_await respond_application(connection, method, std::move(input), std::move(body),
                                                  head_request, http11, close, output, 0);
@@ -1295,7 +1323,8 @@ public:
                                               ApplicationInput input, std::string body, bool head_request,
                                               bool http11, bool& close, std::string& output,
                                               uint64_t streamed_id, std::string parameter = {},
-                                              int error_status = 0, Event* published = nullptr) {
+                                              int error_status = 0, Event* published = nullptr,
+                                              uint64_t inline_pending = 0) {
         const auto size = body.size();
         // Admission covers the request (input twice) and the response head; response
         // bodies are bounded by max_response_bytes, not reserved up front.
@@ -1325,7 +1354,8 @@ public:
             http1::append_error(output, status, close, date(), probe_lines);
             ++counts.responses;
         };
-        if (!lease) { reject(error_status ? error_status : 503); co_return; }
+        // A request Python already has (inline_pending) is answered by it, admitted or not.
+        if (!lease && !inline_pending) { reject(error_status ? error_status : 503); co_return; }
         std::optional<Decision> answer;
         // The target a cached decision is kept for (response_cache).
         std::string cache_target;
@@ -1333,15 +1363,13 @@ public:
             !credentialed(input))
             cache_target = input.target;
         try {
-            if (closing) { reject(error_status ? error_status : 503); co_return; }
+            // (A request Python already has waits for the stop to settle it.)
+            if (closing && !inline_pending) { reject(error_status ? error_status : 503); co_return; }
             // Publishes the request (and sets root) before it waits.
-            root = streamed_id ? streamed_id : (++next_id << 16) | shard;
-            // (answer is set by an answered direct call: no Decision of its own
-            // in this coroutine's frame, which every request allocates.)
-            int inline_outcome = -1;
-            if (shared.config.inline_call && !streamed_id && parameter.empty())
-                inline_outcome = call_inline(root, method, body, input, answer);
-            if (inline_outcome < 0)
+            // inline_pending: serve_application's direct call left Python the
+            // request (its waiter is made): it is not asked again.
+            root = inline_pending ? inline_pending : streamed_id ? streamed_id : (++next_id << 16) | shard;
+            if (!inline_pending)
                 ask(root, method, size, &body, streamed_id ? "more" : std::move(parameter), &input);
             announce();
             if (!answer) {
@@ -1402,28 +1430,38 @@ public:
         }
         if (answer->cache_ms && !cache_target.empty() && cacheable(*answer))
             keep_response(std::move(cache_target), *answer);
-        const bool write_body = !head_request && http1::status_has_body(answer->code);
-        counts.response_bytes += write_body ? answer->body.size() : 0;
-        if (head_request && answer->content_length >= 0) {
+        if (!append_complete(*answer, head_request, close, output))
+            co_await write_large_body(connection, *answer, output);
+    }
+    // A complete answer appended to `output`; false for a large body, whose head
+    // only is appended (write_large_body writes the rest).
+    bool append_complete(const Decision& answer, bool head_request, bool close, std::string& output) {
+        const bool write_body = !head_request && http1::status_has_body(answer.code);
+        counts.response_bytes += write_body ? answer.body.size() : 0;
+        if (head_request && answer.content_length >= 0) {
             // Sanic keeps a HEAD response's own Content-Length (the GET size).
-            http1::append_head(output, answer->code, answer->content_length, answer->headers, close,
+            http1::append_head(output, answer.code, answer.content_length, answer.headers, close,
                                date(), probe_lines);
-            co_return;
+            return true;
         }
-        if (!write_body || answer->body.size() < 16384) {
-            http1::append_response(output, answer->code, answer->body, answer->headers, head_request,
+        if (!write_body || answer.body.size() < 16384) {
+            http1::append_response(output, answer.code, answer.body, answer.headers, head_request,
                                    close, date(), probe_lines);
-            co_return;
+            return true;
         }
         // Large bodies go to the socket as their own buffer instead of being
         // copied behind the head.
-        http1::append_head(output, answer->code, answer->body.size(), answer->headers, close,
+        http1::append_head(output, answer.code, answer.body.size(), answer.headers, close,
                            date(), probe_lines);
+        return false;
+    }
+    asio::awaitable<void> write_large_body(AppConnection& connection, const Decision& answer,
+                                           std::string& output) {
         co_await flush_output(connection, output);
         // In pieces, each one write within the write deadline: a slow peer
         // that keeps reading gets all of it, one that stops reading is cut off.
         constexpr size_t piece = 1 << 20;
-        const std::string_view whole(answer->body);
+        const std::string_view whole(answer.body);
         for (size_t at = 0; at < whole.size(); at += piece)
             co_await timed_write(connection, whole.substr(at, piece));
     }
