@@ -10,6 +10,8 @@
 #include <format>
 #include <latch>
 #include <limits>
+#include <list>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -107,7 +109,10 @@ public:
     asio::awaitable<void> wait() {
         if (!set_) {
             co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
-                [this](asio::any_completion_handler<void()> handler) { waiter_ = std::move(handler); },
+                [this](auto handler) {
+                    // Through the thread's recycling cache, not malloc: one per wait.
+                    waiter_ = asio::bind_allocator(asio::recycling_allocator<void>(), std::move(handler));
+                },
                 asio::use_awaitable);
         }
         set_ = false;
@@ -281,10 +286,12 @@ struct Shared {
     bool same_thread;
     std::vector<std::unique_ptr<Counts>> counts;
     mutable std::mutex mutex;
-    std::map<uint64_t,RequestEvent> events;
+    // The two maps' nodes come from this pool, used under `mutex` only.
+    std::pmr::unsynchronized_pool_resource nodes;
+    std::pmr::map<uint64_t,RequestEvent> events{&nodes};
     // Drained application values belong to Python; their empty tree nodes stay
     // here until decide() reclaims them on the shard that allocated them.
-    std::map<uint64_t,RequestEvent> pending_application_nodes;
+    std::pmr::map<uint64_t,RequestEvent> pending_application_nodes{&nodes};
     std::atomic<bool> running{false};
     std::atomic<uint64_t> decision_return_batches{0}, decision_return_items{0}, decision_return_posts{0};
     Shared(ServerConfig c, unsigned n, std::function<void()> wake, bool same)
@@ -353,8 +360,9 @@ struct Waiter {
     std::optional<Decision> decision;
     Event decided;
     bool replied = false;
-    // A streamed response keeps its waiter: later decisions queue here.
-    std::deque<Decision> chunks;
+    // A streamed response keeps its waiter: later decisions queue here (a
+    // list: nothing allocated for the requests that never stream).
+    std::list<Decision> chunks;
     Event more;
     // A tunnel's reading of the peer is paused by Python (backpressure).
     bool paused = false;
@@ -488,7 +496,10 @@ class Service {
     const unsigned shard;
     asio::io_context& io;
     Wheel wheel;  // first in, last out: every entry of it goes before it
-    std::map<uint64_t, std::unique_ptr<Waiter>> waiters;
+    // Each request's Waiter lives in its map node, which comes from this
+    // shard's pool (the map is used on the shard's thread only).
+    std::pmr::unsynchronized_pool_resource waiter_nodes;
+    std::pmr::map<uint64_t, Waiter> waiters{&waiter_nodes};
     // Request and connection ids count on per shard across the servers a
     // process runs one after another: a late answer to a replaced server's
     // request never matches another server's request.
@@ -1179,7 +1190,7 @@ public:
                                 // While Python has not answered, decide's own deadline,
                                 // restarted with the same piece, reports it.
                                 auto response = waiters.find(root);
-                                if (response == waiters.end() || !response->second->response_deadline) {
+                                if (response == waiters.end() || !response->second.response_deadline) {
                                     RequestEvent timeout{(++next_id << 16) | shard, shard, method,
                                                          "application_timeout", 0};
                                     timeout.parent = root;
@@ -1193,8 +1204,8 @@ public:
                             abort_request(root, 503);
                             co_return;
                         }
-                        if (auto it = waiters.find(root); it != waiters.end() && it->second->response_deadline)
-                            wheel.arm(*it->second->response_deadline, config.decision_timeout_ms);
+                        if (auto it = waiters.find(root); it != waiters.end() && it->second.response_deadline)
+                            wheel.arm(*it->second.response_deadline, config.decision_timeout_ms);
                     }
                 };
                 // respond_application publishes the request (with its id, root)
@@ -1425,7 +1436,7 @@ public:
                                              bool& close, std::string& output, bool& retired) {
         auto found = waiters.find(root);
         if (found == waiters.end()) { close = true; retired = false; co_return; }
-        auto& waiter = *found->second;
+        auto& waiter = found->second;
         enum class Framing { chunked, length, until_close, raw };
         const bool tunnel = start.code == 101;
         connection.tunnel = tunnel;
@@ -1693,7 +1704,7 @@ public:
     // requests to take first.
     void ask(uint64_t id, const std::string& method, size_t bytes, const std::string* copied,
              std::string parameter, ApplicationInput* input) {
-        waiters.emplace(id, std::make_unique<Waiter>(io));
+        waiters.try_emplace(id, io);
         ++counts.pending_decisions; ++counts.decisions;
         try {
             RequestEvent event{id, shard, method, "application", bytes, copied != nullptr, {}};
@@ -1722,7 +1733,7 @@ public:
     // Without an answer within the grace period the host answers 504 itself.
     asio::awaitable<Decision> decide(uint64_t id, const std::string& method) {
         auto begin = clock_ns();
-        auto& waiter = *waiters.at(id);
+        auto& waiter = waiters.at(id);
         bool reported = false;
         WheelEntry timer;
         timer.fire = [&, id] {
@@ -1730,7 +1741,7 @@ public:
                 abort_request(id, 504);
                 return;
             }
-            if (auto it = waiters.find(id); it != waiters.end()) it->second->response_deadline = nullptr;
+            if (auto it = waiters.find(id); it != waiters.end()) it->second.response_deadline = nullptr;
             ++counts.decision_timeouts;
             if (shared.withdraw(id)) {
                 abort_request(id, 504);  // Python never received it
@@ -1835,11 +1846,11 @@ public:
     // terminal event cancels the handler.
     void abort_request(uint64_t id, int status) {
         auto it = waiters.find(id);
-        if (it == waiters.end() || it->second->replied) return;
-        it->second->replied = true;
+        if (it == waiters.end() || it->second.replied) return;
+        it->second.replied = true;
         Decision decision{3, {}};
         decision.reject_status = status;
-        settle(*it->second, std::move(decision));
+        settle(it->second, std::move(decision));
     }
     void resolve(uint64_t id, int code, std::string body, bool retire = false,
                  std::vector<std::pair<std::string, std::string>> headers = {},
@@ -1854,7 +1865,7 @@ public:
         }
         auto it = waiters.find(id);
         if (it == waiters.end() || closing) return;
-        auto& waiter = *it->second;
+        auto& waiter = it->second;
         counts.body_bytes_from_python += body.size();
         if (kind == DecisionKind::tunnel_pause || kind == DecisionKind::tunnel_resume) {
             waiter.paused = kind == DecisionKind::tunnel_pause;
@@ -1912,13 +1923,13 @@ public:
         }
         for (auto& [id, flow] : body_flows) flow->wake();
         for (auto& [id, waiter] : waiters) {
-            if (!waiter->replied) {
-                waiter->replied = true;
-                settle(*waiter, Decision{3, {}});
+            if (!waiter.replied) {
+                waiter.replied = true;
+                settle(waiter, Decision{3, {}});
             } else {
                 // A streamed response or tunnel sees `closing`.
-                waiter->more.set();
-                waiter->resumed.set();
+                waiter.more.set();
+                waiter.resumed.set();
             }
         }
         co_await accepting.close();

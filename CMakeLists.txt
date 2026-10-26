@@ -10,7 +10,12 @@ find_path(ASIO_INCLUDE_DIR asio.hpp REQUIRED NO_DEFAULT_PATH
           PATHS ${ASIO_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/build/deps/sources/asio/include)
 add_library(probe_runtime STATIC native/runtime.cc native/server.cc native/http1.cc)
 target_include_directories(probe_runtime SYSTEM PUBLIC ${ASIO_INCLUDE_DIR})
-target_compile_definitions(probe_runtime PUBLIC ASIO_STANDALONE ASIO_NO_DEPRECATED)
+# Each thread keeps up to 16 freed blocks of a kind (coroutine frames, handlers)
+# for reuse instead of Asio's 2: a request nests several coroutines, whose
+# frames otherwise went to malloc. The same value in every target that shares
+# Asio's thread info.
+target_compile_definitions(probe_runtime PUBLIC ASIO_STANDALONE ASIO_NO_DEPRECATED
+                           ASIO_RECYCLING_ALLOCATOR_CACHE_SIZE=16)
 target_link_libraries(probe_runtime PUBLIC Threads::Threads)
 # The package's native extension, oldman_server.native._native, built in place.
 pybind11_add_module(_native native/bridge.cc)
@@ -24,7 +29,7 @@ add_library(oldman_native_uring SHARED native/runtime.cc native/server.cc native
 target_include_directories(oldman_native_uring SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/native/uring_headers
                            ${ASIO_INCLUDE_DIR} ${OLDMAN_URING_INCLUDE_DIR})
 target_compile_definitions(oldman_native_uring PRIVATE OLDMAN_NATIVE_URING ASIO_STANDALONE ASIO_NO_DEPRECATED
-                           ASIO_HAS_IO_URING ASIO_DISABLE_EPOLL)
+                           ASIO_HAS_IO_URING ASIO_DISABLE_EPOLL ASIO_RECYCLING_ALLOCATOR_CACHE_SIZE=16)
 target_link_libraries(oldman_native_uring PRIVATE ${OLDMAN_URING_LIBRARY} Threads::Threads)
 set_target_properties(oldman_native_uring PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
                       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/src/oldman_server/native)
