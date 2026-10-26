@@ -1,18 +1,15 @@
 import asyncio
 import os
-import platform
 import signal
 import sys
 
-from collections.abc import Awaitable
 from contextlib import contextmanager
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 from multidict import CIMultiDict, MultiMapping  # type: ignore
 
 from oldman_server.helpers import Default
-from oldman_server.log import error_logger
 
 
 StartMethod = (
@@ -22,7 +19,6 @@ StartMethod = (
 # The asyncio server also runs on Windows (and macOS), for development and
 # small local services; the native host is Linux only (oldman_server.native).
 OS_IS_WINDOWS = os.name == "nt"
-PYPY_IMPLEMENTATION = platform.python_implementation() == "PyPy"
 UVLOOP_INSTALLED = False
 PYTHON_314_OR_LATER = sys.version_info >= (3, 14)
 
@@ -32,16 +28,6 @@ try:
     UVLOOP_INSTALLED = True
 except ImportError:
     pass
-
-# Python 3.11 changed the way Enum formatting works for mixed-in types.
-if sys.version_info < (3, 11, 0):
-
-    class StrEnum(str, Enum):
-        pass
-
-else:
-    from enum import StrEnum  # type: ignore # noqa
-
 
 class UpperStrEnum(StrEnum):
     """Base class for string enums that are case insensitive."""
@@ -77,23 +63,6 @@ def enable_windows_color_support():
 
     kernel = ctypes.windll.kernel32
     kernel.SetConsoleMode(kernel.GetStdHandle(-11), 7)
-
-
-def pypy_os_module_patch() -> None:
-    """
-    The PyPy os module is missing the 'readlink' function, which causes issues
-    withaiofiles. This workaround replaces the missing 'readlink' function
-    with 'os.path.realpath', which serves the same purpose.
-    """
-    if hasattr(os, "readlink"):
-        error_logger.debug(
-            "PyPy: Skipping patching of the os module as it appears the "
-            "'readlink' function has been added."
-        )
-        return
-
-    module = sys.modules["os"]
-    module.readlink = os.path.realpath  # type: ignore
 
 
 class Header(CIMultiDict):
@@ -287,27 +256,15 @@ class NativeHeaders:
 MultiMapping.register(NativeHeaders)
 
 
-use_trio = sys.argv[0].endswith("hypercorn") and "trio" in sys.argv
+from aiofiles import open as aio_open  # type: ignore  # noqa: E402
+from aiofiles.os import stat as stat_async  # type: ignore  # noqa: E402, F401
 
-if use_trio:  # pragma: no cover
-    import trio  # type: ignore
 
-    def stat_async(path) -> Awaitable[os.stat_result]:
-        return trio.Path(path).stat()
+async def open_async(file, mode="r", **kwargs):
+    return aio_open(file, mode, **kwargs)
 
-    open_async = trio.open_file
-    CancelledErrors = tuple([asyncio.CancelledError, trio.Cancelled])
-else:
-    if PYPY_IMPLEMENTATION:
-        pypy_os_module_patch()
 
-    from aiofiles import open as aio_open  # type: ignore
-    from aiofiles.os import stat as stat_async  # type: ignore  # noqa: F401
-
-    async def open_async(file, mode="r", **kwargs):
-        return aio_open(file, mode, **kwargs)
-
-    CancelledErrors = tuple([asyncio.CancelledError])
+CancelledErrors = tuple([asyncio.CancelledError])
 
 
 # While the native host serves (NATIVE_SERVER), its file operations run on the

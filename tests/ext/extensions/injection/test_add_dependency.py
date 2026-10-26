@@ -158,24 +158,9 @@ def test_injection_of_matched_object(app):
     assert request.ctx.name.name == "george"
 
 
-def test_injection_of_matched_object_as_deprecated_injection(app):
-    @app.get("/person/<name:str>")
-    def handler(request, name: Name):
-        request.ctx.name = name
-        return text(name.name)
-
-    message = (
-        "The 'ext.injection' method has been deprecated and will be removed "
-        "in v22.6. Please use 'ext.add_dependency' instead."
-    )
-    with pytest.warns(DeprecationWarning, match=message):
-        app.ext.injection(Name)
-
-    request, response = app.test_client.get("/person/george")
-
-    assert response.body == b"george"
-    assert isinstance(request.ctx.name, Name)
-    assert request.ctx.name.name == "george"
+def test_the_deprecated_injection_alias_is_gone(app):
+    # ext.injection, deprecated for removal in v22.6: add_dependency replaces it.
+    assert not hasattr(app.ext, "injection")
 
 
 def test_injection_of_simple_object(app):

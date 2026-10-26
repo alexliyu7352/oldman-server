@@ -5,7 +5,6 @@ import os
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, Callable, Optional, Union
-from warnings import warn
 
 from oldman_server import OldmanServer
 from oldman_server.__version__ import SANIC_VERSION as __version__
@@ -27,7 +26,6 @@ from oldman_server.ext.extensions.logging.extension import LoggingExtension
 from oldman_server.ext.extensions.openapi.builders import SpecificationBuilder
 from oldman_server.ext.extensions.openapi.extension import OpenAPIExtension
 from oldman_server.ext.utils.string import camel_to_snake
-from oldman_server.ext.utils.version import get_version
 
 
 try:
@@ -46,9 +44,6 @@ try:
     MCP_ENABLED = True
 except (ImportError, ModuleNotFoundError):
     MCP_ENABLED = False
-
-MIN_SUPPORT = (25, 12, 0)
-
 
 class Extend:
     _pre_registry: list[Union[type[Extension], Extension]] = []
@@ -77,21 +72,13 @@ class Extend:
                 f"Cannot apply the extensions to {app.__class__.__name__}"
             )
 
-        sanic_version = get_version(__version__)
-
-        if MIN_SUPPORT > sanic_version:
-            min_version = ".".join(map(str, MIN_SUPPORT))
-            raise OldmanServerException(
-                f"Sanic Extensions only works with Sanic v{min_version} "
-                f"and above. It looks like you are running {__version__}."
-            )
-
         self._injection_registry: Optional[InjectionRegistry] = None
         self._constant_registry: Optional[ConstantRegistry] = None
         self._openapi: Optional[SpecificationBuilder] = None
         self.app = app
         self.extensions: list[Extension] = []
-        self.sanic_version = sanic_version
+        # The Sanic interface this package implements (extensions may read it).
+        self.sanic_version = tuple(map(int, __version__.split(".")))
         app._ext = self
         app.ctx._dependencies = SimpleNamespace()
 
@@ -136,18 +123,6 @@ class Extend:
                 init_logs.append(f"  > {extension.name} {label}")
 
         list(map(logger.info, init_logs))
-
-    def injection(
-        self,
-        type: type,
-        constructor: Optional[Callable[..., Any]] = None,
-    ) -> None:
-        warn(
-            "The 'ext.injection' method has been deprecated and will be "
-            "removed in v22.6. Please use 'ext.add_dependency' instead.",
-            DeprecationWarning,
-        )
-        self.add_dependency(type=type, constructor=constructor)
 
     def add_dependency(
         self,

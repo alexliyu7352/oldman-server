@@ -70,8 +70,8 @@ def test_can_access_app_ext_while_running(
 
     @app.before_server_start
     async def injections(*_):
-        app.ext.injection(IceCream)
+        app.ext.add_dependency(IceCream)
         app.stop()
 
     app.run(single_process=True, port=port)
-    ext_instance.injection.assert_called_with(IceCream)
+    ext_instance.add_dependency.assert_called_with(IceCream)
