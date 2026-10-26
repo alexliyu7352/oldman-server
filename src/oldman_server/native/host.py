@@ -25,7 +25,7 @@ from oldman_server.log import access_logger, error_logger, websockets_logger
 from oldman_server.middleware import Middleware
 from oldman_server.models import server_types
 from oldman_server.request import Request
-from oldman_server.request.types import _NATIVE_UNSET
+from oldman_server.request.types import _NATIVE_UNSET, _PARSED_URLS
 from oldman_server.response import BaseHTTPResponse, HTTPResponse, JSONResponse, ResponseStream
 from oldman_server.response.types import HEADER_TRANSLATION_TABLE, _SentContentType
 from oldman_server.router import Router
@@ -921,16 +921,22 @@ class NativeApplication:
         try:
             app = self.app
             started = perf_counter() if self._access_log else 0.0
-            try:
-                # Request._from_native with one validating native call.
-                target, version, method, body, more_body = native.sanic_request()
-                request = Request._from_native_fields(target, version, method, app, native)
-            except OldmanServerException as error:
-                answer = await self._error_response(native, error)
-                return answer
-            exchange = _BufferedExchange(body, self.max_response_bytes, native, more_body,
-                                         self.request_max_size)
-            request.stream = exchange
+            # The Request and its exchange made natively in one call; None
+            # until the target's parse is cached (or for a target refused below).
+            prepared = native.sanic_prepare(app, self.max_response_bytes, self.request_max_size)
+            if prepared is not None:
+                request, exchange = prepared
+            else:
+                try:
+                    # Request._from_native with one validating native call.
+                    target, version, method, body, more_body = native.sanic_request()
+                    request = Request._from_native_fields(target, version, method, app, native)
+                except OldmanServerException as error:
+                    answer = await self._error_response(native, error)
+                    return answer
+                exchange = _BufferedExchange(body, self.max_response_bytes, native, more_body,
+                                             self.request_max_size)
+                request.stream = exchange
             token = Request._current.set(request)
             try:
                 # ---- Sanic.handle_request ----
@@ -1452,3 +1458,7 @@ async def serve(app, config):
         raise errors[0]
     if errors:
         raise BaseExceptionGroup("native lifecycle failed", errors)
+
+
+# NativeApplication._call_flat's request, as sanic_prepare makes it.
+_native.set_sanic_types(Request, _BufferedExchange, _NATIVE_UNSET, Stage.HANDLER, _PARSED_URLS)

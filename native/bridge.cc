@@ -366,7 +366,166 @@ PyGetSetDef request_attributes[] = {
 
 constexpr int lookup_flags = METH_FASTCALL | METH_KEYWORDS;
 
+// The framework host's classes (oldman_server.native.host), for sanic_prepare.
+// set_sanic_types() takes them once; their slots are filled by offset.
+struct SanicTypes {
+    PyTypeObject* request = nullptr;  // Request
+    PyTypeObject* exchange = nullptr;  // _BufferedExchange
+    PyObject* unset = nullptr;  // _NATIVE_UNSET
+    PyObject* stage_handler = nullptr;  // Stage.HANDLER
+    PyObject* parsed_urls = nullptr;  // _PARSED_URLS: target bytes -> parse_url()
+    PyObject* empty = nullptr;
+    PyObject* minus_one = nullptr;
+    struct {
+        Py_ssize_t parsed_url, raw_url, id, name, app, native_request, headers, transport, conn_info,
+            version, method, head, body, ctx, parsed_accept, parsed_args, parsed_not_grouped_args,
+            parsed_cookies, parsed_credentials, parsed_files, parsed_form, parsed_forwarded, parsed_json,
+            parsed_token, request_middleware_started, response_middleware_started, responded, route, stream,
+            protocol, match_info;
+    } r;
+    struct {
+        Py_ssize_t stage, response, request_body, body, max_body, result, failure, native, streaming,
+            more_body, request_max_size, request_bytes, response_bytes_left;
+    } x;
+} sanic;
+
+Py_ssize_t slot_offset(PyTypeObject* type, const char* name) {
+    auto descriptor = py::reinterpret_steal<py::object>(
+        PyObject_GetAttrString(reinterpret_cast<PyObject*>(type), name));
+    if (!descriptor) throw py::error_already_set();
+    if (!Py_IS_TYPE(descriptor.ptr(), &PyMemberDescr_Type))
+        throw py::type_error(std::string(type->tp_name) + "." + name + " is not a slot");
+    const auto* member = reinterpret_cast<PyMemberDescrObject*>(descriptor.ptr())->d_member;
+    if (member->type != Py_T_OBJECT_EX) throw py::type_error(std::string(name) + " is not an object slot");
+    return member->offset;
+}
+
+void set_sanic_types(py::handle request, py::handle exchange, py::handle unset, py::handle stage_handler,
+                     py::handle parsed_urls) {
+    if (!PyType_Check(request.ptr()) || !PyType_Check(exchange.ptr()) || !PyDict_CheckExact(parsed_urls.ptr()))
+        throw py::type_error("set_sanic_types(Request, _BufferedExchange, unset, Stage.HANDLER, dict)");
+    auto* r = reinterpret_cast<PyTypeObject*>(request.ptr());
+    auto* x = reinterpret_cast<PyTypeObject*>(exchange.ptr());
+    sanic.r = {slot_offset(r, "_parsed_url"), slot_offset(r, "raw_url"), slot_offset(r, "_id"),
+               slot_offset(r, "_name"), slot_offset(r, "app"), slot_offset(r, "_native_request"),
+               slot_offset(r, "_headers"), slot_offset(r, "_transport"), slot_offset(r, "_conn_info"),
+               slot_offset(r, "version"), slot_offset(r, "method"), slot_offset(r, "_head"),
+               slot_offset(r, "body"), slot_offset(r, "_ctx"), slot_offset(r, "parsed_accept"),
+               slot_offset(r, "_parsed_args"), slot_offset(r, "_parsed_not_grouped_args"),
+               slot_offset(r, "parsed_cookies"), slot_offset(r, "parsed_credentials"),
+               slot_offset(r, "parsed_files"), slot_offset(r, "parsed_form"), slot_offset(r, "parsed_forwarded"),
+               slot_offset(r, "parsed_json"), slot_offset(r, "parsed_token"),
+               slot_offset(r, "_request_middleware_started"), slot_offset(r, "_response_middleware_started"),
+               slot_offset(r, "responded"), slot_offset(r, "route"), slot_offset(r, "stream"),
+               slot_offset(r, "_protocol"), slot_offset(r, "_match_info")};
+    sanic.x = {slot_offset(x, "stage"), slot_offset(x, "response"), slot_offset(x, "request_body"),
+               slot_offset(x, "body"), slot_offset(x, "max_body"), slot_offset(x, "result"),
+               slot_offset(x, "failure"), slot_offset(x, "native"), slot_offset(x, "streaming"),
+               slot_offset(x, "more_body"), slot_offset(x, "request_max_size"), slot_offset(x, "request_bytes"),
+               slot_offset(x, "response_bytes_left")};
+    // Kept for the process's life, as the request type is.
+    auto keep = [](py::handle value) { return Py_NewRef(value.ptr()); };
+    sanic.request = reinterpret_cast<PyTypeObject*>(keep(request));
+    sanic.exchange = reinterpret_cast<PyTypeObject*>(keep(exchange));
+    sanic.unset = keep(unset);
+    sanic.stage_handler = keep(stage_handler);
+    sanic.parsed_urls = keep(parsed_urls);
+    sanic.empty = py::bytes().release().ptr();
+    sanic.minus_one = py::int_(-1).release().ptr();
+}
+
+// A slot of an object just allocated (NULL until filled).
+inline void fill(PyObject* object, Py_ssize_t offset, PyObject* value) {
+    *reinterpret_cast<PyObject**>(reinterpret_cast<char*>(object) + offset) = Py_NewRef(value);
+}
+
+// request.sanic_prepare(app, max_body, request_max_size): the Request and
+// _BufferedExchange the framework host makes for this request, with the
+// same slots Request._from_native_fields and _BufferedExchange.__init__
+// assign (request.stream is the exchange). None, with nothing made, when
+// the target's parse is not cached or the target is too long: the Python
+// path parses it, or raises.
+PyObject* request_sanic_prepare(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "sanic_prepare(app, max_body, request_max_size)");
+        return nullptr;
+    }
+    if (!sanic.request) {
+        PyErr_SetString(PyExc_RuntimeError, "set_sanic_types() was not called");
+        return nullptr;
+    }
+    return guarded([&]() -> py::object {
+        const Request& r = request_of(self);
+        r.validate_sanic_request();
+        if (r.target.size() > 65535) return py::none();
+        py::bytes url(r.target);
+        PyObject* parsed = PyDict_GetItemWithError(sanic.parsed_urls, url.ptr());
+        if (!parsed) {
+            if (PyErr_Occurred()) throw py::error_already_set();
+            return py::none();
+        }
+        py::str version(r.http_version), method(r.method);
+        py::bytes body(r.body);
+        auto match_info = py::reinterpret_steal<py::object>(PyDict_New());
+        auto request = py::reinterpret_steal<py::object>(sanic.request->tp_alloc(sanic.request, 0));
+        auto exchange = py::reinterpret_steal<py::object>(sanic.exchange->tp_alloc(sanic.exchange, 0));
+        if (!match_info || !request || !exchange) throw py::error_already_set();
+        PyObject* q = request.ptr();
+        PyObject* x = exchange.ptr();
+        const auto& o = sanic.r;
+        fill(q, o.parsed_url, parsed);
+        fill(q, o.raw_url, url.ptr());
+        fill(q, o.id, Py_None);
+        fill(q, o.name, Py_None);
+        fill(q, o.app, args[0]);
+        fill(q, o.native_request, self);
+        fill(q, o.headers, sanic.unset);
+        fill(q, o.transport, sanic.unset);
+        fill(q, o.conn_info, sanic.unset);
+        fill(q, o.version, version.ptr());
+        fill(q, o.method, method.ptr());
+        fill(q, o.head, sanic.unset);
+        fill(q, o.body, sanic.empty);
+        fill(q, o.ctx, Py_None);
+        fill(q, o.parsed_accept, Py_None);
+        fill(q, o.parsed_args, sanic.unset);
+        fill(q, o.parsed_not_grouped_args, sanic.unset);
+        fill(q, o.parsed_cookies, Py_None);
+        fill(q, o.parsed_credentials, Py_None);
+        fill(q, o.parsed_files, Py_None);
+        fill(q, o.parsed_form, Py_None);
+        fill(q, o.parsed_forwarded, Py_None);
+        fill(q, o.parsed_json, Py_None);
+        fill(q, o.parsed_token, Py_None);
+        fill(q, o.request_middleware_started, Py_False);
+        fill(q, o.response_middleware_started, Py_False);
+        fill(q, o.responded, Py_False);
+        fill(q, o.route, Py_None);
+        fill(q, o.stream, x);
+        fill(q, o.protocol, Py_None);
+        fill(q, o.match_info, match_info.ptr());
+        const auto& e = sanic.x;
+        PyObject* more_body = r.more_body ? Py_True : Py_False;
+        fill(x, e.stage, sanic.stage_handler);
+        fill(x, e.response, Py_None);
+        fill(x, e.request_body, r.body.empty() ? more_body : Py_True);  // bool(body) or more_body
+        fill(x, e.body, body.ptr());
+        fill(x, e.max_body, args[1]);
+        fill(x, e.result, Py_None);
+        fill(x, e.failure, Py_None);
+        fill(x, e.native, self);
+        fill(x, e.streaming, Py_None);
+        fill(x, e.more_body, more_body);
+        fill(x, e.request_max_size, args[2]);
+        fill(x, e.request_bytes, sanic.minus_one);
+        fill(x, e.response_bytes_left, Py_None);
+        return py::make_tuple(std::move(request), std::move(exchange));
+    });
+}
+
 PyMethodDef request_methods[] = {
+    {"sanic_prepare", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(request_sanic_prepare)),
+     METH_FASTCALL, nullptr},
     {"sanic_headers", request_call<[](const Request& r) { return r.sanic_headers(); }>, METH_NOARGS, nullptr},
     {"sanic_header", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(
          request_lookup<[](const Request& r, PyObject* name, py::object fallback) {
@@ -571,6 +730,7 @@ int inline_call(const probe::ServerConfig& config, probe::RequestEvent& event,
 
 PYBIND11_MODULE(_native, m) {
     add_request_type(m);
+    m.def("set_sanic_types", &set_sanic_types);
     py::class_<probe::ServerConfig>(m, "ServerConfig")
         .def(py::init<>())
         .def_readwrite("http_port", &probe::ServerConfig::http_port)
