@@ -375,6 +375,7 @@ struct SanicTypes {
     PyObject* unset = nullptr;  // _NATIVE_UNSET
     PyObject* stage_handler = nullptr;  // Stage.HANDLER
     PyObject* parsed_urls = nullptr;  // _PARSED_URLS: target bytes -> parse_url()
+    PyObject* current = nullptr;  // Request._current
     PyObject* empty = nullptr;
     PyObject* minus_one = nullptr;
     PyObject *zero = nullptr, *one = nullptr, *two = nullptr;
@@ -411,12 +412,14 @@ Py_ssize_t slot_offset(PyTypeObject* type, const char* name) {
 }
 
 void set_sanic_types(py::handle request, py::handle exchange, py::handle unset, py::handle stage_handler,
-                     py::handle parsed_urls, py::handle http_response, py::handle json_response,
-                     py::handle stage_idle, py::handle sent_types, py::handle sent_content_type) {
+                     py::handle parsed_urls, py::handle current, py::handle http_response,
+                     py::handle json_response, py::handle stage_idle, py::handle sent_types,
+                     py::handle sent_content_type) {
     if (!PyType_Check(request.ptr()) || !PyType_Check(exchange.ptr()) || !PyDict_CheckExact(parsed_urls.ptr())
-            || !PyType_Check(http_response.ptr()) || !PyType_Check(json_response.ptr())
-            || !PyDict_CheckExact(sent_types.ptr()) || !PyCallable_Check(sent_content_type.ptr()))
-        throw py::type_error("set_sanic_types(Request, _BufferedExchange, unset, Stage.HANDLER, dict, "
+            || !PyContextVar_CheckExact(current.ptr()) || !PyType_Check(http_response.ptr())
+            || !PyType_Check(json_response.ptr()) || !PyDict_CheckExact(sent_types.ptr())
+            || !PyCallable_Check(sent_content_type.ptr()))
+        throw py::type_error("set_sanic_types(Request, _BufferedExchange, unset, Stage.HANDLER, dict, ContextVar, "
                              "HTTPResponse, JSONResponse, Stage.IDLE, dict, _sent_content_type)");
     auto* r = reinterpret_cast<PyTypeObject*>(request.ptr());
     auto* x = reinterpret_cast<PyTypeObject*>(exchange.ptr());
@@ -447,6 +450,7 @@ void set_sanic_types(py::handle request, py::handle exchange, py::handle unset, 
     sanic.unset = keep(unset);
     sanic.stage_handler = keep(stage_handler);
     sanic.parsed_urls = keep(parsed_urls);
+    sanic.current = keep(current);
     sanic.empty = py::bytes().release().ptr();
     sanic.minus_one = py::int_(-1).release().ptr();
     sanic.zero = py::int_(0).release().ptr();
@@ -476,9 +480,10 @@ inline void fill(PyObject* object, Py_ssize_t offset, PyObject* value) {
 // request.sanic_prepare(app, max_body, request_max_size): the Request and
 // _BufferedExchange the framework host makes for this request, with the
 // same slots Request._from_native_fields and _BufferedExchange.__init__
-// assign (request.stream is the exchange). None, with nothing made, when
-// the target's parse is not cached or the target is too long: the Python
-// path parses it, or raises.
+// assign (request.stream is the exchange), and the token of setting
+// Request._current to the Request. None, with nothing made or set, when the
+// target's parse is not cached or the target is too long: the Python path
+// parses it, or raises.
 PyObject* request_sanic_prepare(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
     if (nargs != 3) {
         PyErr_SetString(PyExc_TypeError, "sanic_prepare(app, max_body, request_max_size)");
@@ -553,7 +558,14 @@ PyObject* request_sanic_prepare(PyObject* self, PyObject* const* args, Py_ssize_
         fill(x, e.request_max_size, args[2]);
         fill(x, e.request_bytes, sanic.minus_one);
         fill(x, e.response_bytes_left, Py_None);
-        return py::make_tuple(std::move(request), std::move(exchange));
+        auto prepared = py::reinterpret_steal<py::object>(PyTuple_New(3));
+        if (!prepared) throw py::error_already_set();
+        PyObject* token = PyContextVar_Set(sanic.current, q);  // last: nothing can fail after it
+        if (!token) throw py::error_already_set();
+        PyTuple_SET_ITEM(prepared.ptr(), 0, request.release().ptr());
+        PyTuple_SET_ITEM(prepared.ptr(), 1, exchange.release().ptr());
+        PyTuple_SET_ITEM(prepared.ptr(), 2, token);
+        return prepared;
     });
 }
 
@@ -653,12 +665,12 @@ int settle(PyObject* id, PyObject* shard, PyObject* status, PyObject* body, PyOb
 // _BufferedExchange.complete takes at once (a plain response, its headers
 // never read, a bytes body within max_body, a status with a body): the
 // state both leave, and 1; with the Engine set_application_state named, the
-// request also settled there (its answer queued), and 2. 0, with nothing
-// changed, for anything else (the Python path then runs, and raises where it
-// raises).
+// request also settled there (its answer queued) and Request._current reset
+// with `token`, and 2. 0, with nothing changed, for anything else (the Python
+// path then runs, and raises where it raises).
 PyObject* request_sanic_finish(PyObject* self, PyObject* const* args, Py_ssize_t nargs) {
-    if (nargs != 3 && nargs != 4) {
-        PyErr_SetString(PyExc_TypeError, "sanic_finish(request, exchange, response, engine=None)");
+    if (nargs < 3 || nargs > 5) {
+        PyErr_SetString(PyExc_TypeError, "sanic_finish(request, exchange, response, engine=None, token=None)");
         return nullptr;
     }
     if (!sanic.http_response) {
@@ -752,6 +764,7 @@ PyObject* request_sanic_finish(PyObject* self, PyObject* const* args, Py_ssize_t
     if (!id || !shard
             || settle(id.ptr(), shard.ptr(), status.ptr(), body.ptr(), PyTuple_GET_ITEM(result, 2)) < 0)
         return nullptr;
+    if (nargs == 5 && args[4] != Py_None && PyContextVar_Reset(sanic.current, args[4]) < 0) return nullptr;
     return Py_NewRef(sanic.two);
 }
 

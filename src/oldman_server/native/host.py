@@ -931,11 +931,12 @@ class NativeApplication:
         try:
             app = self.app
             started = perf_counter() if self._access_log else 0.0
-            # The Request and its exchange made natively in one call; None
-            # until the target's parse is cached (or for a target refused below).
+            # The Request and its exchange made, and Request._current set, natively
+            # in one call; None until the target's parse is cached (or for a
+            # target refused below).
             prepared = native.sanic_prepare(app, self.max_response_bytes, self.request_max_size)
             if prepared is not None:
-                request, exchange = prepared
+                request, exchange, token = prepared
             else:
                 try:
                     # Request._from_native with one validating native call.
@@ -947,7 +948,7 @@ class NativeApplication:
                 exchange = _BufferedExchange(body, self.max_response_bytes, native, more_body,
                                              self.request_max_size)
                 request.stream = exchange
-            token = Request._current.set(request)
+                token = Request._current.set(request)
             try:
                 # ---- Sanic.handle_request ----
                 # An exception from the first two dispatches reaches __call__'s
@@ -1038,11 +1039,14 @@ class NativeApplication:
                             and not ((request.route and request.route.extra.response_middleware)
                                      or app.response_middleware)
                             and (finished := native.sanic_finish(
-                                request, exchange, response, engine if self._settle_natively else None))):
+                                request, exchange, response, engine if self._settle_natively else None,
+                                token))):
                         # Request.respond(response), then send(end_stream=True) completing
                         # the exchange at once, as below: for a plain response, natively;
-                        # 2: and the request settled (nothing below changes its answer).
-                        settled = finished == 2
+                        # 2: and the request settled (nothing below changes its answer)
+                        # with Request._current reset.
+                        if finished == 2:
+                            settled, token = True, None
                     else:
                         if request.responded:
                             if response is not None:
@@ -1151,7 +1155,8 @@ class NativeApplication:
                 answer = result
                 return answer
             finally:
-                Request._current.reset(token)
+                if token is not None:
+                    Request._current.reset(token)
                 if exchange.streaming is not None:
                     exchange.abort()  # a stream still open when the chain exits
                 if exchange.response is not None:
@@ -1485,4 +1490,5 @@ async def serve(app, config):
 # NativeApplication._call_flat's request and response, as sanic_prepare and
 # sanic_finish handle them.
 _native.set_sanic_types(Request, _BufferedExchange, _NATIVE_UNSET, Stage.HANDLER, _PARSED_URLS,
-                        HTTPResponse, JSONResponse, Stage.IDLE, _SENT_CONTENT_TYPES, _sent_content_type)
+                        Request._current, HTTPResponse, JSONResponse, Stage.IDLE, _SENT_CONTENT_TYPES,
+                        _sent_content_type)

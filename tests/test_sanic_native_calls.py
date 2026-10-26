@@ -60,8 +60,11 @@ def test_sanic_prepare_assigns_what_the_python_path_assigns(method, target, body
     assert first.sanic_prepare(app, max_body, request_max_size) is None
     expected, expected_exchange = python_prepare(first, app, max_body, request_max_size)
     second = native(method, target, body)
-    made, exchange = second.sanic_prepare(app, max_body, request_max_size)
+    made, exchange, token = second.sanic_prepare(app, max_body, request_max_size)
     assert type(made) is Request and type(exchange) is _BufferedExchange
+    assert Request._current.get() is made  # set as the Python path sets it
+    Request._current.reset(token)
+    assert Request._current.get(None) is None
     got, want = slots(made), slots(expected)
     assert got.keys() == want.keys()
     for name in want:
@@ -300,10 +303,12 @@ def test_sanic_finish_settles_as_application_finished(case):
         engine, engine._application_tasks, engine._application_inbound, engine._application_timeouts,
         engine._application_lost, engine._application_terminal, engine._application_returns,
         engine._decision_stats, engine._loop.call_soon)
+    token = Request._current.set(made_request)
     try:
-        assert request.sanic_finish(made_request, exchange, response, engine) == 2
+        assert request.sanic_finish(made_request, exchange, response, engine, token) == 2
     finally:
         _native.clear_application_state(engine)
+    assert Request._current.get(None) is None  # reset with the request settled
     expected = Settling(case, request.request_id)
     python_finish(*made(text("settled"))[1:])
     expected._application_finished(request.request_id, request.shard, exchange.result)
@@ -320,10 +325,13 @@ def test_sanic_finish_settles_only_for_the_engine_serving():
         engine._application_lost, engine._application_terminal, engine._application_returns,
         engine._decision_stats, engine._loop.call_soon)
     _native.clear_application_state(other)  # not the one set: nothing changes
+    token = Request._current.set(made_request)
     try:
-        assert request.sanic_finish(made_request, exchange, response, other) == 1
+        assert request.sanic_finish(made_request, exchange, response, other, token) == 1
         assert engine._application_returns == [("earlier",)]
+        assert Request._current.get() is made_request  # not settled: the caller resets it
     finally:
+        Request._current.reset(token)
         _native.clear_application_state(engine)
     request, made_request, exchange, response = made(text("x"))
     assert request.sanic_finish(made_request, exchange, response, engine) == 1  # cleared
