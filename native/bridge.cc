@@ -366,8 +366,9 @@ PyGetSetDef request_attributes[] = {
 
 constexpr int lookup_flags = METH_FASTCALL | METH_KEYWORDS;
 
-// The framework host's classes (oldman_server.native.host), for sanic_prepare.
-// set_sanic_types() takes them once; their slots are filled by offset.
+// The framework host's classes (oldman_server.native.host), for sanic_prepare
+// and sanic_finish. set_sanic_types() takes them once; their slots are read
+// and filled by offset.
 struct SanicTypes {
     PyTypeObject* request = nullptr;  // Request
     PyTypeObject* exchange = nullptr;  // _BufferedExchange
@@ -376,6 +377,14 @@ struct SanicTypes {
     PyObject* parsed_urls = nullptr;  // _PARSED_URLS: target bytes -> parse_url()
     PyObject* empty = nullptr;
     PyObject* minus_one = nullptr;
+    PyTypeObject* http_response = nullptr;  // HTTPResponse
+    PyTypeObject* json_response = nullptr;  // JSONResponse (its body is a property)
+    PyObject* stage_idle = nullptr;  // Stage.IDLE
+    PyObject* sent_types = nullptr;  // _SENT_CONTENT_TYPES: content type -> _sent_content_type()
+    PyObject* sent_content_type = nullptr;  // _sent_content_type
+    struct {
+        Py_ssize_t body, content_type, status, headers, stream;
+    } h;
     struct {
         Py_ssize_t parsed_url, raw_url, id, name, app, native_request, headers, transport, conn_info,
             version, method, head, body, ctx, parsed_accept, parsed_args, parsed_not_grouped_args,
@@ -401,11 +410,18 @@ Py_ssize_t slot_offset(PyTypeObject* type, const char* name) {
 }
 
 void set_sanic_types(py::handle request, py::handle exchange, py::handle unset, py::handle stage_handler,
-                     py::handle parsed_urls) {
-    if (!PyType_Check(request.ptr()) || !PyType_Check(exchange.ptr()) || !PyDict_CheckExact(parsed_urls.ptr()))
-        throw py::type_error("set_sanic_types(Request, _BufferedExchange, unset, Stage.HANDLER, dict)");
+                     py::handle parsed_urls, py::handle http_response, py::handle json_response,
+                     py::handle stage_idle, py::handle sent_types, py::handle sent_content_type) {
+    if (!PyType_Check(request.ptr()) || !PyType_Check(exchange.ptr()) || !PyDict_CheckExact(parsed_urls.ptr())
+            || !PyType_Check(http_response.ptr()) || !PyType_Check(json_response.ptr())
+            || !PyDict_CheckExact(sent_types.ptr()) || !PyCallable_Check(sent_content_type.ptr()))
+        throw py::type_error("set_sanic_types(Request, _BufferedExchange, unset, Stage.HANDLER, dict, "
+                             "HTTPResponse, JSONResponse, Stage.IDLE, dict, _sent_content_type)");
     auto* r = reinterpret_cast<PyTypeObject*>(request.ptr());
     auto* x = reinterpret_cast<PyTypeObject*>(exchange.ptr());
+    auto* h = reinterpret_cast<PyTypeObject*>(http_response.ptr());
+    sanic.h = {slot_offset(h, "body"), slot_offset(h, "content_type"), slot_offset(h, "status"),
+               slot_offset(h, "_headers"), slot_offset(h, "stream")};
     sanic.r = {slot_offset(r, "_parsed_url"), slot_offset(r, "raw_url"), slot_offset(r, "_id"),
                slot_offset(r, "_name"), slot_offset(r, "app"), slot_offset(r, "_native_request"),
                slot_offset(r, "_headers"), slot_offset(r, "_transport"), slot_offset(r, "_conn_info"),
@@ -432,6 +448,20 @@ void set_sanic_types(py::handle request, py::handle exchange, py::handle unset, 
     sanic.parsed_urls = keep(parsed_urls);
     sanic.empty = py::bytes().release().ptr();
     sanic.minus_one = py::int_(-1).release().ptr();
+    sanic.http_response = reinterpret_cast<PyTypeObject*>(keep(http_response));
+    sanic.json_response = reinterpret_cast<PyTypeObject*>(keep(json_response));
+    sanic.stage_idle = keep(stage_idle);
+    sanic.sent_types = keep(sent_types);
+    sanic.sent_content_type = keep(sent_content_type);
+}
+
+inline PyObject* slot(PyObject* object, Py_ssize_t offset) {
+    return *reinterpret_cast<PyObject**>(reinterpret_cast<char*>(object) + offset);
+}
+
+// A slot that may hold a value already.
+inline void replace(PyObject* object, Py_ssize_t offset, PyObject* value) {
+    Py_XSETREF(*reinterpret_cast<PyObject**>(reinterpret_cast<char*>(object) + offset), Py_NewRef(value));
 }
 
 // A slot of an object just allocated (NULL until filled).
@@ -523,7 +553,106 @@ PyObject* request_sanic_prepare(PyObject* self, PyObject* const* args, Py_ssize_
     });
 }
 
+// request.sanic_finish(request, exchange, response): the flat path's
+// Request.respond(response) followed by send(end_stream=True), for the case
+// _BufferedExchange.complete takes at once (a plain response, its headers
+// never read, a bytes body within max_body, a status with a body): the
+// state both leave, and True. False, with nothing changed, for anything else
+// (the Python path then runs, and raises where it raises).
+PyObject* request_sanic_finish(PyObject*, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "sanic_finish(request, exchange, response)");
+        return nullptr;
+    }
+    if (!sanic.http_response) {
+        PyErr_SetString(PyExc_RuntimeError, "set_sanic_types() was not called");
+        return nullptr;
+    }
+    PyObject* q = args[0];
+    PyObject* x = args[1];
+    PyObject* response = args[2];
+    const auto& o = sanic.r;
+    const auto& e = sanic.x;
+    // Request.respond's checks and _BufferedExchange.complete's.
+    if (Py_TYPE(q) != sanic.request || Py_TYPE(x) != sanic.exchange || slot(q, o.responded) != Py_False
+            || slot(q, o.stream) != x || slot(x, e.response) != Py_None || slot(x, e.stage) != sanic.stage_handler
+            || slot(x, e.streaming) != Py_None || slot(x, e.result) != Py_None || slot(x, e.failure) != Py_None)
+        Py_RETURN_FALSE;
+    const bool plain = Py_TYPE(response) == sanic.http_response;
+    if (!plain && Py_TYPE(response) != sanic.json_response) Py_RETURN_FALSE;
+    py::object body, status, content_type, headers;
+    if (plain) {
+        PyObject* values[] = {slot(response, sanic.h.body), slot(response, sanic.h.status),
+                              slot(response, sanic.h.content_type), slot(response, sanic.h.headers)};
+        for (auto* value : values)
+            if (!value) Py_RETURN_FALSE;  // unassigned: the Python path raises
+        body = py::reinterpret_borrow<py::object>(values[0]);
+        status = py::reinterpret_borrow<py::object>(values[1]);
+        content_type = py::reinterpret_borrow<py::object>(values[2]);
+        headers = py::reinterpret_borrow<py::object>(values[3]);
+    } else {
+        auto read = [&](const char* name) {
+            return py::reinterpret_steal<py::object>(PyObject_GetAttrString(response, name));
+        };
+        body = read("body");
+        status = body ? read("status") : py::object();
+        content_type = status ? read("content_type") : py::object();
+        headers = content_type ? read("_headers") : py::object();
+        if (!headers) {
+            PyErr_Clear();  // raised again where the Python path reads it
+            Py_RETURN_FALSE;
+        }
+    }
+    if (!headers.is_none() || !PyBytes_CheckExact(body.ptr()) || !PyLong_CheckExact(status.ptr())
+            || content_type.is_none())
+        Py_RETURN_FALSE;
+    PyObject* max_body = slot(x, e.max_body);
+    if (!PyLong_CheckExact(max_body)) Py_RETURN_FALSE;
+    int overflow = 0;
+    const long long limit = PyLong_AsLongLongAndOverflow(max_body, &overflow);
+    if (overflow < 0 || (overflow == 0 && PyBytes_GET_SIZE(body.ptr()) > limit)) Py_RETURN_FALSE;
+    const long code = PyLong_AsLongAndOverflow(status.ptr(), &overflow);
+    if (overflow || code < 200 || code == 204 || code == 304) Py_RETURN_FALSE;
+    // _sent_content_type(response.content_type): (the response's headers, the sent pair).
+    py::object entry;
+    if (PyUnicode_CheckExact(content_type.ptr())) {
+        PyObject* cached = PyDict_GetItemWithError(sanic.sent_types, content_type.ptr());
+        if (!cached && PyErr_Occurred()) return nullptr;
+        if (cached) entry = py::reinterpret_borrow<py::object>(cached);
+    }
+    if (!entry) {
+        entry = py::reinterpret_steal<py::object>(PyObject_CallOneArg(sanic.sent_content_type, content_type.ptr()));
+        if (!entry) {
+            PyErr_Clear();  // raised again by the Python path
+            Py_RETURN_FALSE;
+        }
+    }
+    if (!PyTuple_CheckExact(entry.ptr()) || PyTuple_GET_SIZE(entry.ptr()) != 2) {
+        PyErr_SetString(PyExc_TypeError, "_sent_content_type must return a pair");
+        return nullptr;
+    }
+    PyObject* result = PyTuple_Pack(3, status.ptr(), body.ptr(), PyTuple_GET_ITEM(entry.ptr(), 1));
+    if (!result) return nullptr;
+    PyObject* sent = PyTuple_GET_ITEM(entry.ptr(), 0);
+    if (!plain && (PyObject_SetAttrString(response, "_headers", sent) < 0
+                   || PyObject_SetAttrString(response, "stream", x) < 0)) {
+        Py_DECREF(result);
+        return nullptr;
+    }
+    if (plain) {
+        replace(response, sanic.h.headers, sent);
+        replace(response, sanic.h.stream, x);
+    }
+    replace(x, e.response, response);
+    replace(q, o.responded, Py_True);
+    Py_SETREF(*reinterpret_cast<PyObject**>(reinterpret_cast<char*>(x) + e.result), result);
+    replace(x, e.stage, sanic.stage_idle);
+    Py_RETURN_TRUE;
+}
+
 PyMethodDef request_methods[] = {
+    {"sanic_finish", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(request_sanic_finish)),
+     METH_FASTCALL, nullptr},
     {"sanic_prepare", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(request_sanic_prepare)),
      METH_FASTCALL, nullptr},
     {"sanic_headers", request_call<[](const Request& r) { return r.sanic_headers(); }>, METH_NOARGS, nullptr},

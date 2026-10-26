@@ -1,9 +1,15 @@
 """The flat path's native calls must leave the same state as the Python they replace."""
+import asyncio
+
 import pytest
+from oldman_server import OldmanServer
 from oldman_server.exceptions import URITooLong
+from oldman_server.http.constants import Stage
+from oldman_server.response import HTTPResponse, empty, html, json, raw, redirect, text
+import uvloop
 
 from oldman_server.native.engine import ApplicationRequest
-from oldman_server.native.host import _BufferedExchange
+from oldman_server.native.host import NativeApplication, _BufferedExchange, _sent_content_type
 from oldman_server.request import Request
 from oldman_server.request.types import _PARSED_URLS
 
@@ -93,3 +99,166 @@ def test_sanic_prepare_leaves_a_refused_request_to_the_python_path():
         request.sanic_prepare(app, 1, 1)
     with pytest.raises(ValueError, match="metadata"):
         request.sanic_request()
+
+
+def made(response, max_body=1 << 20):
+    """A prepared request and exchange (Python path), ready for sanic_finish."""
+    request = native("GET", b"/finish")
+    made_request, exchange = python_prepare(request, object(), max_body, float("inf"))
+    return request, made_request, exchange, response
+
+
+def python_finish(made_request, exchange, response):
+    # _call_flat's Request.respond and its inlined send(end_stream=True).
+    exchange.response = response
+    response.stream = exchange
+    made_request.responded = True
+    response._headers, headers = _sent_content_type(response.content_type)
+    exchange.result = response.status, response.body, headers
+    exchange.stage = Stage.IDLE
+
+
+def state(*values):
+    return [{name: (id(value) if name in ("stream", "response", "native", "_native_request") else value)
+             for name, value in slots(value).items()} for value in values]
+
+
+@pytest.mark.parametrize("make", [
+    lambda: text("plain"), lambda: json({"a": 1}), lambda: html("<b>x</b>"),
+    lambda: raw(b"raw", content_type="application/octet-stream"), lambda: text("created", status=201),
+])
+def test_sanic_finish_leaves_what_respond_and_send_leave(make):
+    left, right = made(make()), made(make())
+    assert left[0].sanic_finish(*left[1:]) is True
+    python_finish(*right[1:])
+    for got, want in zip(state(*left[1:]), state(*right[1:])):
+        assert got.keys() == want.keys()
+        for name in want:
+            if name not in ("stream", "response", "native", "_native_request", "app"):
+                assert got[name] == want[name], name
+    request, exchange, response = left[1:]
+    assert exchange.response is response and response.stream is exchange
+    assert request.responded and exchange.stage is Stage.IDLE
+    assert exchange.result == right[2].result
+    assert response._headers is right[3]._headers  # the one cached _SentContentType
+
+
+def headers_read():
+    response = text("x")
+    response.headers  # noqa: B018 - built: the Python path sends them
+    return response
+
+
+class TextResponse(HTTPResponse):
+    pass
+
+
+@pytest.mark.parametrize("case", [
+    "responded", "headers read", "cookie", "redirect", "no content", "not modified", "informational",
+    "too large", "str body", "no content type", "subclass", "streaming", "other response",
+    "stage", "result", "failure", "not a response", "other stream",
+])
+def test_sanic_finish_changes_nothing_it_does_not_finish(case):
+    response = {"headers read": headers_read, "redirect": lambda: redirect("/x"), "no content": empty,
+                "not modified": lambda: text("", status=304),
+                "informational": lambda: text("", status=199),
+                "no content type": lambda: raw(b"x", content_type=None),
+                "subclass": lambda: TextResponse(b"x")}.get(case, lambda: text("body"))()
+    if case == "not a response":
+        response = {"not": "a response"}
+    request, made_request, exchange, _ = made(response, max_body=2 if case == "too large" else 1 << 20)
+    if case == "responded":
+        made_request.responded = True
+    elif case == "cookie":
+        response.add_cookie("k", "v")
+    elif case == "str body":
+        response.body = "text"
+    elif case == "streaming":
+        exchange.streaming = "open"
+    elif case == "other response":
+        exchange.response = text("earlier")
+    elif case == "stage":
+        exchange.stage = Stage.RESPONSE
+    elif case == "result":
+        exchange.result = (200, b"", ())
+    elif case == "failure":
+        exchange.failure = RuntimeError()
+    elif case == "other stream":
+        made_request.stream = None
+    before = state(made_request, exchange, response) if case != "not a response" else state(made_request, exchange)
+    assert request.sanic_finish(made_request, exchange, response) is False
+    after = state(made_request, exchange, response) if case != "not a response" else state(made_request, exchange)
+    assert after == before
+
+
+def finishing_app(name, receiver=False):
+    app = OldmanServer(name, configure_logging=False)
+    if receiver:
+        @app.signal("http.lifecycle.response")
+        async def observe(request, response):
+            response.headers["x-seen"] = "1"
+
+    @app.get("/text")
+    async def text_route(request):
+        return text("plain")
+
+    @app.get("/json/<value:int>")
+    def json_route(request, value):
+        return json({"value": value})
+
+    @app.get("/cookie")
+    async def cookie(request):
+        response = text("c")
+        response.add_cookie("k", "v")
+        return response
+
+    @app.get("/large")
+    async def large(request):
+        return raw(b"x" * 4096)
+
+    @app.get("/empty")
+    async def nothing(request):
+        return empty()
+
+    @app.get("/streamed")
+    async def streamed(request):
+        await request.respond(text("early"))
+
+    @app.get("/raise")
+    async def raises(request):
+        raise ValueError("boom")
+
+    @app.post("/echo")
+    async def echo(request):
+        return raw(request.body)
+    return app
+
+
+FINISHING = [("GET", b"/text", b""), ("GET", b"/json/3", b""), ("GET", b"/cookie", b""),
+             ("GET", b"/large", b""), ("GET", b"/empty", b""), ("GET", b"/streamed", b""),
+             ("GET", b"/raise", b""), ("POST", b"/echo", b"body"), ("GET", b"/missing", b""),
+             ("POST", b"/text", b""), ("HEAD", b"/text", b"")]
+
+
+@pytest.mark.parametrize("receiver", [False, True])
+def test_the_flat_path_answers_the_same_with_and_without_sanic_finish(receiver):
+    async def scenario(natively):
+        app = finishing_app(f"finish_{receiver}_{natively}", receiver)
+        app.state.native_loop = asyncio.get_running_loop()
+        await app._startup()
+        adapter = NativeApplication(app, 2048)
+        assert adapter._flat and adapter._finish_natively is not receiver
+        adapter._finish_natively = natively and not receiver
+        results = []
+        for method, target, body in FINISHING * 2:  # the second round with each target cached
+            try:
+                results.append(await adapter._call_flat(native(method, target, body)))
+            except Exception as error:  # Compare escaping failures too.
+                results.append(("raised", type(error).__name__, str(error)))
+        return results
+
+    natively, in_python = uvloop.run(scenario(True)), uvloop.run(scenario(False))
+    for request, left, right in zip(FINISHING * 2, natively, in_python, strict=True):
+        assert left == right, request
+    statuses = [result[0] if result else None for result in natively[:len(FINISHING)]]
+    assert statuses == [200, 200, 200, "raised", 204, 200, 500, 200, 404, 405, 405]

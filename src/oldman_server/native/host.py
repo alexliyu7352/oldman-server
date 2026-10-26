@@ -31,6 +31,7 @@ from oldman_server.response.types import HEADER_TRANSLATION_TABLE, _SentContentT
 from oldman_server.router import Router
 from oldman_server.signals import RESERVED_NAMESPACES
 from oldman_server.touchup.schemes.base import BaseScheme
+from oldman_server.touchup.schemes.ode import RemoveDispatch
 from sanic_routing.exceptions import NotFound
 
 from . import _native
@@ -754,6 +755,11 @@ class NativeApplication:
             # dispatch of each http.* event without a signal is removed, so an
             # app with none dispatches nothing.
             self._call_flat = BaseScheme.build(NativeApplication._call_flat, globals(), app).__get__(self)
+        # The flat path finishes a plain response natively (sanic_finish) unless
+        # something receives http.lifecycle.response, dispatched between the
+        # respond and the send: judged as TouchUp judged that dispatch above.
+        self._finish_natively = self._flat and RemoveDispatch(
+            [signal.name for signal in app.signal_router.routes])._not_registered("http.lifecycle.response")
         # Route tables may be reset and refinalized; their Host demand is read
         # per request. Router methods replaced after startup are not supported.
         self._standard_router = self._flat and app.router._native_routing_methods_standard
@@ -1024,97 +1030,105 @@ class NativeApplication:
                             response = await response
                         await app.dispatch("http.handler.after", inline=True, context={"request": request})
 
-                    if request.responded:
-                        if response is not None:
-                            error_logger.error(
-                                "The response object returned by the route handler "
-                                "will not be sent to client. The request has already "
-                                "been responded to.")
-                        if request.stream is not None:
+                    if (self._finish_natively
+                            and not ((request.route and request.route.extra.response_middleware)
+                                     or app.response_middleware)
+                            and native.sanic_finish(request, exchange, response)):
+                        # Request.respond(response), then send(end_stream=True) completing
+                        # the exchange at once, as below: for a plain response, natively.
+                        pass
+                    else:
+                        if request.responded:
+                            if response is not None:
+                                error_logger.error(
+                                    "The response object returned by the route handler "
+                                    "will not be sent to client. The request has already "
+                                    "been responded to.")
+                            if request.stream is not None:
+                                response = request.stream.response
+                        elif response is not None:
+                            # ---- Request.respond(response) ----
+                            try:
+                                if request.stream is not None and request.stream.response:
+                                    raise ServerError("Second respond call is not allowed.")
+                            except AttributeError:
+                                pass
+                            stream = request.stream
+                            if isinstance(response, BaseHTTPResponse) and stream:
+                                if stream is exchange:
+                                    # ---- _BufferedExchange.respond ----
+                                    if exchange.stage is not Stage.HANDLER:
+                                        exchange.stage = Stage.FAILED
+                                        raise RuntimeError("Response already started")
+                                    if exchange.response is not None:
+                                        exchange.response.stream = None
+                                    exchange.response = response
+                                    response.stream = exchange
+                                else:
+                                    response = stream.respond(response)
+                                    if type(response) not in _NOT_AWAITABLE and isawaitable(response):
+                                        response = await response
+                            # An exception from response middleware goes to
+                            # app.handle_exception below (not handling an exception yet).
+                            middleware = (request.route and request.route.extra.response_middleware
+                                          ) or app.response_middleware
+                            if middleware and not request._response_middleware_started:
+                                request._response_middleware_started = True
+                                # ---- Sanic._run_response_middleware ----
+                                # `response` changes only if the whole runner returns,
+                                # as with the original assignment of its result.
+                                final = response
+                                for item in middleware:
+                                    await app.dispatch("http.middleware.before", inline=True,
+                                                       context={"request": request, "response": final},
+                                                       condition={"attach_to": "response"})
+                                    result = (item.func(request, final) if type(item) is Middleware
+                                              else item(request, final))
+                                    if type(result) is CoroutineType or (
+                                            type(result) not in _NOT_AWAITABLE
+                                            and isawaitable(result)):
+                                        result = await result
+                                    await app.dispatch("http.middleware.after", inline=True,
+                                                       context={"request": request,
+                                                                "response": result if result else final},
+                                                       condition={"attach_to": "response"})
+                                    if result:
+                                        final = result
+                                        if isinstance(final, BaseHTTPResponse):
+                                            final = request.stream.respond(final)
+                                        break
+                                response = final
+                            request.responded = True
+                        elif not hasattr(handler, "is_websocket"):
                             response = request.stream.response
-                    elif response is not None:
-                        # ---- Request.respond(response) ----
-                        try:
-                            if request.stream is not None and request.stream.response:
-                                raise ServerError("Second respond call is not allowed.")
-                        except AttributeError:
-                            pass
-                        stream = request.stream
-                        if isinstance(response, BaseHTTPResponse) and stream:
-                            if stream is exchange:
-                                # ---- _BufferedExchange.respond ----
-                                if exchange.stage is not Stage.HANDLER:
-                                    exchange.stage = Stage.FAILED
-                                    raise RuntimeError("Response already started")
-                                if exchange.response is not None:
-                                    exchange.response.stream = None
-                                exchange.response = response
-                                response.stream = exchange
-                            else:
-                                response = stream.respond(response)
-                                if type(response) not in _NOT_AWAITABLE and isawaitable(response):
-                                    response = await response
-                        # An exception from response middleware goes to
-                        # app.handle_exception below (not handling an exception yet).
-                        middleware = (request.route and request.route.extra.response_middleware
-                                      ) or app.response_middleware
-                        if middleware and not request._response_middleware_started:
-                            request._response_middleware_started = True
-                            # ---- Sanic._run_response_middleware ----
-                            # `response` changes only if the whole runner returns,
-                            # as with the original assignment of its result.
-                            final = response
-                            for item in middleware:
-                                await app.dispatch("http.middleware.before", inline=True,
-                                                   context={"request": request, "response": final},
-                                                   condition={"attach_to": "response"})
-                                result = (item.func(request, final) if type(item) is Middleware
-                                          else item(request, final))
-                                if type(result) is CoroutineType or (
-                                        type(result) not in _NOT_AWAITABLE
-                                        and isawaitable(result)):
-                                    result = await result
-                                await app.dispatch("http.middleware.after", inline=True,
-                                                   context={"request": request,
-                                                            "response": result if result else final},
-                                                   condition={"attach_to": "response"})
-                                if result:
-                                    final = result
-                                    if isinstance(final, BaseHTTPResponse):
-                                        final = request.stream.respond(final)
-                                    break
-                            response = final
-                        request.responded = True
-                    elif not hasattr(handler, "is_websocket"):
-                        response = request.stream.response
 
-                    if isinstance(response, BaseHTTPResponse):
-                        await app.dispatch("http.lifecycle.response", inline=True,
-                                           context={"request": request, "response": response})
-                        if (response.stream is exchange and type(response) in _COMPLETE_TYPES
-                                and exchange.streaming is None):
-                            # BaseHTTPResponse.send(end_stream=True): exchange.complete(),
-                            # its usual case (headers never accessed) inlined.
-                            body, status = response.body, response.status
-                            if (response._headers is None and exchange.result is None
-                                    and exchange.failure is None and type(body) is bytes
-                                    and len(body) <= exchange.max_body and type(status) is int
-                                    and status >= 200 and status != 204 and status != 304
-                                    and response.content_type is not None):
-                                response._headers, headers = _sent_content_type(response.content_type)
-                                exchange.result = status, body, headers
-                                exchange.stage = Stage.IDLE
+                        if isinstance(response, BaseHTTPResponse):
+                            await app.dispatch("http.lifecycle.response", inline=True,
+                                               context={"request": request, "response": response})
+                            if (response.stream is exchange and type(response) in _COMPLETE_TYPES
+                                    and exchange.streaming is None):
+                                # BaseHTTPResponse.send(end_stream=True): exchange.complete(),
+                                # its usual case (headers never accessed) inlined.
+                                body, status = response.body, response.status
+                                if (response._headers is None and exchange.result is None
+                                        and exchange.failure is None and type(body) is bytes
+                                        and len(body) <= exchange.max_body and type(status) is int
+                                        and status >= 200 and status != 204 and status != 304
+                                        and response.content_type is not None):
+                                    response._headers, headers = _sent_content_type(response.content_type)
+                                    exchange.result = status, body, headers
+                                    exchange.stage = Stage.IDLE
+                                else:
+                                    exchange.complete()
                             else:
-                                exchange.complete()
-                        else:
-                            await response.send(end_stream=True)
-                    elif isinstance(response, ResponseStream):
-                        resp = await response(request)
-                        await app.dispatch("http.lifecycle.response", inline=True,
-                                           context={"request": request, "response": resp})
-                        await response.eof()
-                    elif not hasattr(handler, "is_websocket"):
-                        raise ServerError(f"Invalid response type {response!r} (need HTTPResponse)")
+                                await response.send(end_stream=True)
+                        elif isinstance(response, ResponseStream):
+                            resp = await response(request)
+                            await app.dispatch("http.lifecycle.response", inline=True,
+                                               context={"request": request, "response": resp})
+                            await response.eof()
+                        elif not hasattr(handler, "is_websocket"):
+                            raise ServerError(f"Invalid response type {response!r} (need HTTPResponse)")
                 except asyncio.CancelledError as error:
                     await self._cancelled(request, exchange, error)
                 except Exception as error:
@@ -1460,5 +1474,7 @@ async def serve(app, config):
         raise BaseExceptionGroup("native lifecycle failed", errors)
 
 
-# NativeApplication._call_flat's request, as sanic_prepare makes it.
-_native.set_sanic_types(Request, _BufferedExchange, _NATIVE_UNSET, Stage.HANDLER, _PARSED_URLS)
+# NativeApplication._call_flat's request and response, as sanic_prepare and
+# sanic_finish handle them.
+_native.set_sanic_types(Request, _BufferedExchange, _NATIVE_UNSET, Stage.HANDLER, _PARSED_URLS,
+                        HTTPResponse, JSONResponse, Stage.IDLE, _SENT_CONTENT_TYPES, _sent_content_type)
