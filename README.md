@@ -4,10 +4,10 @@
 
 ## 现状
 
-- **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 12.3 万对 7.7 万 RPS（1.60 倍），回显请求体约 10.5 万对 6.6 万（1.57 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 9.7 万对 8.5 万（1.14 倍），每请求总 CPU 约为原版的 0.52–0.68 倍，每组配对都领先；io_uring 为 1.57 / 1.53 / 1.14 倍。
-- **多 worker**：同 4 个物理核，4 个同线程 worker 进程（默认布局，各一个 CPU，见「多 worker」）对原版 Sanic 4 个 worker：小 JSON 21.2 万对 10.0 万 RPS（2.11 倍，已到这台机器上压测客户端的上限），回显请求体 18.8 万对 8.7 万（2.17 倍），sleep 16.9 万对 10.5 万（1.60 倍），每请求总 CPU 约为原版的 0.46–0.62 倍，每组配对都领先；io_uring 为 2.18 / 2.25 / 1.62 倍。（AMD Ryzen 7 3800X，Ubuntu 20.04，Linux 5.15，2026-10-26；客户端为本仓库基于 Asio 的 `build/http_load`，占另外 3 个核。）
+- **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 14.2 万对 7.7 万 RPS（1.84 倍），回显请求体约 11.2 万对 6.6 万（1.69 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 10.3 万对 8.5 万（1.21 倍），每请求总 CPU 约为原版的 0.45–0.66 倍，每组配对都领先；io_uring 为 1.75 / 1.70 / 1.21 倍。
+- **多 worker**：同 4 个物理核，4 个同线程 worker 进程（默认布局，各一个 CPU，见「多 worker」）对原版 Sanic 4 个 worker：小 JSON 22.8 万对 10.0 万 RPS（2.28 倍），回显请求体 20.1 万对 8.6 万（2.33 倍），sleep 17.4 万对 10.5 万（1.66 倍），每请求总 CPU 约为原版的 0.43–0.60 倍，每组配对都领先；io_uring 为 2.38 / 2.35 / 1.66 倍。（AMD Ryzen 7 3800X，Ubuntu 20.04，Linux 5.15，2026-10-26；客户端为本仓库基于 Asio 的 `build/http_load`，占另外 3 个核。）
 - **wrk 同机参照**（2026-10-25，`probes/wrk_comparison`，web-frameworks-benchmark 的路由，256 连接，4 核）：空文本路由 21.5 万对原版 12.9 万 RPS；同样的布局里挂一个不经框架的裸函数 27.1 万，即原生主机自己的上限，框架每请求约多 4 µs（裸函数之后又快了不少，见下一条）；handler 自己花 25 µs CPU 时 9.0 万对原版 7.0 万；每个请求一条新连接时 4.4 万对 2.5 万；`app.static` 的 4 KiB 文件 2.4 万对 1.1 万，256 KiB 的文件 1.0 万对 7.1 千。
-- **与其他 Python 框架**（wrk，同机，web-frameworks-benchmark 的应用与路由，按服务端 2 个 CPU 满载时的每请求 CPU 比）：本项目 16.5 µs，在框架里排第三，排在 wred（14.2，约 120 行的 ASGI 微框架，没有中间件、信号与异常处理）与 oxapy（15.9，路由与请求处理在 Rust 里）之后；asgineer 25.0、原版 Sanic 29.4、Starlette 32.5、FastAPI 69.1。不经框架的裸函数 10.0 µs，与 Rust 写的 weft-wsgi（10.0）并列第一，C 写的 fastpysgi 10.1。挂上 oldman 的五个扩展时（4 个 CPU）本项目 26.1 µs，原版 + sanic-ext 45.8 µs（1.75 倍）。
+- **与其他 Python 框架**（wrk，同机，web-frameworks-benchmark 的应用与路由，按服务端 2 个 CPU 满载时的每请求 CPU 比）：本项目 15.6 µs，在框架里排第二，在 wred（14.2，约 120 行的 ASGI 微框架，没有中间件、信号与异常处理）之后、oxapy（15.9，路由与请求处理在 Rust 里）之前；asgineer 25.0、原版 Sanic 29.5、Starlette 32.5、FastAPI 69.6。服务端 4 个 CPU 时本项目 16.8 µs 排第三（oxapy 14.8、wred 15.2）。不经框架的裸函数 10.0 µs，与 Rust 写的 weft-wsgi（10.0）并列第一，C 写的 fastpysgi 10.1。挂上 oldman 的五个扩展时（4 个 CPU）本项目 24.8 µs，原版 + sanic-ext 46.2 µs（1.86 倍）。
 - **完整对照**：各场景的吞吐、每请求 CPU、延迟，以及各阶段相对原版的变化，见 [BENCHMARKS.md](https://github.com/alexliyu7352/oldman-server/blob/main/BENCHMARKS.md)。
 - **测试**：Sanic 与 sanic-ext 的测试集已并入本项目（`tests/framework`、`tests/ext`），按本包的行为维护，经 asyncio 服务器（`OLDMAN_SERVER_NATIVE_SERVER=false`）和经原生主机两种方式都全部通过。与 Sanic 的差异见下文。
 
