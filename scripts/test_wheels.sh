@@ -33,7 +33,8 @@ for wheel in "$@"; do
   # Not the tree's package: the installed one.
   "$venv/bin/python" -I -c "import oldman_server.native._native as n; assert '/site-packages/' in n.__file__, n.__file__" \
     || failed+=("$tag: import")
-  "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \
+  OLDMAN_SERVER_NATIVE_SERVER=false \
+    "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \
     || failed+=("$tag: framework suites (asyncio server)")
   OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 \
     "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \

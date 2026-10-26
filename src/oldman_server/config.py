@@ -44,19 +44,23 @@ DEFAULT_CONFIG = {
     "LOG_EXTRA": _default,
     "MOTD": True,
     "MOTD_DISPLAY": {},
-    # The native host (README "配置"): off by default.
+    # The native host (README "配置"): NATIVE_SERVER None serves through it
+    # on Linux when the extension is installed (oldman_server.native).
     "NATIVE_MAX_MEMORY": None,  # from REQUEST_MAX_SIZE and the shard count
     "NATIVE_MAX_REQUESTS": 4096,
     "NATIVE_MAX_RESPONSE_SIZE": 128 * 1024 * 1024,
     "NATIVE_REACTOR_BACKEND": "epoll",
     "NATIVE_SAME_THREAD": None,  # chosen by the CPUs per worker (oldman_server.native.cpus)
-    "NATIVE_SERVER": False,
+    "NATIVE_SERVER": None,
     "NATIVE_SHARD_CPUS": None,
     "NATIVE_SHARDS": None,  # up to 2
     "NATIVE_WORKER_CPUS": None,
     "NATIVE_WORKER_LISTEN": None,  # e.g. "/run/app/{n}.sock" (oldman_server.native.listen)
     "NO_COLOR": False,
     "NOISY_EXCEPTIONS": False,
+    # Libraries for LD_PRELOAD (e.g. an allocator): app.run() runs the program
+    # again with them when they are missing (Linux).
+    "PRELOAD": None,
     "PROXIES_COUNT": None,
     "REAL_IP_HEADER": None,
     "TRUSTED_PROXIES": None,
@@ -160,13 +164,14 @@ class Config(dict, metaclass=DescriptorMeta):
     NATIVE_MAX_RESPONSE_SIZE: int
     NATIVE_REACTOR_BACKEND: str
     NATIVE_SAME_THREAD: bool | None
-    NATIVE_SERVER: bool
+    NATIVE_SERVER: bool | None
     NATIVE_SHARD_CPUS: str | int | Sequence[int] | None
     NATIVE_SHARDS: int | None
     NATIVE_WORKER_CPUS: str | None
     NATIVE_WORKER_LISTEN: str | None
     NO_COLOR: bool
     NOISY_EXCEPTIONS: bool
+    PRELOAD: str | None
     PROXIES_COUNT: int | None
     REAL_IP_HEADER: str | None
     TRUSTED_PROXIES: str | Sequence[str] | None

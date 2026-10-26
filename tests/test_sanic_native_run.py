@@ -1201,3 +1201,61 @@ def test_a_graceful_stop_stops_accepting_and_finishes_what_is_in_progress(tmp_pa
             server.wait()
         server.stdout.close()
         server.stderr.close()
+
+
+@pytest.mark.parametrize("preloaded", [False, True])
+def test_preload_runs_the_program_again_with_the_libraries(preloaded):
+    # The C library (mapped in every process anyway): what is checked is the
+    # program run again with LD_PRELOAD, not what the dynamic linker does.
+    library = next(line.split()[-1] for line in Path("/proc/self/maps").read_text().splitlines()
+                   if Path(line.split()[-1]).name.startswith(("libc.so", "libc-")))
+    port = free_port()
+    lines, result = run(f'''
+        print("START " + json.dumps([os.environ.get("LD_PRELOAD"),
+                                     os.environ.get("_OLDMAN_SERVER_PRELOADED")]), flush=True)
+        app.config.PRELOAD = {library!r}
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SHARDS = 1
+        drive({port})
+        app.run(host="127.0.0.1", port={port}, motd=False)
+        print("PRELOAD " + json.dumps([os.environ.get("LD_PRELOAD"),
+                                       os.environ.get("_OLDMAN_SERVER_PRELOADED")]))
+    ''', env={"LD_PRELOAD": library if preloaded else ""})
+    assert json.loads(lines["RESULTS"])[1] == ["200", "hi"]
+    # Run once more only when LD_PRELOAD lacked the library; the marker of
+    # the second run is gone by the time the app serves.
+    assert result.stdout.count("START ") == (1 if preloaded else 2)
+    assert json.loads(lines["START"]) == [library, None if preloaded else "1"]
+    assert json.loads(lines["PRELOAD"]) == [library, None]
+
+
+def test_preload_refuses_a_missing_library(tmp_path):
+    result = subprocess.run([sys.executable, "-c", textwrap.dedent(f'''
+        from oldman_server import OldmanServer
+        app = OldmanServer("preload_missing", configure_logging=False)
+        app.config.PRELOAD = {str(tmp_path / "missing.so")!r}
+        app.run(single_process=True, motd=False)
+    ''')], capture_output=True, text=True, timeout=60, cwd=ROOT,
+        env={k: v for k, v in os.environ.items() if k != "LD_PRELOAD"})
+    assert result.returncode != 0
+    assert "PRELOAD: no such library" in result.stderr
+
+
+def test_native_server_setting(monkeypatch, caplog):
+    import oldman_server.native as native
+    monkeypatch.setattr(native, "_noted", False)
+    linux = native.NATIVE_PLATFORM
+    # Unset (the default): on Linux when the extension is installed.
+    monkeypatch.setattr(native, "_extension", True)
+    assert native.native_server({"NATIVE_SERVER": None}) is linux
+    assert native.native_server({}) is linux
+    assert native.native_server({"NATIVE_SERVER": False}) is False
+    assert native.native_server({"NATIVE_SERVER": True}) is linux
+    assert native.native_server({"NATIVE_SERVER": 1}) is linux
+    assert not caplog.records
+    # Without the extension the default serves by asyncio, with one warning.
+    monkeypatch.setattr(native, "_extension", False)
+    assert native.native_server({"NATIVE_SERVER": None}) is False
+    assert native.native_server({"NATIVE_SERVER": None}) is False
+    if linux:
+        assert len(caplog.records) == 1 and "not installed" in caplog.records[0].getMessage()

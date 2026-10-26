@@ -1,6 +1,6 @@
 # oldman-server
 
-`oldman-server`（import 名 `oldman_server`）是带 C++ 原生 HTTP/1.1 主机（基于 Asio）的 Python Web 框架，主要配合 [oldman](https://github.com/alexliyu7352/oldman) 使用，也可单独使用。框架层源自 Sanic 25.12.1 的 fork（MIT，见 `src/oldman_server/LICENSE.sanic`），接口大体沿用 Sanic，差异见下文。开启 `NATIVE_SERVER` 后，网络 IO、HTTP 解析与写出由原生 shard 承担，路由、中间件、异常处理、生命周期和业务代码仍在 Python 中执行。单进程时 shard 是另外的线程，Python 端只有一个进程、一个普通 GIL 解释器和一个 uvloop 事件循环；多 worker 时默认每个 worker 一个 CPU，shard 就在它的 Python 线程上运行（同线程模式，见下文）。
+`oldman-server`（import 名 `oldman_server`）是带 C++ 原生 HTTP/1.1 主机（基于 Asio）的 Python Web 框架，主要配合 [oldman](https://github.com/alexliyu7352/oldman) 使用，也可单独使用。框架层源自 Sanic 25.12.1 的 fork（MIT，见 `src/oldman_server/LICENSE.sanic`），接口大体沿用 Sanic，差异见下文。在 Linux 上默认由原生主机服务（`NATIVE_SERVER`）：网络 IO、HTTP 解析与写出由原生 shard 承担，路由、中间件、异常处理、生命周期和业务代码仍在 Python 中执行。单进程时 shard 是另外的线程，Python 端只有一个进程、一个普通 GIL 解释器和一个 uvloop 事件循环；多 worker 时默认每个 worker 一个 CPU，shard 就在它的 Python 线程上运行（同线程模式，见下文）。
 
 ## 现状
 
@@ -8,7 +8,7 @@
 - **多 worker**：同 4 个物理核，4 个同线程 worker 进程（默认布局，各一个 CPU，见「多 worker」）对原版 Sanic 4 个 worker：小 JSON 19.6 万对 9.4 万 RPS（2.10 倍，已接近这台机器上压测客户端的上限），回显请求体 16.8 万对 8.3 万（2.03 倍），sleep 16.0 万对 10.1 万（1.59 倍），每请求总 CPU 约为原版的 0.48–0.63 倍，每组配对都领先。（AMD Ryzen 7 3800X，Ubuntu 20.04，Linux 5.15，2026-10-25；客户端为本仓库基于 Asio 的 `build/http_load`，占另外 3 个核。）
 - **wrk 同机参照**（`probes/wrk_comparison`，web-frameworks-benchmark 的路由，256 连接，4 核）：空文本路由 21.5 万对原版 12.9 万 RPS；同样的布局里挂一个不经框架的裸函数 27.1 万，即原生主机自己的上限，框架每请求约多 4 µs；handler 自己花 25 µs CPU 时 9.0 万对原版 7.0 万；每个请求一条新连接时 4.4 万对 2.5 万；`app.static` 的 4 KiB 文件 2.4 万对 1.1 万，256 KiB 的文件 1.0 万对 7.1 千。
 - **完整对照**：各场景的吞吐、每请求 CPU、延迟，以及各阶段相对原版的变化，见 [BENCHMARKS.md](https://github.com/alexliyu7352/oldman-server/blob/main/BENCHMARKS.md)。
-- **测试**：Sanic 与 sanic-ext 的测试集已并入本项目（`tests/framework`、`tests/ext`），按本包的行为维护，经 asyncio 服务器和经原生主机（`OLDMAN_SERVER_NATIVE_SERVER=true`）两种方式都全部通过。与 Sanic 的差异见下文。
+- **测试**：Sanic 与 sanic-ext 的测试集已并入本项目（`tests/framework`、`tests/ext`），按本包的行为维护，经 asyncio 服务器（`OLDMAN_SERVER_NATIVE_SERVER=false`）和经原生主机两种方式都全部通过。与 Sanic 的差异见下文。
 
 ## 安装
 
@@ -18,7 +18,7 @@ pip install oldman-server               # 或 uv add oldman-server
 
 PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 glibc 2.28 及以上，如 Ubuntu 20.04、Debian 10、RHEL 8 及以后），CPython 3.12–3.14。wheel 只依赖 manylinux 允许的系统库，不需要另装别的库。
 
-其他平台（macOS、Windows，以及没有对应 wheel 的 Linux，如 Alpine）装的是兼容版：同一个包的纯 Python wheel，没有原生主机，由 asyncio 服务器服务（macOS 上用 uvloop，Windows 上用默认的 selector 事件循环），供本机开发和不追求性能的小服务（本地的 MCP 服务器、面板）使用，吞吐与原版 Sanic 相当。pip 在有原生 wheel 的系统上总是优先选原生的。macOS、Windows 上设了 `NATIVE_SERVER` 时记一条警告后照常由 asyncio 服务器服务，所以开发机与 Linux 生产环境可以用同一份配置；Linux 上缺少原生扩展时 `NATIVE_SERVER` 则启动报错，不会悄悄退回较慢的服务器。unix socket 在 Windows 上不可用。不提供源码包：源码包不构建原生扩展，从源码构建需要 C++23 编译器、Asio 与 liburing（见下文开发环境与「发布」）。在源码树里构建的源码包只含 `pyproject.toml` 列出的公开源码（`[tool.hatch.build.targets.sdist]`）。
+其他平台（macOS、Windows，以及没有对应 wheel 的 Linux，如 Alpine）装的是兼容版：同一个包的纯 Python wheel，没有原生主机，由 asyncio 服务器服务（macOS 上用 uvloop，Windows 上用默认的 selector 事件循环），供本机开发和不追求性能的小服务（本地的 MCP 服务器、面板）使用，吞吐与原版 Sanic 相当。pip 在有原生 wheel 的系统上总是优先选原生的。`NATIVE_SERVER` 不设（默认）时，Linux 上有原生扩展就由原生主机服务，缺少时记一条警告、由 asyncio 服务器服务，macOS、Windows 上由 asyncio 服务器服务；设为 `True` 时，macOS、Windows 上记一条警告后照常由 asyncio 服务器服务（开发机与 Linux 生产环境可以用同一份配置），Linux 上缺少原生扩展则启动报错，不会悄悄退回较慢的服务器；设为 `False` 总是用 asyncio 服务器。unix socket 在 Windows 上不可用。不提供源码包：源码包不构建原生扩展，从源码构建需要 C++23 编译器、Asio 与 liburing（见下文开发环境与「发布」）。在源码树里构建的源码包只含 `pyproject.toml` 列出的公开源码（`[tool.hatch.build.targets.sdist]`）。
 
 ## 快速开始
 
@@ -34,13 +34,13 @@ UV_PROJECT_ENVIRONMENT=build/venv312 uv sync --locked --python 3.12
 PROBE_PYTHON=$PWD/build/venv312/bin/python PROBE_PROJECT_BUILD=$PWD/build/cmake312 bash scripts/build.sh _native
 ```
 
-开启原生主机（二选一）：
+Linux 上默认由原生主机服务；要用 asyncio 服务器，设 `NATIVE_SERVER = False`（二选一）：
 
 ```python
 from oldman_server import OldmanServer
 
 app = OldmanServer("app")
-app.config.NATIVE_SERVER = True         # 或环境变量 OLDMAN_SERVER_NATIVE_SERVER=true
+app.config.NATIVE_SERVER = False        # 或环境变量 OLDMAN_SERVER_NATIVE_SERVER=false
 app.run(host="0.0.0.0", port=8000)
 ```
 
@@ -67,6 +67,7 @@ Sanic 的设置照常生效：
 
 | 设置 | 含义 |
 |---|---|
+| `NATIVE_SERVER` | 是否由原生主机服务：不设（默认）为 Linux 上有原生扩展时；`True` 为 Linux 上总是（缺少扩展时启动报错）；`False` 为从不（见「安装」） |
 | `NATIVE_SHARDS` / `NATIVE_SHARD_CPUS` | shard 线程数量（默认最多 2，取进程 CPU 集合中最后几个）或指定 CPU（只用于单进程）。多 worker 时设了 `NATIVE_SHARDS` 就保留 shard 线程，不自动用同线程模式 |
 | `NATIVE_SAME_THREAD` | 同线程模式：不另开 shard 线程，进程唯一的 shard 在 Python 线程上运行，一个进程一个 CPU，省掉两个线程之间交接请求与响应。默认不设：worker 进程的 CPU 不够每个再配一个 shard CPU 时自动启用（`fast=True` 即每个 CPU 一个 worker），除非设了 `NATIVE_SHARDS`；单进程默认不用。设 `True` / `False` 则总是 / 从不 |
 | `NATIVE_WORKER_CPUS` | 多 worker 时每个 worker 的 CPU 组，如 `"0,1,2;3,4,5"`（每组第一个给 Python，其余给 shard），或每组一个 CPU（`"0;1;2;3"`，同线程模式）；默认由主进程按 1 + `NATIVE_SHARDS` 个 CPU 一组依次切分，同线程模式每个 CPU 一组 |
@@ -75,6 +76,15 @@ Sanic 的设置照常生效：
 | `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
 | `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前、内核分不出 ring 的内存），改用 epoll 并记一条警告。同线程模式两种都能用。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
 | `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
+
+内存分配器：Python 与原生主机的内存分配大多经过 glibc 的 malloc，换成 tcmalloc 后，这台机器上服务端每请求 CPU 少约 7–11%（小 JSON 单进程 23.1 → 20.6 µs；jemalloc、mimalloc 介于两者之间，见 BENCHMARKS.md）。用 `LD_PRELOAD` 载入即可，worker 进程随之继承：
+
+```sh
+sudo apt install libtcmalloc-minimal4   # Debian / Ubuntu
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 python app.py
+```
+
+也可以在应用里设 `PRELOAD`（库路径，多个用空格或冒号分隔；只在 Linux 上生效）：`app.run()`（及 CLI）发现 `LD_PRELOAD` 里缺少它们时，带上它们把本程序重新执行一次（同样的解释器、选项与参数，之前的输出与副作用会再发生一次），worker 进程随之继承。路径不存在时启动报错；交互环境或从标准输入读入的程序无法重新执行，也报错，这时请在环境里设 `LD_PRELOAD`。
 
 ## 原生主机与 asyncio 服务器
 
@@ -192,7 +202,7 @@ server {
 
 ```sh
 python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>    # 本项目原生主机测试，每个用例独立进程
-.venv/bin/python -m pytest tests/framework tests/ext                              # 框架测试：asyncio 服务器
+OLDMAN_SERVER_NATIVE_SERVER=false .venv/bin/python -m pytest tests/framework tests/ext   # 框架测试：asyncio 服务器
 OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 .venv/bin/python -m pytest tests/framework tests/ext   # 框架测试：经原生主机
 OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SAME_THREAD=true .venv/bin/python -m pytest tests/framework tests/ext   # 同上，同线程模式
 OLDMAN_SERVER_NATIVE_SAME_THREAD=true python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>   # 原生主机测试，同线程模式

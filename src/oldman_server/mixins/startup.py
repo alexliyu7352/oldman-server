@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import sys
 
 from asyncio import (
     AbstractEventLoop,
@@ -342,6 +343,9 @@ class StartupMixin(metaclass=AppMeta):
                 app.serve()
             ```
         """  # noqa: E501
+        if self.config.PRELOAD:
+            _preload(self.config.PRELOAD)
+
         if dev:
             debug = True
             auto_reload = True
@@ -858,7 +862,8 @@ class StartupMixin(metaclass=AppMeta):
             # worker it would be bound by.
             for number in range(max(1, app.state.workers)):
                 listen_address(app.config.NATIVE_WORKER_LISTEN, number)
-        groups = worker_groups(app.config, app.state.workers)
+        # No workers is the worker manager's error to report.
+        groups = worker_groups(app.config, max(1, app.state.workers))
         if app.state.workers > len(groups):
             logger.warning(
                 f"NATIVE_SERVER: {app.state.workers} workers share "
@@ -1413,3 +1418,42 @@ class StartupMixin(metaclass=AppMeta):
             app.state.server_info.clear()
             app.router.reset()
             app.signal_router.reset()
+
+
+# Set in the program PRELOAD ran again (not OLDMAN_SERVER_*: those are settings).
+_PRELOADED = "_OLDMAN_SERVER_PRELOADED"
+
+
+def _preload(libraries: str) -> None:
+    """PRELOAD: unless LD_PRELOAD has `libraries` already (as LD_PRELOAD
+    takes them: separated by spaces or colons), run this program again, with
+    the same interpreter, options and arguments, with them added to it. The
+    worker processes inherit it. Linux only: elsewhere noted and ignored."""
+    if not sys.platform.startswith("linux"):
+        error_logger.warning(
+            "PRELOAD: preloading libraries is supported on Linux only; "
+            "ignored on %s", sys.platform)
+        return
+    present = os.environ.get("LD_PRELOAD", "").replace(":", " ").split()
+    missing = [library for library in libraries.replace(":", " ").split()
+               if library not in present]
+    if not missing:
+        os.environ.pop(_PRELOADED, None)  # not for the programs this one runs
+        return
+    for library in missing:
+        if "/" in library and not os.path.isfile(library):
+            raise ServerError(f"PRELOAD: no such library: {library}")
+    if os.environ.get(_PRELOADED):
+        raise ServerError(
+            "PRELOAD: LD_PRELOAD lost the libraries after the program ran again")
+    if sys.argv[0] in ("", "-"):
+        raise ServerError(
+            "PRELOAD runs the program again, which an interactive session or a "
+            "program read from standard input cannot be: set LD_PRELOAD in "
+            "its environment instead")
+    environment = {**os.environ, "LD_PRELOAD": " ".join([*present, *missing]),
+                   _PRELOADED: "1"}
+    logger.info("PRELOAD: running again with LD_PRELOAD=%s", environment["LD_PRELOAD"])
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execve(sys.executable, sys.orig_argv, environment)
