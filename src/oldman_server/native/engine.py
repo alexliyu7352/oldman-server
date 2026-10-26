@@ -748,7 +748,9 @@ class Engine:
             if type(answer) is CoroutineType or (type(answer) is not tuple
                                                  and inspect.isawaitable(answer)):
                 answer = await answer
-            if answer is None:
+            if type(answer) is tuple and (len(answer) == 3 or len(answer) == 5):
+                result = answer  # what the unpacking below would rebuild
+            elif answer is None:
                 result = answer  # the handler streamed its response
             elif len(answer) == 3:
                 # Preserve the legacy Engine handler's tuple-unpacking API.
@@ -772,16 +774,24 @@ class Engine:
             # The coroutine owns its bookkeeping, so no per-Task done callback is
             # scheduled. A Task cancelled before its first step never runs this;
             # _reap_unstarted_application covers that case where it is cancelled.
-            self._application_tasks.pop(request_id, None)
+            # (An eager Task that finishes in its first step is not registered yet.)
+            if self._application_tasks:
+                self._application_tasks.pop(request_id, None)
             if self._application_inbound:
                 self._application_inbound.pop(request_id, None)
             if self._application_timeouts:
                 self._application_timeouts.discard(request_id)
             if self._application_lost:
                 self._application_lost.discard(request_id)
-            if result is not None:
-                self._queue_application_result(request_id, shard, result)
-            self._application_terminal.discard(request_id)
+            terminal = self._application_terminal
+            if terminal and request_id in terminal:
+                terminal.discard(request_id)  # already answered natively
+            elif result is not None:
+                # _queue_application_result, inlined on this per-request path.
+                self._application_returns.append((request_id, shard, *result))
+                if not self._application_flush_scheduled:
+                    self._application_flush_scheduled = True
+                    self._loop.call_soon(self._flush_application)
             self._decision_stats["python_application_finished"] += 1
 
     def _lose_application(self, request_id):
@@ -959,9 +969,17 @@ class Engine:
             self._stopped.set_result(None)
 
     def _take_requests(self):
+        event, start = self._application_event, self._start_application
+        handler = self._application_handler
+        # A complete request for a coroutine handler, the usual event, is
+        # started here as _application_event would start it.
+        coroutine_handler = handler is not None and not self._application_handler_sync
         for values in self._native.drain_requests_owned(self.config.completion_batch,
                                                         self.application_connections):
-            self._application_event(values)
+            if coroutine_handler and len(values) == 3 and not self._closed:
+                start(*values, handler)
+            else:
+                event(values)
 
     def _pump(self):
         """Same-thread mode: run the shard's ready work, then take what it published."""
