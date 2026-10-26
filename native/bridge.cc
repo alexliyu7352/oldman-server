@@ -29,6 +29,7 @@ struct ApplicationRequest {
     std::string error;       // "<status>:<message>": a protocol error to render, no request
     bool unix_socket = false; // over a unix socket: no client address, server is the path
 
+    ApplicationRequest() = default;
     explicit ApplicationRequest(probe::RequestEvent&& event)
         : method(std::move(event.method)), target(std::move(event.target)),
           headers(std::move(event.headers)), body(std::move(event.body)),
@@ -192,6 +193,221 @@ struct ApplicationRequest {
     }
 };
 
+// ApplicationRequest as Python sees it: a plain C type rather than a pybind11
+// class. One is made for every request, and read a few times: without
+// pybind11's type lookups, instance registry and call dispatcher.
+struct RequestObject {
+    PyObject_HEAD
+    ApplicationRequest value;
+};
+
+PyTypeObject* request_type = nullptr;
+
+const ApplicationRequest& request_of(PyObject* self) {
+    return reinterpret_cast<RequestObject*>(self)->value;
+}
+
+// A Python result of `body`, or nullptr with its exception set.
+template <class F>
+PyObject* guarded(F&& body) {
+    try {
+        return body().release().ptr();
+    } catch (py::error_already_set& error) {
+        error.restore();
+    } catch (const py::builtin_exception& error) {
+        error.set_error();
+    } catch (const std::bad_alloc&) {
+        PyErr_NoMemory();
+    } catch (const std::exception& error) {
+        PyErr_SetString(PyExc_RuntimeError, error.what());
+    }
+    return nullptr;
+}
+
+template <class... Args>
+py::object make_request(Args&&... args) {
+    auto* self = PyObject_New(RequestObject, request_type);
+    if (!self) throw py::error_already_set();
+    try {
+        new (&self->value) ApplicationRequest(std::forward<Args>(args)...);
+    } catch (...) {
+        new (&self->value) ApplicationRequest();  // for the deallocation
+        Py_DECREF(self);
+        throw;
+    }
+    return py::reinterpret_steal<py::object>(reinterpret_cast<PyObject*>(self));
+}
+
+void request_dealloc(PyObject* self) {
+    auto* type = Py_TYPE(self);
+    reinterpret_cast<RequestObject*>(self)->value.~ApplicationRequest();
+    type->tp_free(self);
+    Py_DECREF(type);
+}
+
+// ApplicationRequest(method, target, headers, body, *, http_version="",
+// client=None, server=None). Socket metadata is optional so tests and
+// in-process measurement can build complete Sanic requests without a
+// listening runtime.
+PyObject* request_new(PyTypeObject*, PyObject* args, PyObject* kwargs) {
+    static const char* names[] = {"method", "target", "headers", "body", "http_version", "client", "server",
+                                  nullptr};
+    PyObject *method, *target, *headers, *body, *version = nullptr, *client = Py_None, *server = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOO|$OOO:ApplicationRequest", const_cast<char**>(names),
+                                     &method, &target, &headers, &body, &version, &client, &server))
+        return nullptr;
+    return guarded([&] {
+        ApplicationRequest value(method, target, headers, body);
+        try {
+            if (version) value.http_version = py::cast<std::string>(version);
+            if (client != Py_None) value.client = py::cast<std::pair<std::string, unsigned>>(client);
+            if (server != Py_None) value.server = py::cast<std::pair<std::string, unsigned>>(server);
+        } catch (const py::cast_error&) {
+            throw py::type_error("http_version must be str; client and server (host, port) pairs");
+        }
+        return make_request(std::move(value));
+    });
+}
+
+// A read-only attribute: Read(request) as a Python object.
+template <auto Read>
+PyObject* request_get(PyObject* self, void*) {
+    return guarded([self] { return py::object(Read(request_of(self))); });
+}
+
+// A method without arguments.
+template <auto Call>
+PyObject* request_call(PyObject* self, PyObject*) {
+    return guarded([self] { return py::object(Call(request_of(self))); });
+}
+
+// The header lookups' (name, default=None) arguments, by position or keyword.
+bool lookup_arguments(PyObject* const* args, Py_ssize_t count, PyObject* keywords, bool with_default,
+                      PyObject*& name, PyObject*& fallback) {
+    name = nullptr;
+    fallback = Py_None;
+    if (count > (with_default ? 2 : 1)) {
+        PyErr_SetString(PyExc_TypeError, "too many arguments");
+        return false;
+    }
+    if (count > 0) name = args[0];
+    if (count > 1) fallback = args[1];
+    const auto named = keywords ? PyTuple_GET_SIZE(keywords) : 0;
+    for (Py_ssize_t i = 0; i < named; ++i) {
+        auto* key = PyTuple_GET_ITEM(keywords, i);
+        if (!name && PyUnicode_CompareWithASCIIString(key, "name") == 0) {
+            name = args[count + i];
+        } else if (with_default && count < 2 && PyUnicode_CompareWithASCIIString(key, "default") == 0) {
+            fallback = args[count + i];
+        } else {
+            PyErr_Format(PyExc_TypeError, "unexpected argument %R", key);
+            return false;
+        }
+    }
+    if (!name) {
+        PyErr_SetString(PyExc_TypeError, "missing the header name");
+        return false;
+    }
+    return true;
+}
+
+template <auto Lookup>
+PyObject* request_lookup(PyObject* self, PyObject* const* args, Py_ssize_t count, PyObject* keywords) {
+    PyObject *name, *fallback;
+    if (!lookup_arguments(args, count, keywords, true, name, fallback)) return nullptr;
+    return guarded([&] {
+        return py::object(Lookup(request_of(self), name, py::reinterpret_borrow<py::object>(fallback)));
+    });
+}
+
+PyObject* request_header_all(PyObject* self, PyObject* const* args, Py_ssize_t count, PyObject* keywords) {
+    PyObject *name, *fallback;
+    if (!lookup_arguments(args, count, keywords, false, name, fallback)) return nullptr;
+    return guarded([&] { return request_of(self).sanic_header_all(name); });
+}
+
+PyObject* text_or_none(const std::string& value) {
+    return guarded([&] { return value.empty() ? py::object(py::none()) : py::object(py::str(value)); });
+}
+
+PyObject* address_or_none(const std::pair<std::string, unsigned>& value) {
+    return guarded([&] { return value.first.empty() ? py::object(py::none()) : py::cast(value); });
+}
+
+using Request = ApplicationRequest;
+
+PyGetSetDef request_attributes[] = {
+    {"method", request_get<[](const Request& r) { return py::str(r.method); }>, nullptr, nullptr, nullptr},
+    {"target", request_get<[](const Request& r) { return py::bytes(r.target); }>, nullptr, nullptr, nullptr},
+    {"headers", request_get<[](const Request& r) { return r.python_headers(); }>, nullptr, nullptr, nullptr},
+    {"request_id", request_get<[](const Request& r) { return py::int_(r.id); }>, nullptr, nullptr, nullptr},
+    {"shard", request_get<[](const Request& r) { return py::int_(r.shard); }>, nullptr, nullptr, nullptr},
+    {"more_body", request_get<[](const Request& r) { return py::bool_(r.more_body); }>, nullptr, nullptr,
+     nullptr},
+    {"connection", request_get<[](const Request& r) { return py::int_(r.connection); }>, nullptr, nullptr,
+     nullptr},
+    {"sequence", request_get<[](const Request& r) { return py::int_(r.sequence); }>, nullptr, nullptr, nullptr},
+    {"unix_socket", request_get<[](const Request& r) { return py::bool_(r.unix_socket); }>, nullptr, nullptr,
+     nullptr},
+    {"error", [](PyObject* self, void*) { return text_or_none(request_of(self).error); }, nullptr, nullptr,
+     nullptr},
+    {"body", request_get<[](const Request& r) { return py::bytes(r.body); }>, nullptr, nullptr, nullptr},
+    {"http_version", request_get<[](const Request& r) { return py::str(r.http_version); }>, nullptr, nullptr,
+     nullptr},
+    {"client", [](PyObject* self, void*) { return address_or_none(request_of(self).client); }, nullptr,
+     nullptr, nullptr},
+    {"server", [](PyObject* self, void*) { return address_or_none(request_of(self).server); }, nullptr,
+     nullptr, nullptr},
+    {"path", request_get<[](const Request& r) { return r.path(); }>, nullptr, nullptr, nullptr},
+    {"query_string", request_get<[](const Request& r) { return r.query_string(); }>, nullptr, nullptr,
+     nullptr},
+    {nullptr, nullptr, nullptr, nullptr, nullptr},
+};
+
+constexpr int lookup_flags = METH_FASTCALL | METH_KEYWORDS;
+
+PyMethodDef request_methods[] = {
+    {"sanic_headers", request_call<[](const Request& r) { return r.sanic_headers(); }>, METH_NOARGS, nullptr},
+    {"sanic_header", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(
+         request_lookup<[](const Request& r, PyObject* name, py::object fallback) {
+             return r.sanic_header(name, std::move(fallback));
+         }>)), lookup_flags, nullptr},
+    {"sanic_header_all", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(request_header_all)),
+     lookup_flags, nullptr},
+    {"header", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(
+         request_lookup<[](const Request& r, PyObject* name, py::object fallback) {
+             return r.header(name, std::move(fallback));
+         }>)), lookup_flags, nullptr},
+    {"header_bytes", reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)()>(
+         request_lookup<[](const Request& r, PyObject* name, py::object fallback) {
+             return r.header_bytes(name, std::move(fallback));
+         }>)), lookup_flags, nullptr},
+    {"validate_sanic_request", request_call<[](const Request& r) {
+         r.validate_sanic_request();
+         return py::none();
+     }>, METH_NOARGS, nullptr},
+    {"sanic_request", request_call<[](const Request& r) { return r.sanic_request(); }>, METH_NOARGS, nullptr},
+    {nullptr, nullptr, 0, nullptr},
+};
+
+// The type, named in the extension's module (kept for the process's life).
+void add_request_type(py::module_& m) {
+    static std::string name = py::str(m.attr("__name__")).cast<std::string>() + ".ApplicationRequest";
+    static PyType_Slot slots[] = {
+        {Py_tp_new, reinterpret_cast<void*>(request_new)},
+        {Py_tp_dealloc, reinterpret_cast<void*>(request_dealloc)},
+        {Py_tp_getset, request_attributes},
+        {Py_tp_methods, request_methods},
+        {0, nullptr},
+    };
+    static PyType_Spec spec = {name.c_str(), static_cast<int>(sizeof(RequestObject)), 0, Py_TPFLAGS_DEFAULT,
+                               slots};
+    auto* type = PyType_FromSpec(&spec);
+    if (!type) throw py::error_already_set();
+    request_type = reinterpret_cast<PyTypeObject*>(type);
+    m.add_object("ApplicationRequest", py::reinterpret_borrow<py::object>(type));
+}
+
 uint64_t response_id(py::handle value) {
     if (!PyLong_CheckExact(value.ptr())) throw py::type_error("HTTP response id must be int");
     const auto result = PyLong_AsUnsignedLongLong(value.ptr());
@@ -318,7 +534,7 @@ int inline_call(const probe::ServerConfig& config, probe::RequestEvent& event,
         }
         py::object id = py::int_(event.id);
         py::object shard = py::int_(event.shard);
-        py::object request = py::cast(ApplicationRequest(std::move(event)));
+        py::object request = make_request(std::move(event));
         PyObject* args[] = {id.ptr(), shard.ptr(), request.ptr()};
         auto result = py::reinterpret_steal<py::object>(PyObject_Vectorcall(callable, args, 3, nullptr));
         if (!result) throw py::error_already_set();
@@ -354,50 +570,7 @@ int inline_call(const probe::ServerConfig& config, probe::RequestEvent& event,
 } // namespace
 
 PYBIND11_MODULE(_native, m) {
-    py::class_<ApplicationRequest>(m, "ApplicationRequest")
-        // Socket metadata is optional so tests and in-process measurement can
-        // build complete Sanic requests without a listening runtime.
-        .def(py::init([](py::handle method, py::handle target, py::handle headers, py::handle body,
-                         std::string http_version,
-                         std::optional<std::pair<std::string, unsigned>> client,
-                         std::optional<std::pair<std::string, unsigned>> server) {
-                 auto request = std::make_unique<ApplicationRequest>(method, target, headers, body);
-                 request->http_version = std::move(http_version);
-                 if (client) request->client = std::move(*client);
-                 if (server) request->server = std::move(*server);
-                 return request;
-             }),
-             py::arg("method"), py::arg("target"), py::arg("headers"), py::arg("body"), py::kw_only(),
-             py::arg("http_version") = "", py::arg("client") = py::none(), py::arg("server") = py::none())
-        .def_property_readonly("method", [](const ApplicationRequest& r) { return py::str(r.method); })
-        .def_property_readonly("target", [](const ApplicationRequest& r) { return py::bytes(r.target); })
-        .def_property_readonly("headers", &ApplicationRequest::python_headers)
-        .def("sanic_headers", &ApplicationRequest::sanic_headers)
-        .def("sanic_header", &ApplicationRequest::sanic_header, py::arg("name"), py::arg("default") = py::none())
-        .def("sanic_header_all", &ApplicationRequest::sanic_header_all, py::arg("name"))
-        .def_readonly("request_id", &ApplicationRequest::id)
-        .def_readonly("shard", &ApplicationRequest::shard)
-        .def_readonly("more_body", &ApplicationRequest::more_body)
-        .def_readonly("connection", &ApplicationRequest::connection)
-        .def_readonly("sequence", &ApplicationRequest::sequence)
-        .def_readonly("unix_socket", &ApplicationRequest::unix_socket)
-        .def_property_readonly("error", [](const ApplicationRequest& r) -> py::object {
-            return r.error.empty() ? py::object(py::none()) : py::object(py::str(r.error));
-        })
-        .def_property_readonly("body", [](const ApplicationRequest& r) { return py::bytes(r.body); })
-        .def_property_readonly("http_version", [](const ApplicationRequest& r) { return py::str(r.http_version); })
-        .def_property_readonly("client", [](const ApplicationRequest& r) -> py::object {
-            return r.client.first.empty() ? py::object(py::none()) : py::cast(r.client);
-        })
-        .def_property_readonly("server", [](const ApplicationRequest& r) -> py::object {
-            return r.server.first.empty() ? py::object(py::none()) : py::cast(r.server);
-        })
-        .def_property_readonly("path", &ApplicationRequest::path)
-        .def_property_readonly("query_string", &ApplicationRequest::query_string)
-        .def("header", &ApplicationRequest::header, py::arg("name"), py::arg("default") = py::none())
-        .def("header_bytes", &ApplicationRequest::header_bytes, py::arg("name"), py::arg("default") = py::none())
-        .def("validate_sanic_request", &ApplicationRequest::validate_sanic_request)
-        .def("sanic_request", &ApplicationRequest::sanic_request);
+    add_request_type(m);
     py::class_<probe::ServerConfig>(m, "ServerConfig")
         .def(py::init<>())
         .def_readwrite("http_port", &probe::ServerConfig::http_port)
@@ -547,10 +720,10 @@ PYBIND11_MODULE(_native, m) {
                     // A 4-tuple marks a request whose body is still arriving ("more")
                     // or a protocol error to render ("error").
                     if (e.parameter.empty()) {
-                        item = py::make_tuple(e.id, e.shard, ApplicationRequest(std::move(e)));
+                        item = py::make_tuple(e.id, e.shard, make_request(std::move(e)));
                     } else {
                         py::str marker(e.parameter == "more" ? "more" : "error");
-                        item = py::make_tuple(e.id, e.shard, ApplicationRequest(std::move(e)), marker);
+                        item = py::make_tuple(e.id, e.shard, make_request(std::move(e)), marker);
                     }
                 } else {
                     py::object body = e.copied ? py::object(py::bytes(e.body)) : py::object(py::none());
