@@ -46,6 +46,11 @@ class ObservedRequest:
         self.reads["sanic_request"] += 1
         return self.request.target, "1.1", self.request.method, self.request.body, False
 
+    def sanic_prepare(self, app, max_body, request_max_size):
+        # As for a target not parsed yet: the flat adapter reads sanic_request.
+        self.reads["sanic_prepare"] += 1
+        return None
+
 
 @pytest.fixture
 def query_cache_constructions(monkeypatch):
