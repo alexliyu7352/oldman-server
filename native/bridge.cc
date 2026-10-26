@@ -298,6 +298,59 @@ bool checked_http_response(py::tuple item, size_t max_response_bytes,
                                          upgrade);
 }
 
+// ServerConfig::inline_call: a complete request handed to Python on its shard's
+// own thread (the same-thread mode's poll(), which holds the GIL). Python
+// answers as a queued request's handler does, without the id and shard:
+// (status, body, headers), or with a decision kind and its value (a HEAD
+// response's Content-Length, or CACHED and its lifetime), checked as
+// resolve_http_responses_checked checks them; None when the answer comes later.
+// Errors answer 500: nothing reaches the shard's handler.
+int inline_call(const probe::ServerConfig& config, probe::RequestEvent& event,
+                probe::RequestDecision& decision) {
+    if (!PyGILState_Check()) return -1;  // the poller waits in a stop: the queue takes it
+    auto* callable = static_cast<PyObject*>(config.inline_callable);
+    auto* registry = static_cast<PyObject*>(config.inline_connections);
+    try {
+        // As drain_requests_owned: a connection's first request registers it.
+        if (registry && event.sequence == 1 && event.connection) {
+            auto key = py::reinterpret_steal<py::object>(PyLong_FromUnsignedLongLong(event.connection));
+            if (!key || PyDict_SetItem(registry, key.ptr(), Py_None) < 0) throw py::error_already_set();
+        }
+        py::object id = py::int_(event.id);
+        py::object shard = py::int_(event.shard);
+        py::object request = py::cast(ApplicationRequest(std::move(event)));
+        PyObject* args[] = {id.ptr(), shard.ptr(), request.ptr()};
+        auto result = py::reinterpret_steal<py::object>(PyObject_Vectorcall(callable, args, 3, nullptr));
+        if (!result) throw py::error_already_set();
+        if (result.is_none()) return 0;
+        auto* answer = result.ptr();
+        const auto size = PyTuple_CheckExact(answer) ? PyTuple_GET_SIZE(answer) : 0;
+        bool valid = (size == 3 || size == 5) &&
+                     checked_http_response_fields(PyTuple_GET_ITEM(answer, 0), PyTuple_GET_ITEM(answer, 1),
+                                                  PyTuple_GET_ITEM(answer, 2), config.max_response_bytes,
+                                                  decision, config.inline_bytes_headers,
+                                                  config.application_dispatch_all);
+        if (valid && size == 5) {
+            auto* kind = PyTuple_GET_ITEM(answer, 3);
+            auto* value = PyTuple_GET_ITEM(answer, 4);
+            valid = PyLong_CheckExact(kind) && PyLong_CheckExact(value);
+            if (valid && py::cast<int>(py::handle(kind)) == probe::DecisionKind::cached)
+                decision.cache_ms = py::cast<uint32_t>(py::handle(value));
+            else if (valid && py::cast<int>(py::handle(kind)) == probe::DecisionKind::complete)
+                decision.content_length = py::cast<int64_t>(py::handle(value));
+            else
+                valid = false;
+        }
+        if (!valid) decision = probe::RequestDecision{decision.id, decision.shard, 500, {}, true, {}};
+        return 1;
+    } catch (py::error_already_set& error) {
+        error.discard_as_unraisable("the native host's direct call to the application");
+    } catch (...) {
+    }
+    decision = probe::RequestDecision{decision.id, decision.shard, 500, {}, true, {}};
+    return 1;
+}
+
 } // namespace
 
 PYBIND11_MODULE(_native, m) {
@@ -374,6 +427,19 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
         .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors)
         .def_readwrite("response_cache", &probe::ServerConfig::response_cache)
+        // The same-thread mode's direct call (InlineCall): callable(id, shard,
+        // request) as a queued request's handler, and the connections dict
+        // drain_requests_owned registers connections in. Python keeps both
+        // alive while the server runs: the configuration holds them borrowed.
+        .def("set_inline", [](probe::ServerConfig& c, py::object callable, py::object connections,
+                              bool bytes_headers) {
+            if (!connections.is_none() && !PyDict_CheckExact(connections.ptr()))
+                throw py::type_error("connections must be a dict");
+            c.inline_call = &inline_call;
+            c.inline_callable = callable.ptr();
+            c.inline_connections = connections.is_none() ? nullptr : connections.ptr();
+            c.inline_bytes_headers = bytes_headers;
+        })
         // (path, status, body bytes, ((name, value), ...)) for each path.
         .def_property("fixed_responses",
             [](const probe::ServerConfig& c) {

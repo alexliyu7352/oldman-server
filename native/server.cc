@@ -1336,16 +1336,24 @@ public:
             if (closing) { reject(error_status ? error_status : 503); co_return; }
             // Publishes the request (and sets root) before it waits.
             root = streamed_id ? streamed_id : (++next_id << 16) | shard;
-            ask(root, method, size, &body, streamed_id ? "more" : std::move(parameter), &input);
+            // (answer is set by an answered direct call: no Decision of its own
+            // in this coroutine's frame, which every request allocates.)
+            int inline_outcome = -1;
+            if (shared.config.inline_call && !streamed_id && parameter.empty())
+                inline_outcome = call_inline(root, method, body, input, answer);
+            if (inline_outcome < 0)
+                ask(root, method, size, &body, streamed_id ? "more" : std::move(parameter), &input);
             announce();
-            connection.handling = root;
-            if (connection.peer_gone) {
-                // Gone before the request reached Python (a reset while the
-                // head or body arrived): it is cancelled as it starts.
-                connection.peer_gone = false;
-                peer_left(connection, connection_key);
+            if (!answer) {
+                connection.handling = root;
+                if (connection.peer_gone) {
+                    // Gone before the request reached Python (a reset while the
+                    // head or body arrived): it is cancelled as it starts.
+                    connection.peer_gone = false;
+                    peer_left(connection, connection_key);
+                }
+                answer = co_await decide(root, method);
             }
-            answer = co_await decide(root, method);
         } catch (const QueueFull&) {
             // Overloaded: Python has max_requests new requests to take first.
             ++counts.rejected;
@@ -1702,6 +1710,45 @@ public:
     // A request for Python, published under `id` with its waiter; decide()
     // waits for the answer. QueueFull when Python has max_requests new
     // requests to take first.
+    // Same-thread mode (ServerConfig::inline_call): the request goes to Python
+    // by a direct call here instead of the queue. 1: answered, `answer` set;
+    // 0: Python answers later, as a queued request (its waiter is made here);
+    // -1: Python was not called and `input` is untouched: queue it (ask).
+    int call_inline(uint64_t id, const std::string& method, const std::string& body,
+                    ApplicationInput& input, std::optional<Decision>& answer) {
+        RequestEvent event{id, shard, method, "application", body.size(), true, {}};
+        event.target = std::move(input.target);
+        event.http_version = std::move(input.http_version);
+        event.client = std::move(input.client);
+        event.server = std::move(input.server);
+        event.headers = std::move(input.headers);
+        event.connection = input.connection;
+        event.sequence = input.sequence;
+        event.unix_socket = input.unix_socket;
+        event.body = body;
+        RequestDecision decision{id, shard, 500, {}, true, {}};
+        const int outcome = shared.config.inline_call(shared.config, event, decision);
+        if (outcome < 0) {
+            // Not taken: the fields go back for ask().
+            input.target = std::move(event.target);
+            input.http_version = std::move(event.http_version);
+            input.client = std::move(event.client);
+            input.server = std::move(event.server);
+            input.headers = std::move(event.headers);
+            return outcome;
+        }
+        ++counts.decisions;
+        counts.body_bytes_to_python += body.size();
+        if (outcome == 0) {
+            waiters.try_emplace(id, io);
+            ++counts.pending_decisions;
+            return 0;
+        }
+        answer.emplace(Decision{decision.code, std::move(decision.body), id, decision.retire,
+                                std::move(decision.headers), decision.kind, decision.content_length});
+        answer->cache_ms = decision.cache_ms;
+        return 1;
+    }
     void ask(uint64_t id, const std::string& method, size_t bytes, const std::string* copied,
              std::string parameter, ApplicationInput* input) {
         waiters.try_emplace(id, io);

@@ -282,7 +282,7 @@ class Engine:
     async def open(cls, config: Config, *, application_handler=None,
                    application_bytes_headers=False, persistent=False,
                    application_error_handler=None, application_connections=None,
-                   opened=None):
+                   opened=None, application_inline=True):
         """persistent: share the process's native runtime across Engines; this
         Engine starts and stops only the network server, so the process can
         serve again later (requires an HTTP ServerConfig).
@@ -300,7 +300,12 @@ class Engine:
             (a state with connection_lost(), or None or False while none exists;
             False: its peer left).
         A connection maps to None until the handler stores its state there; on
-        close the entry is removed and the state's connection_lost() called."""
+        close the entry is removed and the state's connection_lost() called.
+        application_inline: in the same-thread mode a plain function handler is
+        called by the shard itself for a complete request, without the queue
+        (a coroutine handler, or an awaitable answer, still goes through it:
+        its batches keep the Python work together); False queues every
+        request, as with shard threads."""
         if (not config.shard_cpus or len(set(config.shard_cpus)) != len(config.shard_cpus)
                 or not set(config.shard_cpus) <= os.sched_getaffinity(0)):
             raise ValueError("shard_cpus must be distinct available CPUs")
@@ -383,6 +388,12 @@ class Engine:
         # drained, without a Task (_serve_now).
         self._application_handler_sync = (application_handler is not None
                                           and not inspect.iscoroutinefunction(application_handler))
+        self._application_inline = bool(application_inline)
+        self._inline = None  # the direct call while the server runs (see _serve_inline)
+        # The request a direct call is running, and whether it queued pieces of
+        # a stream meanwhile (its answer then follows them through the queue).
+        self._inline_id = None
+        self._inline_streamed = False
         self._application_error_handler = application_error_handler
         self.application_connections = (application_connections
                                         if application_connections is not None else {})
@@ -422,6 +433,13 @@ class Engine:
         server = _native.ServerConfig()
         for key, value in vars(c.server).items():
             setattr(server, key, value)
+        if self._same_thread and self._application_handler_sync and self._application_inline:
+            # The shard calls the handler itself for a complete request (on this
+            # thread, inside poll()): no queue, no drain. Held here while the
+            # server runs; the configuration only borrows it.
+            self._inline = self._serve_inline
+            server.set_inline(self._inline, self.application_connections,
+                              self._application_bytes_headers)
         if self._persistent:
             return await self._start_persistent(server)
         if self._opened is not None:
@@ -645,6 +663,8 @@ class Engine:
         self._queue_stream_item((request_id, shard, 0, b"", (), STREAM_ABORT))
 
     def _queue_stream_item(self, item):
+        if item[0] == self._inline_id:
+            self._inline_streamed = True
         self._application_returns.append(item)
         if not self._application_flush_scheduled:
             self._application_flush_scheduled = True
@@ -665,17 +685,31 @@ class Engine:
             if self._same_thread and self._reactor_fd >= 0:
                 self._pump()  # write the responses now
 
-    def _serve_now(self, request_id, shard, request, handler):
+    def _serve_inline(self, request_id, shard, request):
+        """The shard's direct call for a complete request to a plain function
+        handler (see open): the answer, or None when it comes later."""
+        if self._closed:
+            return 503, b"", ()
+        self._inline_id, self._inline_streamed = request_id, False
+        try:
+            return self._serve_now(request_id, shard, request, self._application_handler, True)
+        finally:
+            self._inline_id = None
+
+    def _serve_now(self, request_id, shard, request, handler, inline=False):
         """_serve_application for a plain function handler: called at once, in
         a copy of the context as a Task would run it, and its answer queued
-        without a Task; an awaitable answer is awaited in one as before."""
+        without a Task (inline: returned, None when it comes later); an
+        awaitable answer is awaited in one as before."""
         stats = self._decision_stats
         result = (500, b"", ())
         try:
             answer = contextvars.copy_context().run(handler, request)
             if type(answer) is not tuple and answer is not None and inspect.isawaitable(answer):
-                self._start_application(request_id, shard, request, lambda _: answer)
-                return
+                # In a direct call its Task starts with the next turn of the
+                # loop, with the queue's other work, rather than in the call.
+                self._start_application(request_id, shard, request, lambda _: answer, eager=not inline)
+                return None
             stats["python_application_started"] += 1
             if answer is None:
                 result = answer  # the handler streamed its response
@@ -696,9 +730,11 @@ class Engine:
             stats["python_application_started"] += 1
             stats["python_application_errors"] += 1
             raise
+        stats["python_application_finished"] += 1
+        if inline and not self._inline_streamed:
+            return result
         if result is not None:
             self._queue_application_result(request_id, shard, result)
-        stats["python_application_finished"] += 1
 
     async def _serve_application(self, request_id, shard, request, handler):
         """Queue a complete owned response while the Task still owns its wrapper."""
@@ -875,12 +911,12 @@ class Engine:
             return
         self._start_application(request_id, shard, request, handler)
 
-    def _start_application(self, request_id, shard, request, handler):
+    def _start_application(self, request_id, shard, request, handler, eager=True):
         """A Task running _serve_application for the request."""
         try:
             coroutine = self._serve_application(request_id, shard, request, handler)
             try:
-                if self._same_thread and self._loop.get_task_factory() is None:
+                if eager and self._same_thread and self._loop.get_task_factory() is None:
                     # Started at once: a handler that does not suspend answers
                     # in this drain, without a turn of the loop. (Not with
                     # shard threads: answering sooner makes their batches,

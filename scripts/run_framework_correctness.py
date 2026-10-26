@@ -25,7 +25,8 @@ def main():
         files.extend(["test_sanic_native.py", "test_sanic_touchup.py",
                       "test_sanic_request.py", "test_sanic_response.py", "test_sanic_flat.py", "test_sanic_http1.py", "test_sanic_native_run.py",
                       "test_sanic_websocket.py", "test_sanic_files.py", "test_sanic_multipart.py",
-                      "test_sanic_native_workers.py", "test_native_fixed_cache.py"])
+                      "test_sanic_native_workers.py", "test_native_fixed_cache.py",
+                      "test_native_inline.py"])
     for filename in files:
         tree = ast.parse((ROOT / "tests" / filename).read_text())
         names = [node.name for node in tree.body

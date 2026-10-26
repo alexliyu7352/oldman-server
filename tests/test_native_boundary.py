@@ -63,7 +63,10 @@ async def test_native_checked_batch_isolates_bad_replies_and_owns_request():
     replies = [(201, b"valid-first", (("X-Latin", "caf\xe9"),)), *invalid,
                (202, b"valid-last", ())]
     cfg = config(application_dispatch_all=True, decision_timeout_ms=3000)
-    engine = await api.Engine.open(cfg, application_handler=lambda req: (200, b"", ()))
+    # Queued, not called directly by the shard (the same-thread mode's default):
+    # the batch API is what is tested.
+    engine = await api.Engine.open(cfg, application_handler=lambda req: (200, b"", ()),
+                                   application_inline=False)
     jobs = []
     retained = []
     try:

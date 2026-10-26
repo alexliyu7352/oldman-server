@@ -11,6 +11,15 @@
 namespace asio { class io_context; }
 
 namespace probe {
+struct ServerConfig;
+struct RequestEvent;
+struct RequestDecision;
+// Same-thread mode: how a shard hands a complete request to Python by a direct
+// call on its own thread (inside poll(), which holds the GIL) instead of the
+// queue. Returns 1 with `decision` set (answered: Python keeps nothing), 0 when
+// Python answers later as it does a queued request, or -1 without having taken
+// `event` (it cannot be called now): the shard queues it.
+using InlineCall = int (*)(const ServerConfig& config, RequestEvent& event, RequestDecision& decision);
 // A response the host writes itself, without Python (a fixed or cached one):
 // its Content-Length, Date and Connection headers are added as for any other.
 struct StoredResponse {
@@ -75,6 +84,13 @@ struct ServerConfig {
     // decision) and answer requests for the same target with it until it
     // expires (see Service::stored_response).
     bool response_cache = false;
+    // Same-thread mode only: the direct call to Python (see InlineCall) and
+    // what it needs, set by the Python bridge, whose objects these are (the
+    // Python side keeps them alive while the server runs).
+    InlineCall inline_call = nullptr;
+    void* inline_callable = nullptr;
+    void* inline_connections = nullptr;
+    bool inline_bytes_headers = false;
     bool enabled() const { return http_port || listen_fd >= 0 || worker_listen_fd >= 0; }
 };
 // One worker process's line in the shared accept counts. connections: the
