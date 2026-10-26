@@ -282,7 +282,7 @@ class Engine:
     async def open(cls, config: Config, *, application_handler=None,
                    application_bytes_headers=False, persistent=False,
                    application_error_handler=None, application_connections=None,
-                   opened=None, application_inline=True):
+                   opened=None, application_inline=True, application_settles=False):
         """persistent: share the process's native runtime across Engines; this
         Engine starts and stops only the network server, so the process can
         serve again later (requires an HTTP ServerConfig).
@@ -305,7 +305,13 @@ class Engine:
         called by the shard itself for a complete request, without the queue
         (a coroutine handler, or an awaitable answer, still goes through it:
         its batches keep the Python work together); False queues every
-        request, as with shard threads."""
+        request, as with shard threads.
+        application_settles: the coroutine handler settles its requests itself.
+        It is called as handler(request, engine, request_id, shard), its
+        coroutine is the request's Task, and it ends as _serve_application
+        does around a handler: engine._application_error(request_id, error)
+        for what it raised, then engine._application_finished(request_id,
+        shard, answer). That saves a second coroutine per request."""
         if (not config.shard_cpus or len(set(config.shard_cpus)) != len(config.shard_cpus)
                 or not set(config.shard_cpus) <= os.sched_getaffinity(0)):
             raise ValueError("shard_cpus must be distinct available CPUs")
@@ -389,6 +395,7 @@ class Engine:
         self._application_handler_sync = (application_handler is not None
                                           and not inspect.iscoroutinefunction(application_handler))
         self._application_inline = bool(application_inline)
+        self._application_settles = bool(application_settles)
         self._inline = None  # the direct call while the server runs (see _serve_inline)
         # The request a direct call is running, and whether it queued pieces of
         # a stream meanwhile (its answer then follows them through the queue).
@@ -759,40 +766,49 @@ class Engine:
             else:  # plus the decision kind and a HEAD response's Content-Length
                 status, body, headers, kind, length = answer
                 result = (status, body, headers, kind, length)
-        except asyncio.CancelledError:
-            # The response deadline (application_timeout) or a cancellation.
-            result = (504 if request_id in self._application_timeouts else 503, b"", ())
-        except TimeoutError:  # Raised by the handler itself.
-            result = (504, b"", ())
-        except Exception:
-            self._decision_stats["python_application_errors"] += 1
-            result = (500, b"", ())
-        except BaseException:
-            self._decision_stats["python_application_errors"] += 1
-            raise
+        except BaseException as error:
+            result = self._application_error(request_id, error)
         finally:
-            # The coroutine owns its bookkeeping, so no per-Task done callback is
-            # scheduled. A Task cancelled before its first step never runs this;
-            # _reap_unstarted_application covers that case where it is cancelled.
-            # (An eager Task that finishes in its first step is not registered yet.)
-            if self._application_tasks:
-                self._application_tasks.pop(request_id, None)
-            if self._application_inbound:
-                self._application_inbound.pop(request_id, None)
-            if self._application_timeouts:
-                self._application_timeouts.discard(request_id)
-            if self._application_lost:
-                self._application_lost.discard(request_id)
-            terminal = self._application_terminal
-            if terminal and request_id in terminal:
-                terminal.discard(request_id)  # already answered natively
-            elif result is not None:
-                # _queue_application_result, inlined on this per-request path.
-                self._application_returns.append((request_id, shard, *result))
-                if not self._application_flush_scheduled:
-                    self._application_flush_scheduled = True
-                    self._loop.call_soon(self._flush_application)
-            self._decision_stats["python_application_finished"] += 1
+            self._application_finished(request_id, shard, result)
+
+    def _application_error(self, request_id, error):
+        """The answer for a request whose handler raised `error`; what is
+        neither an Exception nor a cancellation is counted and raised again."""
+        if isinstance(error, asyncio.CancelledError):
+            # The response deadline (application_timeout) or a cancellation.
+            return (504 if request_id in self._application_timeouts else 503, b"", ())
+        if isinstance(error, TimeoutError):  # Raised by the handler itself.
+            return (504, b"", ())
+        self._decision_stats["python_application_errors"] += 1
+        if isinstance(error, Exception):
+            return (500, b"", ())
+        raise error
+
+    def _application_finished(self, request_id, shard, result):
+        """A served request's bookkeeping, and its answer queued (None: the
+        handler streamed its response)."""
+        # The coroutine owns its bookkeeping, so no per-Task done callback is
+        # scheduled. A Task cancelled before its first step never runs this;
+        # _reap_unstarted_application covers that case where it is cancelled.
+        # (An eager Task that finishes in its first step is not registered yet.)
+        if self._application_tasks:
+            self._application_tasks.pop(request_id, None)
+        if self._application_inbound:
+            self._application_inbound.pop(request_id, None)
+        if self._application_timeouts:
+            self._application_timeouts.discard(request_id)
+        if self._application_lost:
+            self._application_lost.discard(request_id)
+        terminal = self._application_terminal
+        if terminal and request_id in terminal:
+            terminal.discard(request_id)  # already answered natively
+        elif result is not None:
+            # _queue_application_result, inlined on this per-request path.
+            self._application_returns.append((request_id, shard, *result))
+            if not self._application_flush_scheduled:
+                self._application_flush_scheduled = True
+                self._loop.call_soon(self._flush_application)
+        self._decision_stats["python_application_finished"] += 1
 
     def _lose_application(self, request_id):
         entry = self._application_tasks.get(request_id)
@@ -922,9 +938,13 @@ class Engine:
         self._start_application(request_id, shard, request, handler)
 
     def _start_application(self, request_id, shard, request, handler, eager=True):
-        """A Task running _serve_application for the request."""
+        """A Task running _serve_application for the request (or the handler
+        alone when it settles the request itself; see open)."""
         try:
-            coroutine = self._serve_application(request_id, shard, request, handler)
+            if self._application_settles and handler is self._application_handler:
+                coroutine = handler(request, self, request_id, shard)
+            else:
+                coroutine = self._serve_application(request_id, shard, request, handler)
             try:
                 if eager and self._same_thread and self._loop.get_task_factory() is None:
                     # Started at once: a handler that does not suspend answers
