@@ -22,6 +22,8 @@ oldman-server 与原版 Sanic 25.12.1 在同一台机器、同样 CPU 下的完�
 
 每请求的服务端 CPU 都低于原版（原版的 0.48–0.78 倍）。
 
+2026-10-26 加入 `ad2e4ce`–`b6ee4a6`（快速路径上的信号与更便宜的 CORS、Linux 默认用原生主机、固定响应与原生缓存、删去用不到的 Sanic 遗留）后，在桌面安静时（服务端核上其他程序 0–0.2 核）重跑了两组门槛，每一对仍领先：单进程小 JSON / 回显 / 等计时器 111,973 / 90,554 / 93,761 对原版 75,677 / 65,165 / 83,423 RPS（1.48 / 1.39 / 1.12 倍），4 个 worker 195,010 / 171,126 / 161,286 对 97,603 / 84,341 / 102,648（2.00 / 2.03 / 1.57 倍）。单进程小 JSON 比上表低约 3%；同一时段与 `7c6113b`（2026-10-24 的最好成绩）交替量单进程主线程，小 JSON 8.89 对 9.03 µs、回显 11.21 对 11.29 µs，差在噪声内。README「现状」的门槛数字取这一轮。
+
 ## 环境
 
 - 机器：AMD Ryzen 7 3800X（8 核 16 线程），32 GB 内存，Ubuntu 20.04.6，Linux 5.15。
@@ -131,6 +133,78 @@ oldman-server 与原版 Sanic 25.12.1 在同一台机器、同样 CPU 下的完�
 
 `378f09e` 之前，`file()`（`app.static` 也用它）把整个文件读成 Python 的 bytes，原生主机再复制一份写出，文件内容在内存里多复制了几次，还要为每个响应重新分配大块内存（剖析里缺页与内存分配约占三成 CPU）。256 KiB 的文件在默认布局下因此比原版慢 14%（6,092 对 7,057，每请求 CPU 655.5 对 555.9 µs）。现在 128 KiB 以上的文件不经 Python，由原生主机的文件线程读出、shard 直接写入连接（与 `file_stream()` 相同），是原版的 1.42 倍。更小的文件读进响应反而更省（逐个大小比较，两种做法大约在 100 KiB 打平），所以照旧；4 KiB 一列与改动前相同（之前 23,686 对 11,520）。
 
+## 与其他 Python 框架（wrk，4 核）
+
+2026-10-25，本项目代码为 `793c489`。[web-frameworks-benchmark](https://web-frameworks-benchmark.netlify.app/) 的 Python 应用（the-benchmarker/web-frameworks 的提交 `eb2f909`；网站同样用 CPython 3.14）照它们自己的写法与配置运行，与本项目同机、同 4 个服务端 CPU：
+
+- 三条路由与网站相同：`GET /` 空响应、`GET /user/0` 回 `0`、`POST /user` 空响应。每个服务启动后先核对三条路由的响应，本项目另查运行在 uvloop 上。
+- 每个服务 4 个 worker 或进程（按 CPU 数决定的设 `PYTHON_CPU_COUNT=4`）；本项目为 4 个同线程 worker。
+- wrk 3 个线程在另外 3 个 CPU；64 与 256 连接，每格 2 轮、交替顺序，每轮 3 秒预热、10 秒测量。全部 2xx，没有 socket 错误；服务端 CPU 上其他程序的占用不超过 0.08 核。
+- 版本：fastpysgi 0.6、weft-server 0.1.1、wred 0.13、oxapy 0.11.5、Robyn 0.88.0、Emmett 2.8.2（Granian 2.8.5）、Sanic 25.12.1、BlackSheep 2.6.4、Starlette 1.10.0、Litestar 2.25.0、FastAPI 0.162.0、lihil 0.2.41、asgineer 0.9.5；ASGI 应用由 uvicorn 0.54.0 服务；用 uvloop 的都是 0.22.1。
+- 网站上的 peregrine（只有 manylinux_2_35 的 wheel）与 socketify（没有 CPython 3.14 的 wheel）在 Ubuntu 20.04 上装不上，没有测。
+
+按每请求 CPU 排序（服务端进程树的 CPU 时间除以请求数，三条路由、两种连接数的平均）。标 * 的格子 wrk 的 3 个核已跑满（客户端约 2.9–3.0 核），RPS 只是下限，这时应看每请求 CPU。
+
+**不经框架的函数**（服务器上直接挂一个手写判断路径的函数）
+
+| 服务 | 服务器 | 每请求 CPU µs | RPS，64 连接 | RPS，256 连接 |
+|---|---|---:|---:|---:|
+| weft-wsgi | weft（Rust） | 11.9 | 300,459* | 302,512* |
+| fastpysgi-wsgi | fastpysgi（C） | 12.5 | 302,055* | 296,292* |
+| weft-asgi | weft（Rust） | 14.5 | 261,770 | 284,567* |
+| 本项目裸函数 | 原生主机，4 个同线程进程 | 16.6 | 232,462 | 248,148 |
+
+**框架**
+
+| 服务 | 服务器 | 每请求 CPU µs | RPS，64 连接 | RPS，256 连接 |
+|---|---|---:|---:|---:|
+| oxapy | oxapy（Rust），同步 handler | 15.6 | 215,614 | 248,789 |
+| wred | weft（Rust） | 16.3 | 234,124 | 253,672 |
+| 本项目 | 原生主机，4 个同线程 worker | 21.0 | 183,048 | 195,297 |
+| Emmett | Granian（Rust） | 28.5 | 126,114 | 145,024 |
+| asgineer | uvicorn | 29.4 | 128,267 | 142,974 |
+| lihil | uvicorn | 31.1 | 124,454 | 133,077 |
+| BlackSheep | uvicorn | 33.0 | 116,150 | 125,317 |
+| 原版 Sanic | Sanic | 33.4 | 118,411 | 119,473 |
+| Starlette | uvicorn | 38.4 | 102,215 | 104,926 |
+| Robyn | Robyn（Rust） | 53.1 | 68,922 | 81,175 |
+| Litestar | uvicorn | 58.4 | 67,690 | 68,950 |
+| FastAPI | uvicorn | 79.2 | 50,912 | 49,803 |
+
+本项目不是最快的：框架里排第三，在 oxapy 与 wred 之后（两者的路由与请求处理在 Rust 里，Python 端只有 handler，没有 Sanic 那样的中间件、信号、异常处理与请求对象）；不经框架的函数则比 C / Rust 写的 WSGI 服务器每请求多约 5 µs。用 perf 对照本项目裸函数与 fastpysgi（256 连接，CPU 0–3 采样 15 秒），多出的都在用户态：原生主机约 3 对 1.2 µs（请求在 shard 与 Python 之间交接时的容器、请求头的复制、pybind11 调用，没有单个热点），Python 端约 2.5 对 0.8 µs，glibc 的 malloc / free 约 1.1 µs（换成 tcmalloc 能省下大半，见下文「内存分配器」）。
+
+## 挂上 oldman 的五个扩展（wrk，4 核）
+
+同一套 wrk 对照，两边都照 oldman 的方式挂上依赖注入、OpenAPI、HTTP（CORS 等）、健康检查与模板五个扩展：`Extend(app, config=Config(oas=False, oas_autodoc=False, templating_enable_async=True, logging=False), extensions=[...], built_in_extensions=False)`。原版用 sanic-ext 25.12.0（pydantic 2.12.5），本项目用随包的 `oldman_server.ext`；两边的响应头逐条相同，都运行在 uvloop 上。每请求 CPU 为三条路由、两种连接数的平均；每组的四个服务在同一时段交替。
+
+| 服务 | 每请求 CPU µs | RPS，64 连接 | RPS，256 连接 |
+|---|---:|---:|---:|
+| 2026-10-25，本项目 `793c489` | | | |
+| 原版 Sanic | 33.5 | 116,686 | 120,756 |
+| 原版 Sanic + sanic-ext | 49.1 | 79,576 | 82,609 |
+| 本项目 | 20.8 | 183,615 | 198,520 |
+| 本项目 + ext | 48.4 | 81,076 | 83,459 |
+| 2026-10-26，本项目 `7e99767` | | | |
+| 原版 Sanic | 33.7 | 116,740 | 119,505 |
+| 原版 Sanic + sanic-ext | 49.2 | 80,230 | 81,471 |
+| 本项目 | 21.0 | 179,426 | 200,845 |
+| 本项目 + ext | 30.6 | 126,772 | 134,114 |
+
+`793c489` 挂上扩展后每请求多约 28 µs（原版多约 16 µs），领先完全消失：依赖注入扩展为每个应用注册了一个 `http.routing.after` 信号，原生主机因此从快速路径退回一般路径；CORS 钩子为了检查响应头而建出整份响应头，响应不能再走快速的头部编码。`ad2e4ce` 起快速路径也按一般路径的位置触发这类信号，信号分派先查启动时存下的结果，CORS 不再建响应头：扩展只多约 10 µs，对原版 + sanic-ext 为 1.6 倍。
+
+## 内存分配器
+
+单进程配对对照的设置（服务端 3 核：1 个 Python 线程 + 2 个 shard），本项目 `793c489` 以 `LD_PRELOAD` 换用不同的分配器，3 轮轮换顺序，取中位数。`LD_PRELOAD` 也作用到压测客户端，所以看服务端的每请求 CPU，不看 RPS。
+
+| 分配器 | 小 JSON：服务端 µs | 主线程 µs | 回显请求体：服务端 µs | 主线程 µs |
+|---|---:|---:|---:|---:|
+| glibc 2.31（默认） | 23.1 | 9.49 | 27.3 | 11.01 |
+| tcmalloc（gperftools 2.7，`libtcmalloc_minimal.so.4`） | 20.6 | 8.28 | 24.8 | 10.34 |
+| jemalloc 5.2.1 | 21.6 | 8.67 | 26.0 | 10.78 |
+| mimalloc 2.1.7 | 21.9 | 8.88 | 25.9 | 10.90 |
+
+tcmalloc 在每一轮都最快，服务端每请求少约 9–11%；前一天另一组 3 轮的结果相同（小 JSON 23.0 → 21.4 µs，回显 27.8 → 25.2 µs）。用法见 README「配置」末尾。
+
 ## 各阶段的变化
 
 ### 对原版的倍数
@@ -204,6 +278,9 @@ python probes/wrk_comparison/run.py --out build/wrk-work --path /work --connecti
 python probes/wrk_comparison/run.py --out build/wrk-close --close --connections 32,256 --services candidate,candidate-shards,bare,stock,candidate-io_uring
 python probes/wrk_comparison/run.py --out build/wrk-small --path /static/small.bin --connections 256 --services candidate,candidate-shards,stock,candidate-io_uring
 python probes/wrk_comparison/run.py --out build/wrk-large --path /static/large.bin --connections 64 --services candidate,candidate-shards,stock,candidate-io_uring
+bash probes/framework_comparison/setup.sh                                   # web-frameworks-benchmark 的应用与各自的环境（build/framework-comparison）
+python probes/framework_comparison/drive.py build/frameworks --services oldman-server-bare,fastpysgi-wsgi,weft-wsgi,weft-asgi,oldman-server,wred,oxapy,robyn,emmett,sanic,blacksheep,starlette,litestar,fastapi,lihil,asgineer
+python probes/framework_comparison/drive.py build/frameworks-ext --services sanic,oldman-server,sanic-ext5,oldman-server-ext5   # 挂上扩展的一对
 ```
 
 配对对照的每个窗口都写入 `row.json`（吞吐、延迟、每请求 CPU、服务端核上其他进程的占用），wrk 的每个窗口写入 `rows.jsonl`。
