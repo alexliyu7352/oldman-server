@@ -736,6 +736,22 @@ class Service {
         co_await timed_write(connection, output);
         output.clear();
     }
+    // What the socket takes at once, as it usually takes a batch of responses
+    // into its send buffer: one non-blocking send, without suspending, without
+    // an Asio operation and without a write deadline. True when all of
+    // `output` went (it is cleared); otherwise what went is dropped from it and
+    // the rest goes through flush_output, which also reports a failure.
+    static bool send_now(AppConnection& connection, std::string& output) {
+        if (output.empty()) return true;
+        const ssize_t sent = ::send(connection.socket.native_handle(), output.data(), output.size(),
+                                    MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (sent == static_cast<ssize_t>(output.size())) {
+            output.clear();
+            return true;
+        }
+        if (sent > 0) output.erase(0, static_cast<size_t>(sent));
+        return false;
+    }
     // A sibling counts while its heartbeat (every 50 ms) is this recent: one
     // that crashed or hangs holds the others back for at most this long.
     static constexpr uint64_t accept_stale_ms = 200;
@@ -997,7 +1013,7 @@ public:
                                                       config.max_header_bytes,
                                                       std::numeric_limits<size_t>::max(), head);
                 if (parsed == http1::Parse::incomplete) {
-                    co_await flush_output(connection, output);
+                    if (!send_now(connection, output)) co_await flush_output(connection, output);
                     buffer.erase(0, consumed);
                     consumed = 0;
                     if (!co_await read_more()) break;

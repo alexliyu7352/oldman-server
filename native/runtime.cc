@@ -60,10 +60,14 @@ int reactor_descriptor_of(asio::io_context& context) {
 // rather than Asio's 16384: the kernel allocates a ring in physically
 // contiguous pages, which a fragmented machine may lack for a large one (setup
 // then fails with ENOMEM); with fewer entries Asio submits sooner, and the
-// kernel keeps completions that overflow the queue.
+// kernel keeps completions that overflow the queue. A read that returns less
+// than its buffer has drained the socket (epoll's edge-triggered): the next
+// read waits for readiness, rather than first trying a recv that would fail,
+// as the read for a connection's next request would (the client sends it only
+// after taking the response just written).
 std::unique_ptr<asio::io_context> make_context() {
-    return std::make_unique<asio::io_context>(
-        asio::config_from_string("scheduler.concurrency_hint=1\nreactor.io_uring_ring_size=1024"));
+    return std::make_unique<asio::io_context>(asio::config_from_string(
+        "scheduler.concurrency_hint=1\nreactor.io_uring_ring_size=1024\nreactor.reset_edge_on_partial_read=1"));
 }
 // Signals go to Python's main thread: the runtime's threads take none.
 void block_signals() {
