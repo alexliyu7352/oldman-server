@@ -13,7 +13,7 @@ import pytest
 
 from pytest import LogCaptureFixture
 
-from oldman_server import OldmanServer
+from oldman_server import OldmanServer, __version__
 from oldman_server.compat import use_context
 from oldman_server.request import Request
 from oldman_server.response import text
@@ -84,7 +84,8 @@ def test_unix_socket_creation(caplog: LogCaptureFixture):
     assert (
         "oldman_server.root",
         logging.INFO,
-        f"Goin' Fast @ {SOCKPATH} http://...",
+        f"oldman-server {__version__}: test on {SOCKPATH} http://... "
+        "(production mode, 1 worker)",
     ) in caplog.record_tuples
     assert not os.path.exists(SOCKPATH)
 

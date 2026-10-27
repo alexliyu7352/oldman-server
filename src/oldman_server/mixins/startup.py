@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import platform
 import sys
 
 from asyncio import (
@@ -16,7 +15,6 @@ from asyncio import (
 from collections.abc import Mapping
 from contextlib import suppress
 from functools import partial
-from importlib import import_module
 from multiprocessing import (
     Manager,
     Pipe,
@@ -37,8 +35,7 @@ from typing import (
     ClassVar,
 )
 
-from oldman_server.application.logo import get_logo
-from oldman_server.application.motd import MOTD
+from oldman_server.__version__ import __version__
 from oldman_server.application.state import ApplicationServerInfo, Mode, ServerStage
 from oldman_server.base.meta import AppMeta
 from oldman_server.compat import OS_IS_WINDOWS, StartMethod
@@ -78,7 +75,6 @@ if TYPE_CHECKING:
     from oldman_server.application.state import ApplicationState
     from oldman_server.config import Config
 
-MOTD_PACKAGES = ("sanic-routing",)
 
 
 
@@ -152,10 +148,8 @@ class StartupMixin(metaclass=AppMeta):
         loop: AbstractEventLoop | None = None,
         reload_dir: list[str] | str | None = None,
         noisy_exceptions: bool | None = None,
-        motd: bool = True,
         fast: bool = False,
         verbosity: int = 0,
-        motd_display: dict[str, str] | None = None,
         single_process: bool = False,
     ) -> None:
         """Run the HTTP Server and listen until keyboard interrupt or term signal. On termination, drain connections before closing.
@@ -188,10 +182,8 @@ class StartupMixin(metaclass=AppMeta):
             loop (Optional[AbstractEventLoop]): AsyncIO event loop.
             reload_dir (Optional[Union[List[str], str]]): Directory to watch for code changes, if auto_reload is True.
             noisy_exceptions (Optional[bool]): Log exceptions that are normally considered to be quiet/silent.
-            motd (bool): Display Message of the Day.
             fast (bool): Enable fast mode.
             verbosity (int): Verbosity level.
-            motd_display (Optional[Dict[str, str]]): Customize Message of the Day display.
             single_process (bool): Enable single process mode.
 
         Returns:
@@ -241,10 +233,8 @@ class StartupMixin(metaclass=AppMeta):
             loop=loop,
             reload_dir=reload_dir,
             noisy_exceptions=noisy_exceptions,
-            motd=motd,
             fast=fast,
             verbosity=verbosity,
-            motd_display=motd_display,
             single_process=single_process,
         )
 
@@ -290,10 +280,8 @@ class StartupMixin(metaclass=AppMeta):
         loop: AbstractEventLoop | None = None,
         reload_dir: list[str] | str | None = None,
         noisy_exceptions: bool | None = None,
-        motd: bool = True,
         fast: bool = False,
         verbosity: int = 0,
-        motd_display: dict[str, str] | None = None,
         single_process: bool = False,
     ) -> None:
         """Prepares one or more Sanic applications to be served simultaneously.
@@ -319,10 +307,8 @@ class StartupMixin(metaclass=AppMeta):
             loop (Optional[AbstractEventLoop], optional): Event loop. Defaults to `None`.
             reload_dir (Optional[Union[List[str], str]], optional): Reload directory. Defaults to `None`.
             noisy_exceptions (Optional[bool], optional): Display exceptions. Defaults to `None`.
-            motd (bool, optional): Display message of the day. Defaults to `True`.
             fast (bool, optional): Fast mode. Defaults to `False`.
             verbosity (int, optional): Verbosity level. Defaults to `0`.
-            motd_display (Optional[Dict[str, str]], optional): Custom MOTD display. Defaults to `None`.
             single_process (bool, optional): Single process mode. Defaults to `False`.
 
         Raises:
@@ -367,9 +353,6 @@ class StartupMixin(metaclass=AppMeta):
                 "Use OldmanServer.serve_single."
             )
 
-        if motd_display:
-            self.config.MOTD_DISPLAY.update(motd_display)
-
         if reload_dir:
             if isinstance(reload_dir, str):
                 reload_dir = [reload_dir]
@@ -400,7 +383,6 @@ class StartupMixin(metaclass=AppMeta):
         for attribute, value in {
             "ACCESS_LOG": access_log,
             "AUTO_RELOAD": auto_reload,
-            "MOTD": motd,
             "NOISY_EXCEPTIONS": noisy_exceptions,
         }.items():
             if value is not None:
@@ -639,7 +621,7 @@ class StartupMixin(metaclass=AppMeta):
             "backlog": backlog,
         }
 
-        self.motd(server_settings=server_settings)
+        self._log_serving(server_settings)
 
         if (
             is_atty()
@@ -669,101 +651,22 @@ class StartupMixin(metaclass=AppMeta):
 
         return server_settings
 
-    def motd(
-        self,
-        server_settings: dict[str, Any] | None = None,
-    ) -> None:
-        """Outputs the message of the day (MOTD).
-
-        It generally can only be called once per process, and is usually
-        called by the `run` method in the main process.
-
-        Args:
-            server_settings (Optional[Dict[str, Any]], optional): Settings for
-                the server. Defaults to `None`.
-
-        Returns:
-            None
-        """
+    def _log_serving(self, server_settings: dict[str, Any]) -> None:
+        """Logs where the service listens, once, in the process that
+        starts it (not in its workers or after a reload)."""
         if (
             os.environ.get("OLDMAN_SERVER_WORKER_NAME")
-            or os.environ.get("OLDMAN_SERVER_MOTD_OUTPUT")
+            or os.environ.get("OLDMAN_SERVER_STARTUP_LOGGED")
             or os.environ.get("OLDMAN_SERVER_WORKER_PROCESS")
             or os.environ.get("OLDMAN_SERVER_SERVER_RUNNING")
         ):
             return
-        serve_location = self.get_server_location(server_settings)
-        if self.config.MOTD:
-            logo = get_logo()
-            display, extra = self.get_motd_data(server_settings)
-
-            MOTD.output(logo, serve_location, display, extra)
-
-    def get_motd_data(
-        self, server_settings: dict[str, Any] | None = None
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Retrieves the message of the day (MOTD) data.
-
-        Args:
-            server_settings (Optional[Dict[str, Any]], optional): Settings for
-                the server. Defaults to `None`.
-
-        Returns:
-            Tuple[Dict[str, Any], Dict[str, Any]]: A tuple containing two
-                dictionaries with the relevant MOTD data.
-        """
-
-        mode = [f"{self.state.mode},"]
-        if self.state.fast:
-            mode.append("goin' fast")
-        if self.state.workers == 1:
-            mode.append("single worker")
-        else:
-            mode.append(f"w/ {self.state.workers} workers")
-
-        if server_settings:
-            server = f"{self.state.server}, HTTP/1.1"
-        else:
-            server = "unknown"
-
-        display = {
-            "app": self.name,
-            "mode": " ".join(mode),
-            "server": server,
-            "python": platform.python_version(),
-            "platform": platform.platform(),
-        }
-        extra = {}
-        if self.config.AUTO_RELOAD:
-            reload_display = "enabled"
-            if self.state.reload_dirs:
-                reload_display += ", ".join(
-                    [
-                        "",
-                        *(
-                            str(path.absolute())
-                            for path in self.state.reload_dirs
-                        ),
-                    ]
-                )
-            display["auto-reload"] = reload_display
-
-        packages = []
-        for package_name in MOTD_PACKAGES:
-            module_name = package_name.replace("-", "_")
-            try:
-                module = import_module(module_name)
-                packages.append(f"{package_name}=={module.__version__}")  # type: ignore
-            except ImportError:  # no cov
-                ...
-
-        if packages:
-            display["packages"] = ", ".join(packages)
-
-        if self.config.MOTD_DISPLAY:
-            extra.update(self.config.MOTD_DISPLAY)
-
-        return display, extra
+        workers = self.state.workers
+        logger.info(
+            f"oldman-server {__version__}: {self.name} on "
+            f"{self.get_server_location(server_settings)} "
+            f"({self.state.mode} mode, {workers} worker{'s' if workers != 1 else ''})"
+        )
 
     @property
     def serve_location(self) -> str:
@@ -950,7 +853,7 @@ class StartupMixin(metaclass=AppMeta):
             ```
         """
         cls._set_startup_method()
-        os.environ["OLDMAN_SERVER_MOTD_OUTPUT"] = "true"
+        os.environ["OLDMAN_SERVER_STARTUP_LOGGED"] = "true"
         apps = list(cls._app_registry.values())
         if factory:
             primary = factory()
@@ -1178,7 +1081,7 @@ class StartupMixin(metaclass=AppMeta):
                 `workers`.
             ValueError: Raised when `PROXIES_COUNT` is negative.
         """
-        os.environ["OLDMAN_SERVER_MOTD_OUTPUT"] = "true"
+        os.environ["OLDMAN_SERVER_STARTUP_LOGGED"] = "true"
         apps = list(cls._app_registry.values())
 
         if not primary:
@@ -1390,7 +1293,7 @@ class StartupMixin(metaclass=AppMeta):
             "OLDMAN_SERVER_RELOADER_PROCESS",
             "OLDMAN_SERVER_IGNORE_PRODUCTION_WARNING",
             "OLDMAN_SERVER_WORKER_NAME",
-            "OLDMAN_SERVER_MOTD_OUTPUT",
+            "OLDMAN_SERVER_STARTUP_LOGGED",
             "OLDMAN_SERVER_WORKER_PROCESS",
             "OLDMAN_SERVER_SERVER_RUNNING",
         )

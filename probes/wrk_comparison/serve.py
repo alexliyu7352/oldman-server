@@ -85,7 +85,7 @@ def main():
     mode, port, workers = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     if mode == "bare":
         return bare(port, workers, sys.argv[4] == "1")
-    app.run(host="127.0.0.1", port=port, workers=workers, access_log=False, motd=False)
+    app.run(host="127.0.0.1", port=port, workers=workers, access_log=False)
 
 
 if __name__ == "__main__":

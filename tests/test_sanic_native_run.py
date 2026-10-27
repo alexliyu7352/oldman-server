@@ -112,7 +112,7 @@ def test_run_single_process_serves_natively_with_listener_order():
         app.config.NATIVE_SERVER = True
         app.config.NATIVE_SHARDS = 1
         drive({port})
-        app.run(host="127.0.0.1", port={port}, single_process=True, motd=False)
+        app.run(host="127.0.0.1", port={port}, single_process=True)
         print("EVENTS " + json.dumps(events))
         from oldman_server.native import host as seastar_sanic, engine as probe_engine  # the native modules were used
     ''')
@@ -130,7 +130,7 @@ def test_environment_switch_with_default_run():
     port = free_port()
     lines, _ = run(f'''
         drive({port})
-        app.run(host="127.0.0.1", port={port}, motd=False)
+        app.run(host="127.0.0.1", port={port})
         print("NATIVE " + json.dumps([app.config.NATIVE_SERVER, "oldman_server.native.host" in sys.modules]))
         print("EVENTS " + json.dumps(events))
         print("MAINLOOPS " + json.dumps(main_loops))
@@ -152,7 +152,7 @@ def test_native_server_leaves_worker_processes_to_the_worker_manager():
         app.config.NATIVE_SERVER = True
         print("SINGLE " + json.dumps([app.native_single_process(), app.native_single_process(workers=2),
                                       app.native_single_process(dev=True)]))
-        app.prepare(host="127.0.0.1", port=0, workers=2, motd=False)
+        app.prepare(host="127.0.0.1", port=0, workers=2)
     ''')
     # One worker: served natively from this process; with worker processes
     # Sanic's worker manager runs them, each serving natively (below).
@@ -272,9 +272,9 @@ WORKERS_APP = textwrap.dedent('''
 
     if __name__ == "__main__":
         if UNIX:
-            app.run(unix=UNIX, workers=2, motd=False)
+            app.run(unix=UNIX, workers=2)
         else:
-            app.run(host="127.0.0.1", port=int(os.environ["PORT"]), workers=2, motd=False)
+            app.run(host="127.0.0.1", port=int(os.environ["PORT"]), workers=2)
 ''')
 
 
@@ -455,9 +455,9 @@ RESTART_APP = textwrap.dedent('''
 
     if __name__ == "__main__":
         if "PORT" in os.environ:
-            app.run(host="127.0.0.1", port=int(os.environ["PORT"]), workers=2, motd=False)
+            app.run(host="127.0.0.1", port=int(os.environ["PORT"]), workers=2)
         else:
-            app.run(unix=os.environ["UNIX"], workers=2, motd=False)
+            app.run(unix=os.environ["UNIX"], workers=2)
 ''')
 
 
@@ -599,7 +599,7 @@ def test_a_single_process_listens_on_the_worker_0_address(short_dir):
             print("RESPONSE " + (await reader.read()).decode().split("\\r\\n\\r\\n", 1)[1], flush=True)
             app.stop()
 
-        app.run(host="127.0.0.1", port={free_port()}, single_process=True, motd=False)
+        app.run(host="127.0.0.1", port={free_port()}, single_process=True)
     ''')
     assert json.loads(lines["RESPONSE"])["host"] == "own.test"
     assert lines["MODE"] == "0o600"
@@ -641,7 +641,7 @@ def test_tcp_connections_send_each_write_at_once():
             print("NODELAY " + body, flush=True)
             app.stop()
 
-        app.run(host="127.0.0.1", port={port}, single_process=True, motd=False)
+        app.run(host="127.0.0.1", port={port}, single_process=True)
     ''')
     assert lines["NODELAY"] == "1"
 
@@ -708,7 +708,7 @@ def test_unix_socket_served_natively(short_dir):
         app.config.NATIVE_SERVER = True
         app.config.NATIVE_SAME_THREAD = False  # two shards, whatever the environment says
         drive_unix({str(path)!r})
-        app.run(unix={str(path)!r}, motd=False)
+        app.run(unix={str(path)!r})
         print("AFTER " + json.dumps([os.path.exists({str(path)!r}), events]))
         from oldman_server.native import host as seastar_sanic  # served by the native host
     '''))
@@ -800,7 +800,7 @@ def test_tcp_run_serves_on_sanics_socket():
             print("RESULTS " + json.dumps([app.serve_location, sorted(set(shards))]), flush=True)
             app.stop()
 
-        app.run(host="127.0.0.1", port={port}, motd=False)
+        app.run(host="127.0.0.1", port={port})
     ''')
     location, shards = json.loads(lines["RESULTS"])
     assert location == f"http://127.0.0.1:{port}" and shards == [0, 1]
@@ -858,7 +858,7 @@ def test_the_native_host_raises_the_collectors_first_threshold(setup, expected):
             print("GC " + json.dumps([default, gc.get_threshold()]), flush=True)
 
         drive({port})
-        app.run(host="127.0.0.1", port={port}, single_process=True, motd=False)
+        app.run(host="127.0.0.1", port={port}, single_process=True)
     ''')
     default, serving = json.loads(lines["GC"])
     assert serving == [expected or default[0], *default[1:]]
@@ -883,7 +883,7 @@ def test_reactor_backend_setting(backend):
             print("BACKENDS " + json.dumps(sorted({{s["backend"] for s in host._engine.shards()}})), flush=True)
 
         drive({port})
-        app.run(host="127.0.0.1", port={port}, motd=False)
+        app.run(host="127.0.0.1", port={port})
     ''')
     assert json.loads(lines["BACKENDS"]) == [backend]
     assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
@@ -909,7 +909,7 @@ def test_the_same_thread_mode_serves_on_either_backend(backend):
                                           engine._native.fallback()]), flush=True)
 
         drive({port})
-        app.run(host="127.0.0.1", port={port}, motd=False)
+        app.run(host="127.0.0.1", port={port})
     ''')
     assert json.loads(lines["LAYOUT"]) == [[], True, ""]
     assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
@@ -921,7 +921,7 @@ def test_the_same_thread_mode_refuses_shard_cpus():
         app.config.NATIVE_SERVER = True
         app.config.NATIVE_SAME_THREAD = True
         app.config.NATIVE_SHARD_CPUS = "1"
-        app.run(host="127.0.0.1", port={free_port()}, motd=False)
+        app.run(host="127.0.0.1", port={free_port()})
         print("RUN RETURNED", flush=True)
     ''')], capture_output=True, text=True, timeout=60, cwd=ROOT)
     assert result.returncode != 0 and "RUN RETURNED" not in result.stdout
@@ -975,7 +975,7 @@ def test_failing_main_process_start_still_runs_main_process_stop():
                 raise RuntimeError("main start failed")
 
             try:
-                app.run(unix={path!r}, motd=False)
+                app.run(unix={path!r})
             except RuntimeError as error:
                 print("FAILED " + json.dumps(str(error)))
             print("EVENTS " + json.dumps(events))
@@ -1007,7 +1007,7 @@ def test_sigterm_right_after_the_first_response_stops_gracefully(short_dir, nati
         def stopped(app):
             print("STOPPED", flush=True)
 
-        app.run(unix={path!r}, motd=False{"" if native else ", single_process=True"})
+        app.run(unix={path!r}{"" if native else ", single_process=True"})
     ''')
     outcomes = []
     for _ in range(3):
@@ -1051,7 +1051,7 @@ def test_a_native_host_that_cannot_start_fails_the_run():
         app.config.NATIVE_SERVER = True
         app.config.NATIVE_SAME_THREAD = False  # the shard threads' CPUs
         app.config.NATIVE_SHARD_CPUS = "4000,4001"
-        app.run(host="127.0.0.1", port={free_port()}, motd=False)
+        app.run(host="127.0.0.1", port={free_port()})
         print("RUN RETURNED", flush=True)
     ''')], capture_output=True, text=True, timeout=60, cwd=ROOT)
     assert result.returncode != 0
@@ -1104,7 +1104,7 @@ def test_a_passed_socket_is_served_as_it_is():
                   flush=True)
             app.stop()
 
-        app.run(sock=sock, single_process=True, motd=False)
+        app.run(sock=sock, single_process=True)
     ''')
     assert json.loads(lines["LISTENING"]) is True
     assert json.loads(lines["STATUS"]) == "200"
@@ -1143,7 +1143,7 @@ DRAIN_SERVER = textwrap.dedent('''
     def ready(app):
         print("READY", flush=True)
 
-    app.run(host="127.0.0.1", port=port, single_process=True, motd=False)
+    app.run(host="127.0.0.1", port=port, single_process=True)
 ''')
 
 
@@ -1242,7 +1242,7 @@ def test_preload_runs_the_program_again_with_the_libraries(preloaded):
         app.config.NATIVE_SERVER = True
         app.config.NATIVE_SHARDS = 1
         drive({port})
-        app.run(host="127.0.0.1", port={port}, motd=False)
+        app.run(host="127.0.0.1", port={port})
         print("PRELOAD " + json.dumps([os.environ.get("LD_PRELOAD"),
                                        os.environ.get("_OLDMAN_SERVER_PRELOADED")]))
     ''', env={"LD_PRELOAD": library if preloaded else ""})
@@ -1259,7 +1259,7 @@ def test_preload_refuses_a_missing_library(tmp_path):
         from oldman_server import OldmanServer
         app = OldmanServer("preload_missing", configure_logging=False)
         app.config.PRELOAD = {str(tmp_path / "missing.so")!r}
-        app.run(single_process=True, motd=False)
+        app.run(single_process=True)
     ''')], capture_output=True, text=True, timeout=60, cwd=ROOT,
         env={k: v for k, v in os.environ.items() if k != "LD_PRELOAD"})
     assert result.returncode != 0

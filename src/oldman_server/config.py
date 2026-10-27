@@ -41,8 +41,6 @@ DEFAULT_CONFIG = {
     "KEEP_ALIVE": True,
     "LOCALHOST": "localhost",
     "LOG_EXTRA": _default,
-    "MOTD": True,
-    "MOTD_DISPLAY": {},
     # The native host (README "配置"): NATIVE_SERVER None serves through it
     # on Linux when the extension is installed (oldman_server.native).
     "NATIVE_MAX_MEMORY": None,  # from REQUEST_MAX_SIZE and the shard count
@@ -156,8 +154,6 @@ class Config(dict, metaclass=DescriptorMeta):
     KEEP_ALIVE: bool
     LOCALHOST: str
     LOG_EXTRA: Default | bool
-    MOTD: bool
-    MOTD_DISPLAY: dict[str, str]
     NATIVE_GC_THRESHOLD: int | None
     NATIVE_MAX_MEMORY: int | None
     NATIVE_MAX_REQUESTS: int

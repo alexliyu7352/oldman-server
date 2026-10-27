@@ -19,7 +19,6 @@ def mock_app():
     server_info.settings = {"app": app}
     app.state.workers = 1
     app.listeners = {"main_process_ready": []}
-    app.get_motd_data.return_value = ({"packages": ""}, {})
     app.state.server_info = [server_info]
     return app
 

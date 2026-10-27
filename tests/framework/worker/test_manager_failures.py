@@ -58,7 +58,7 @@ def start(directory: Path, body: str) -> subprocess.Popen:
             f"""
             if __name__ == "__main__":
                 app.run(host="127.0.0.1", port={port}, workers=2,
-                        access_log=False, motd=False)
+                        access_log=False)
             """
         )
     )
@@ -264,7 +264,7 @@ def test_a_restarted_worker_that_fails_to_start_leaves_the_others(tmp_path):
         if __name__ == "__main__":
             loader = AppLoader("broken_app:app")
             app = loader.load()
-            app.prepare(host="127.0.0.1", port={port}, workers=2, motd=False)
+            app.prepare(host="127.0.0.1", port={port}, workers=2)
             OldmanServer.serve(primary=app, app_loader=loader)
         """
     ))

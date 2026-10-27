@@ -65,7 +65,7 @@ def run(mode, script):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     source = APP + textwrap.dedent(script).replace("PORT", str(port))
-    source += f'\napp.run(host="127.0.0.1", port={port}, single_process=True, motd=False)\n'
+    source += f'\napp.run(host="127.0.0.1", port={port}, single_process=True)\n'
     result = subprocess.run([sys.executable, "-c", source, mode], capture_output=True, text=True,
                             timeout=60, cwd=ROOT,
                             env={k: v for k, v in os.environ.items() if k != "OLDMAN_SERVER_NATIVE_SERVER"})

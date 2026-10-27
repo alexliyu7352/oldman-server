@@ -32,7 +32,7 @@ APP = textwrap.dedent('''
             app.m.terminate()
 
     if __name__ == "__main__":
-        app.run(host="127.0.0.1", port=PORT, single_process=SINGLE, motd=False)
+        app.run(host="127.0.0.1", port=PORT, single_process=SINGLE)
 ''')
 
 

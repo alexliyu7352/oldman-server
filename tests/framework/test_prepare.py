@@ -20,7 +20,7 @@ def no_skip():
     OldmanServer._app_registry = {}
     OldmanServer.should_auto_reload = should_auto_reload
     try:
-        del os.environ["OLDMAN_SERVER_MOTD_OUTPUT"]
+        del os.environ["OLDMAN_SERVER_STARTUP_LOGGED"]
     except KeyError:
         ...
 
@@ -34,13 +34,6 @@ def test_dev(app: OldmanServer):
 
     assert app.state.is_debug
     assert app.state.auto_reload
-
-
-def test_motd_display(app: OldmanServer):
-    app.prepare(motd_display={"foo": "bar"})
-
-    assert app.config.MOTD_DISPLAY["foo"] == "bar"
-    del app.config.MOTD_DISPLAY["foo"]
 
 
 @pytest.mark.parametrize("dirs", ("./foo", ("./foo", "./bar")))
@@ -81,10 +74,5 @@ def test_fast(app: OldmanServer, caplog):
     assert app.state.workers == workers
 
     messages = [m[2] for m in caplog.record_tuples]
-
-    if workers == 1:
-        worker_fragment = "single worker"
-    else:
-        worker_fragment = f"w/ {workers} workers"
-
-    assert f"mode: production, goin' fast {worker_fragment}" in messages
+    fragment = f"(production mode, {workers} worker{'s' if workers != 1 else ''})"
+    assert any(message.endswith(fragment) for message in messages), messages

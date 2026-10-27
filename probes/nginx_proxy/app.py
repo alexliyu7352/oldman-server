@@ -63,4 +63,4 @@ if __name__ == "__main__":
     if not app.config.NATIVE_SERVER:
         raise SystemExit("set OLDMAN_SERVER_NATIVE_SERVER=true")
     address = {"unix": args.unix} if args.unix else {"host": "127.0.0.1", "port": args.port}
-    app.run(**address, workers=args.workers, access_log=False, motd=False)
+    app.run(**address, workers=args.workers, access_log=False)
