@@ -2,6 +2,7 @@
 import asyncio
 import http.client
 from dataclasses import replace
+import socket
 
 from oldman_server.native import _native as native
 import pytest
@@ -159,6 +160,33 @@ async def test_dispatch_all_hands_complete_bodies_that_arrive_after_the_head():
             response = await asyncio.wait_for(reader.readuntil(b"abcdefghij"), 2)
             assert response.startswith(b"HTTP/1.1 200")
             writer.close()
+    finally:
+        await engine.aclose()
+    assert_released(engine)
+
+
+@pytest.mark.asyncio
+async def test_a_graceful_stop_answers_a_connection_still_queued():
+    # A connection made, and its request sent, just before a graceful stop:
+    # the stop takes it from the listener's queue and answers the request
+    # (shutting the listener down would reset it). In the same-thread mode the
+    # drain, called from the poller, always runs before the shard accepts it.
+    cfg = config(application_dispatch_all=True)
+    engine = await api.Engine.open(cfg, application_handler=lambda req: (200, b"served", ()))
+    try:
+        with socket.create_connection(("127.0.0.1", cfg.server.http_port), timeout=4) as client:
+            client.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            engine._native.drain_server(engine._server_generation)
+            await engine.drain_applications(4)
+
+            def read():
+                chunks = []
+                while chunk := client.recv(65536):
+                    chunks.append(chunk)
+                return b"".join(chunks)
+            response = await asyncio.to_thread(read)
+        assert response.startswith(b"HTTP/1.1 200") and response.endswith(b"served")
+        assert b"connection: close" in response.lower()
     finally:
         await engine.aclose()
     assert_released(engine)

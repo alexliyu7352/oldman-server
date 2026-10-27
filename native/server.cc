@@ -22,6 +22,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/epoll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -250,7 +251,8 @@ struct alignas(64) Counts {
     std::atomic<uint64_t> body_bytes_to_python{0}, body_bytes_from_python{0}, response_bytes{0};
     std::atomic<uint64_t> connections_open{0};  // framework host connections
     // Connections handed to this shard and not closed yet (the accepting
-    // shard's choice of the least loaded one).
+    // shard's choice of the least loaded one; a graceful stop waits for them,
+    // as some may not be open yet).
     std::atomic<uint64_t> connections_assigned{0};
     size_t limit_count = 0, limit_bytes = 0;
     std::map<std::string,uint64_t> snapshot() const {
@@ -262,7 +264,7 @@ struct alignas(64) Counts {
         FIELD(decisions); FIELD(decision_timeouts); FIELD(decision_wait_ns);
         FIELD(python_terminal_events);
         FIELD(body_bytes_to_python); FIELD(body_bytes_from_python); FIELD(response_bytes);
-        FIELD(connections_open);
+        FIELD(connections_open); FIELD(connections_assigned);
 #undef FIELD
         return d;
     }
@@ -547,6 +549,12 @@ class Service {
         void shut_output() {
             asio::error_code ignored;
             socket.shutdown(Socket::shutdown_send, ignored);
+        }
+        // Bytes the peer sent that wait unread in the socket: a request that
+        // arrived counts against being idle before this side has read it.
+        bool input_pending() {
+            int bytes = 0;
+            return ::ioctl(socket.native_handle(), FIONREAD, &bytes) == 0 && bytes > 0;
         }
     };
     // The peer of a connection left: as Sanic's connection_lost, the request
@@ -885,16 +893,38 @@ class Service {
         }
         failures = 0;
         if (!accepts()) co_return false;
-        if (remote.data()->sa_family != AF_UNIX) {
-            // As asyncio and uvloop: each piece of a streamed response goes
-            // out as it is written, not after the peer acknowledges the last
-            // (delayed acknowledgements held them back some 40 ms).
-            const int on = 1;
-            ::setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
-        }
+        send_at_once(socket, remote);
         if (counted && own_slot) count_connection(1);
         owner.hand_off(target, std::move(socket), remote, listener.unix_path, counted);
         co_return true;
+    }
+    // As asyncio and uvloop: each piece of a streamed response goes out as it
+    // is written, not after the peer acknowledges the last (delayed
+    // acknowledgements held them back some 40 ms).
+    static void send_at_once(Socket& socket, const Endpoint& remote) {
+        if (remote.data()->sa_family == AF_UNIX) return;
+        const int on = 1;
+        ::setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+    }
+    // The connections a listener of this process's own has queued as a
+    // graceful stop starts: they were made before it, and shutting the
+    // listener down would reset them. Sanic's loop accepts them before its
+    // stop gets to closing the server; here the drain can come first, before
+    // the accept loop has seen them ready. This shard takes them, so they are
+    // open before the drain returns, and serves them as any other (a request
+    // already sent on one is answered). At most what a queue holds
+    // (net.core.somaxconn, 4096 by default): connections still arriving do
+    // not keep the stop going.
+    void take_queued(Listener& listener) {
+        for (int taken = 0; taken < 4096; ++taken) {
+            Endpoint remote;
+            asio::error_code ec;
+            Socket socket = listener.acceptor.accept(io, remote, ec);
+            if (ec) return;  // none left, or a failure: accepting ends with the drain anyway
+            send_at_once(socket, remote);
+            ++counts.connections_assigned;  // as hand_off counts it
+            adopt(std::move(socket), remote, *listener.unix_path, false);
+        }
     }
 public:
     Service(NetworkServer::Impl& server, unsigned id, asio::io_context& context)
@@ -910,8 +940,10 @@ public:
     // ServerConfig member, so it outlives the connections): what requests over
     // an AF_UNIX listener report as the server address. counted: shard 0
     // counted it towards this process's load as it accepted it.
+    // One accepted before a graceful stop is served even when the drain
+    // reached this shard first (as the open ones are); stop() closes the rest.
     void adopt(Socket socket, Endpoint remote, const std::string& unix_path, bool counted) {
-        if (!accepts()) {
+        if (closing) {
             --counts.connections_assigned;
             return;
         }
@@ -976,7 +1008,7 @@ public:
         auto read_more = [&](Reading reading = Reading::next) -> asio::awaitable<bool> {
             const bool idle = reading == Reading::rest ||
                               (reading == Reading::next && buffer.size() == consumed);
-            if (idle && draining) co_return false;  // Sanic's close_if_idle
+            if (idle && draining && !connection.input_pending()) co_return false;  // Sanic's close_if_idle
             const bool body = reading == Reading::body;
             waiting = idle ? Wait::idle : body ? Wait::response : Wait::request;
             const auto timeout = body ? config.decision_timeout_ms
@@ -2008,15 +2040,20 @@ public:
         }
     }
     // A graceful stop's first step (GRACEFUL_SHUTDOWN_TIMEOUT), as Sanic's
-    // server.close() and close_if_idle(): no new connections; idle ones close
-    // now, the others after their response (sent with Connection: close).
+    // server.close() and close_if_idle(): no new connections (the ones queued
+    // on this process's own listeners are taken first); idle ones close now
+    // (nothing of a request received, not even unread in the socket), the
+    // others after their response (sent with Connection: close).
     // Python waits for those to end, then stop() cuts off what is left.
+    // A socket shared with other processes keeps its queue for them.
     void drain() {
         if (!accepts()) return;
+        for (auto& listener : listeners)
+            if (listener->own) take_queued(*listener);
         draining = true;
         stop_accepting();
         for (auto& [id, peer] : app_peers)
-            if (peer->idle) peer->shut_input();
+            if (peer->idle && !peer->input_pending()) peer->shut_input();
     }
     asio::awaitable<void> stop() {
         closing = true;

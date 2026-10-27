@@ -1169,12 +1169,13 @@ class Engine:
         server accepts no more connections and closes idle ones (the others
         after their response); requests keep being served for up to `timeout`
         seconds, until no request runs and no connection is open (a response
-        is still being written). aclose then cancels and cuts off the rest."""
+        is still being written) or on its way to its shard (accepted before
+        the stop). aclose then cancels and cuts off the rest."""
         deadline = self._loop.time() + timeout
         if not self._draining and not self._closed and not self._abandoned:
             self._draining = True
             await _off_loop(self._native.drain_server, self._server_generation)
-        while (self._application_tasks or self._native.server_stats().get("connections_open", 0)) \
+        while (self._application_tasks or self._native.server_stats().get("connections_assigned", 0)) \
                 and self._loop.time() < deadline:
             await asyncio.sleep(0.01)
 
