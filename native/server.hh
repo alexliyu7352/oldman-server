@@ -86,9 +86,12 @@ struct ServerConfig {
     bool response_cache = false;
     // Same-thread mode only: the direct call to Python (see InlineCall) and
     // what it needs, set by the Python bridge, whose objects these are (the
-    // Python side keeps them alive while the server runs).
+    // Python side keeps them alive while the server runs): the Engine, its
+    // handler and stats, and its connections.
     InlineCall inline_call = nullptr;
-    void* inline_callable = nullptr;
+    void* inline_engine = nullptr;
+    void* inline_handler = nullptr;
+    void* inline_stats = nullptr;
     void* inline_connections = nullptr;
     bool inline_bytes_headers = false;
     bool enabled() const { return http_port || listen_fd >= 0 || worker_listen_fd >= 0; }

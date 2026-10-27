@@ -569,6 +569,21 @@ PyObject* request_sanic_prepare(PyObject* self, PyObject* const* args, Py_ssize_
     });
 }
 
+// stats[key] += 1 for one of an Engine's counters; -1 with an exception set.
+int count(PyObject* stats, PyObject* key) {
+    PyObject* value = PyDict_GetItemWithError(stats, key);
+    if (!value) {
+        if (!PyErr_Occurred()) PyErr_SetObject(PyExc_KeyError, key);
+        return -1;
+    }
+    static PyObject* const one = PyLong_FromLong(1);  // a small int: immortal
+    PyObject* next = PyNumber_Add(value, one);
+    if (!next) return -1;
+    const int stored = PyDict_SetItem(stats, key, next);
+    Py_DECREF(next);
+    return stored;
+}
+
 // The serving Engine's request registries and answer queue, while it serves
 // (set_application_state): sanic_finish settles a request there as
 // Engine._application_finished does.
@@ -648,16 +663,7 @@ int settle(PyObject* id, PyObject* shard, PyObject* status, PyObject* body, PyOb
             Py_DECREF(handle);
         }
     }
-    PyObject* count = PyDict_GetItemWithError(application.stats, application.finished);
-    if (!count) {
-        if (!PyErr_Occurred()) PyErr_SetString(PyExc_KeyError, "python_application_finished");
-        return -1;
-    }
-    PyObject* next = PyNumber_Add(count, sanic.one);
-    if (!next) return -1;
-    const int stored = PyDict_SetItem(application.stats, application.finished, next);
-    Py_DECREF(next);
-    return stored;
+    return count(application.stats, application.finished);
 }
 
 // request.sanic_finish(request, exchange, response, engine=None): the flat path's
@@ -920,31 +926,79 @@ bool checked_http_response(py::tuple item, size_t max_response_bytes,
                                          upgrade);
 }
 
+// The request inline_call runs the handler for, and whether the handler queued
+// pieces of a streamed response for it meanwhile (Engine._queue_stream_item
+// says so through inline_streamed): its answer then follows them through the
+// queue. Used only with the GIL held, by the thread that polls the shard.
+uint64_t inline_request = 0;
+bool inline_request_streamed = false;
+
 // ServerConfig::inline_call: a complete request handed to Python on its shard's
-// own thread (the same-thread mode's poll(), which holds the GIL). Python
+// own thread (the same-thread mode's poll(), which holds the GIL), as
+// Engine._serve_now serves a plain function handler: the handler is called
+// here, in a copy of the current context as a Task would run it. Python
 // answers as a queued request's handler does, without the id and shard:
 // (status, body, headers), or with a decision kind and its value (a HEAD
 // response's Content-Length, or CACHED and its lifetime), checked as
-// resolve_http_responses_checked checks them; None when the answer comes later.
-// Errors answer 500: nothing reaches the shard's handler.
+// resolve_http_responses_checked checks them. Any other outcome (an exception,
+// None, an awaitable, another shape, a streamed response) goes on in
+// Engine._inline_outcome, which may answer later. Errors answer 500: nothing
+// reaches the shard's handler.
 int inline_call(const probe::ServerConfig& config, probe::RequestEvent& event,
                 probe::RequestDecision& decision) {
     if (!PyGILState_Check()) return -1;  // the poller waits in a stop: the queue takes it
-    auto* callable = static_cast<PyObject*>(config.inline_callable);
+    auto* engine = static_cast<PyObject*>(config.inline_engine);
     auto* registry = static_cast<PyObject*>(config.inline_connections);
+    auto* stats = static_cast<PyObject*>(config.inline_stats);
+    static PyObject *closed_name = nullptr, *outcome_name = nullptr, *started = nullptr, *finished = nullptr;
     try {
+        if (!finished) {  // each name once; `finished` last, when the others are there
+            if (!closed_name) closed_name = PyUnicode_InternFromString("_closed");
+            if (!outcome_name) outcome_name = PyUnicode_InternFromString("_inline_outcome");
+            if (!started) started = PyUnicode_InternFromString("python_application_started");
+            if (closed_name && outcome_name && started)
+                finished = PyUnicode_InternFromString("python_application_finished");
+            if (!finished) throw py::error_already_set();
+        }
         // As drain_requests_owned: a connection's first request registers it.
         if (registry && event.sequence == 1 && event.connection) {
             auto key = py::reinterpret_steal<py::object>(PyLong_FromUnsignedLongLong(event.connection));
             if (!key || PyDict_SetItem(registry, key.ptr(), Py_None) < 0) throw py::error_already_set();
         }
-        py::object id = py::int_(event.id);
-        py::object shard = py::int_(event.shard);
+        auto closed = py::reinterpret_steal<py::object>(PyObject_GetAttr(engine, closed_name));
+        const int closing = closed ? PyObject_IsTrue(closed.ptr()) : -1;
+        if (closing < 0) throw py::error_already_set();
+        if (closing) {  // as a queued request to a closed Engine
+            decision.code = 503;
+            return 1;
+        }
+        const uint64_t id = event.id;
+        const unsigned shard = event.shard;
         py::object request = make_request(std::move(event));
-        PyObject* args[] = {id.ptr(), shard.ptr(), request.ptr()};
-        auto result = py::reinterpret_steal<py::object>(PyObject_Vectorcall(callable, args, 3, nullptr));
-        if (!result) throw py::error_already_set();
-        if (result.is_none()) return 0;
+        auto context = py::reinterpret_steal<py::object>(PyContext_CopyCurrent());
+        if (!context || PyContext_Enter(context.ptr()) < 0) throw py::error_already_set();
+        const auto outer = std::exchange(inline_request, id);
+        const bool outer_streamed = std::exchange(inline_request_streamed, false);
+        auto result = py::reinterpret_steal<py::object>(
+            PyObject_CallOneArg(static_cast<PyObject*>(config.inline_handler), request.ptr()));
+        const bool streamed = std::exchange(inline_request_streamed, outer_streamed);
+        inline_request = outer;
+        if (PyContext_Exit(context.ptr()) < 0) throw py::error_already_set();
+        const auto shape = result && PyTuple_CheckExact(result.ptr()) ? PyTuple_GET_SIZE(result.ptr()) : 0;
+        if ((shape == 3 || shape == 5) && !streamed) {
+            // Counted as Engine._plain_answer counts an answer.
+            if (count(stats, started) < 0 || count(stats, finished) < 0) throw py::error_already_set();
+        } else {
+            auto error = py::reinterpret_steal<py::object>(result ? nullptr : PyErr_GetRaisedException());
+            py::object id_value = py::int_(id), shard_value = py::int_(shard);
+            PyObject* args[] = {engine, id_value.ptr(), shard_value.ptr(), request.ptr(),
+                                result ? result.ptr() : Py_None, error ? error.ptr() : Py_None,
+                                streamed ? Py_True : Py_False};
+            result = py::reinterpret_steal<py::object>(PyObject_VectorcallMethod(
+                outcome_name, args, 7 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr));
+            if (!result) throw py::error_already_set();
+            if (result.is_none()) return 0;
+        }
         auto* answer = result.ptr();
         const auto size = PyTuple_CheckExact(answer) ? PyTuple_GET_SIZE(answer) : 0;
         bool valid = (size == 3 || size == 5) &&
@@ -980,6 +1034,11 @@ PYBIND11_MODULE(_native, m) {
     m.def("set_sanic_types", &set_sanic_types);
     m.def("set_application_state", &set_application_state);
     m.def("clear_application_state", &clear_application_state);
+    // Engine._queue_stream_item: a piece of the response to request_id; when
+    // inline_call runs its handler, the answer is to follow the pieces.
+    m.def("inline_streamed", [](uint64_t request_id) {
+        if (inline_request && request_id == inline_request) inline_request_streamed = true;
+    });
     py::class_<probe::ServerConfig>(m, "ServerConfig")
         .def(py::init<>())
         .def_readwrite("http_port", &probe::ServerConfig::http_port)
@@ -1009,16 +1068,19 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
         .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors)
         .def_readwrite("response_cache", &probe::ServerConfig::response_cache)
-        // The same-thread mode's direct call (InlineCall): callable(id, shard,
-        // request) as a queued request's handler, and the connections dict
-        // drain_requests_owned registers connections in. Python keeps both
+        // The same-thread mode's direct call (inline_call): the Engine, its plain
+        // function handler and stats dict, and the connections dict
+        // drain_requests_owned registers connections in. Python keeps them
         // alive while the server runs: the configuration holds them borrowed.
-        .def("set_inline", [](probe::ServerConfig& c, py::object callable, py::object connections,
-                              bool bytes_headers) {
+        .def("set_inline", [](probe::ServerConfig& c, py::object engine, py::object handler, py::object stats,
+                              py::object connections, bool bytes_headers) {
+            if (!PyDict_CheckExact(stats.ptr())) throw py::type_error("stats must be a dict");
             if (!connections.is_none() && !PyDict_CheckExact(connections.ptr()))
                 throw py::type_error("connections must be a dict");
             c.inline_call = &inline_call;
-            c.inline_callable = callable.ptr();
+            c.inline_engine = engine.ptr();
+            c.inline_handler = handler.ptr();
+            c.inline_stats = stats.ptr();
             c.inline_connections = connections.is_none() ? nullptr : connections.ptr();
             c.inline_bytes_headers = bytes_headers;
         })

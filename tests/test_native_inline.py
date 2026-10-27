@@ -2,6 +2,7 @@
 itself for a complete request, without the queue (Engine.open's
 application_inline). One native runtime per test process."""
 import asyncio
+import contextvars
 import http.client
 import os
 
@@ -42,6 +43,68 @@ async def test_a_plain_handler_answers_without_the_queue():
         assert engine._application_tasks == {}
     await serve(handler, scenario)
     assert seen == [("POST", "/x", b"payload")]
+
+
+VALUE = contextvars.ContextVar("VALUE", default="unset")
+
+
+@pytest.mark.asyncio
+async def test_each_call_runs_in_a_copy_of_the_context():
+    seen = []
+
+    def handler(req):
+        # As a Task would: what one call sets stays in its own copy.
+        seen.append(VALUE.get())
+        VALUE.set(req.path)
+        return 200, b"", ()
+
+    async def scenario(engine, port):
+        for path in ("/a", "/b"):
+            assert (await request(port, path))[0] == 200
+    await serve(handler, scenario)
+    assert seen == ["unset", "unset"] and VALUE.get() == "unset"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_follows_what_the_handler_streamed():
+    engines = []
+
+    def handler(req):
+        engine = engines[0]
+        # Its first piece queues without waiting: a plain function can start a
+        # stream in the call, then write and end it.
+        with pytest.raises(StopIteration):
+            engine.stream_send(req.request_id, req.shard, api.STREAM_START, b"one ", 200,
+                               (("Content-Type", "text/plain"),)).send(None)
+        engine.stream_write(req.request_id, req.shard, b"two")
+        engine.stream_end(req.request_id, req.shard)
+        # An answer as well: it goes after the pieces, so the stream is the response.
+        return 200, b"not this", ()
+
+    async def scenario(engine, port):
+        engines.append(engine)
+        status, _, body = await request(port, "/s")
+        assert (status, body) == (200, b"one two")
+        assert (await request(port, "/s"))[2] == b"one two"
+    await serve(handler, scenario)
+
+
+@pytest.mark.asyncio
+async def test_a_closing_engine_answers_503():
+    called = []
+
+    def handler(req):
+        called.append(req.path)
+        return 200, b"", ()
+
+    async def scenario(engine, port):
+        engine._closed = True  # as aclose sets it while the server still runs
+        try:
+            assert (await request(port, "/"))[0] == 503
+        finally:
+            engine._closed = False
+    await serve(handler, scenario)
+    assert called == []
 
 
 @pytest.mark.asyncio
