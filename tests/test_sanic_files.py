@@ -176,7 +176,7 @@ def test_file_and_static_responses(tmp_path):
     (s206, h206, b206), (s200, h200, b200), (s404, _, _), (sdir, _, _) = ranges
     assert (s206, b206, header(h206, "content-range")) == (206, b"cdefghij", "bytes 12-19/36")
     assert (s200, b200, header(h200, "accept-ranges")) == (200, contents["small.txt"], "bytes")
-    # Missing: 404; a directory without directory_view: 500, as with Sanic's server.
+    # Missing: 404; a directory without an index: 500, as with Sanic's server.
     assert (s404, sdir) == (404, 500)
     # validate_file: 304 for a copy at least as new.
     assert cached[0] == 304

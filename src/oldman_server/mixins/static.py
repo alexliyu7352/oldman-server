@@ -45,7 +45,6 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
         apply: bool = True,
         resource_type: str | None = None,
         index: str | Sequence[str] | None = None,
-        directory_view: bool = False,
         directory_handler: DirectoryHandler | None = None,
         follow_external_symlink_files: bool = False,
         follow_external_symlink_dirs: bool = False,
@@ -88,9 +87,6 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
                 exposing against a directory, index is  the name that will
                 be served as the default file. When multiple file names are
                 passed, then they will be tried in order.
-            directory_view (bool, optional): Whether to fallback to showing
-                the directory viewer when exposing a directory. Defaults
-                to `False`.
             directory_handler (Optional[DirectoryHandler], optional): An
                 instance of DirectoryHandler that can be used for explicitly
                 controlling and subclassing the behavior of the default
@@ -139,22 +135,15 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
                 "Static file or directory must be a path-like object or string"
             )
 
-        if directory_handler and (directory_view or index):
+        if directory_handler and index:
             raise ValueError(
-                "When explicitly setting directory_handler, you cannot "
-                "set either directory_view or index. Instead, pass "
-                "these arguments to your DirectoryHandler instance."
+                "When explicitly setting directory_handler, you cannot set "
+                "index. Instead, pass it to your DirectoryHandler instance."
             )
 
         if not directory_handler:
             directory_handler = DirectoryHandler(
-                uri=uri,
-                directory=file_or_directory,
-                directory_view=directory_view,
-                index=index,
-                root_path=file_or_directory,
-                follow_external_symlink_files=follow_external_symlink_files,
-                follow_external_symlink_dirs=follow_external_symlink_dirs,
+                uri=uri, directory=file_or_directory, index=index
             )
 
         static = FutureStatic(

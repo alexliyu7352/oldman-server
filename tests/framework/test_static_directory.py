@@ -22,15 +22,6 @@ def get_file_content(static_file_directory, file_name):
         return file.read()
 
 
-def test_static_directory_view(app: OldmanServer, static_file_directory: str):
-    app.static("/static", static_file_directory, directory_view=True)
-
-    _, response = app.test_client.get("/static/")
-    assert response.status == 200
-    assert response.content_type == "text/html; charset=utf-8"
-    assert "<title>Directory Viewer</title>" in response.text
-
-
 def test_static_index_single(app: OldmanServer, static_file_directory: str):
     app.static("/static", static_file_directory, index="test.html")
 
@@ -64,20 +55,11 @@ def test_static_index_multiple(app: OldmanServer, static_file_directory: str):
     assert response.headers["Content-Type"] == "text/html; charset=utf-8"
 
 
-def test_static_directory_view_and_index(
-    app: OldmanServer, static_file_directory: str
-):
-    app.static(
-        "/static",
-        static_file_directory,
-        directory_view=True,
-        index="foo.txt",
-    )
+def test_static_index_in_a_nested_directory(app: OldmanServer, static_file_directory: str):
+    app.static("/static", static_file_directory, index="foo.txt")
 
     _, response = app.test_client.get("/static/nested/")
-    assert response.status == 200
-    assert response.content_type == "text/html; charset=utf-8"
-    assert "<title>Directory Viewer</title>" in response.text
+    assert response.status == 404
 
     _, response = app.test_client.get("/static/nested/dir/")
     assert response.status == 200
@@ -88,18 +70,11 @@ def test_static_directory_view_and_index(
 
 
 def test_static_directory_handler(app: OldmanServer, static_file_directory: str):
-    dh = DirectoryHandler(
-        "/static",
-        Path(static_file_directory),
-        directory_view=True,
-        index="foo.txt",
-    )
+    dh = DirectoryHandler("/static", Path(static_file_directory), index="foo.txt")
     app.static("/static", static_file_directory, directory_handler=dh)
 
     _, response = app.test_client.get("/static/nested/")
-    assert response.status == 200
-    assert response.content_type == "text/html; charset=utf-8"
-    assert "<title>Directory Viewer</title>" in response.text
+    assert response.status == 404
 
     _, response = app.test_client.get("/static/nested/dir/")
     assert response.status == 200
@@ -110,19 +85,11 @@ def test_static_directory_handler(app: OldmanServer, static_file_directory: str)
 
 
 def test_static_directory_handler_fails(app: OldmanServer):
-    dh = DirectoryHandler(
-        "/static",
-        Path(""),
-        directory_view=True,
-        index="foo.txt",
-    )
+    dh = DirectoryHandler("/static", Path(""), index="foo.txt")
     message = (
-        "When explicitly setting directory_handler, you cannot "
-        "set either directory_view or index. Instead, pass "
-        "these arguments to your DirectoryHandler instance."
+        "When explicitly setting directory_handler, you cannot set index. "
+        "Instead, pass it to your DirectoryHandler instance."
     )
-    with pytest.raises(ValueError, match=message):
-        app.static("/static", "", directory_handler=dh, directory_view=True)
     with pytest.raises(ValueError, match=message):
         app.static("/static", "", directory_handler=dh, index="index.html")
 
@@ -156,42 +123,6 @@ def symlink_test_directory(tmp_path):
     broken_symlink.symlink_to(tmp_path / "nonexistent")
 
     return static_root
-
-
-def test_directory_view_hides_symlinks_outside_root(
-    app: OldmanServer, symlink_test_directory: Path
-):
-    app.static("/static", symlink_test_directory, directory_view=True)
-
-    _, response = app.test_client.get("/static/")
-    assert response.status == 200
-
-    assert "normal_file.txt" in response.text
-    assert "link_to_subdir" in response.text
-    assert "link_to_secret" not in response.text
-    assert "link_to_outside_dir" not in response.text
-    assert "broken_link" not in response.text
-
-
-def test_directory_view_broken_symlink_no_crash(
-    app: OldmanServer, symlink_test_directory: Path
-):
-    app.static("/static", symlink_test_directory, directory_view=True)
-
-    _, response = app.test_client.get("/static/")
-    assert response.status == 200
-
-
-def test_symlink_inside_root_visible(app: OldmanServer, symlink_test_directory: Path):
-    app.static("/static", symlink_test_directory, directory_view=True)
-
-    _, response = app.test_client.get("/static/")
-    assert response.status == 200
-    assert "link_to_subdir" in response.text
-
-    _, response = app.test_client.get("/static/link_to_subdir/")
-    assert response.status == 200
-    assert "sub_file.txt" in response.text
 
 
 def test_symlink_to_outside_file_returns_404(
@@ -259,66 +190,6 @@ def test_symlink_serving_permutations(
 
     _, response = app.test_client.get(path)
     assert response.status == expected_status
-
-
-@pytest.mark.parametrize(
-    "follow_files,follow_dirs,item,expected_visible",
-    [
-        # Normal file - always visible
-        (False, False, "normal_file.txt", True),
-        (True, False, "normal_file.txt", True),
-        (False, True, "normal_file.txt", True),
-        (True, True, "normal_file.txt", True),
-        # Subdir - always visible
-        (False, False, "subdir", True),
-        (True, False, "subdir", True),
-        (False, True, "subdir", True),
-        (True, True, "subdir", True),
-        # Symlink to dir inside root - always visible
-        (False, False, "link_to_subdir", True),
-        (True, False, "link_to_subdir", True),
-        (False, True, "link_to_subdir", True),
-        (True, True, "link_to_subdir", True),
-        # Symlink to file outside root - only with follow_files=True
-        (False, False, "link_to_secret", False),
-        (True, False, "link_to_secret", True),
-        (False, True, "link_to_secret", False),
-        (True, True, "link_to_secret", True),
-        # Symlink to dir outside root - only with follow_dirs=True
-        (False, False, "link_to_outside_dir", False),
-        (True, False, "link_to_outside_dir", False),
-        (False, True, "link_to_outside_dir", True),
-        (True, True, "link_to_outside_dir", True),
-        # Broken symlink - never visible
-        (False, False, "broken_link", False),
-        (True, False, "broken_link", False),
-        (False, True, "broken_link", False),
-        (True, True, "broken_link", False),
-    ],
-)
-def test_directory_view_visibility_permutations(
-    app: OldmanServer,
-    symlink_test_directory: Path,
-    follow_files: bool,
-    follow_dirs: bool,
-    item: str,
-    expected_visible: bool,
-):
-    app.static(
-        "/static",
-        symlink_test_directory,
-        directory_view=True,
-        follow_external_symlink_files=follow_files,
-        follow_external_symlink_dirs=follow_dirs,
-    )
-
-    _, response = app.test_client.get("/static/")
-    assert response.status == 200
-
-    if expected_visible:
-        assert item in response.text
-    else:
-        assert item not in response.text
 
 
 @pytest.mark.parametrize(
