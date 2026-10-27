@@ -70,7 +70,6 @@ from oldman_server.models.futures import (
     FutureException,
     FutureListener,
     FutureMiddleware,
-    FutureRegistry,
     FutureRoute,
     FutureSignal,
 )
@@ -168,7 +167,6 @@ class OldmanServer(
         "_future_exceptions",
         "_future_listeners",
         "_future_middleware",
-        "_future_registry",
         "_future_routes",
         "_future_signals",
         "_future_statics",
@@ -312,7 +310,6 @@ class OldmanServer(
         # Then we can do the rest
         self._blueprint_order: list[Blueprint] = []
         self._delayed_tasks: list[str] = []
-        self._future_registry: FutureRegistry = FutureRegistry()
         self._manager: WorkerManager | None = None
         self._state: ApplicationState = ApplicationState(app=self)
         self._task_registry: dict[str, Task | None] = {}
@@ -2243,8 +2240,6 @@ class OldmanServer(
                 raise e
 
     async def _startup(self):
-        self._future_registry.clear()
-
         trusted = self.config.TRUSTED_PROXIES
         if trusted is not None:  # a malformed entry fails here, not per request
             trusted_networks(trusted_sources(trusted))

@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, MutableSequence, Sequence
+from collections.abc import Iterable, Iterator, MutableSequence
 from copy import deepcopy
 from functools import partial, wraps
 from inspect import isfunction
-from itertools import chain
 from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
@@ -35,37 +34,52 @@ if TYPE_CHECKING:
 
 
 def lazy(func, as_decorator=True):
-    """Decorator to register a function to be called later.
+    """Make a registration method of Blueprint record a future and, on a
+    blueprint that is already registered, apply it to every registration.
 
     Args:
-        func (Callable): Function to be called later.
-        as_decorator (bool): Whether the function should be called
-            immediately or not.
+        func (Callable): The BaseApp method that records the future.
+        as_decorator (bool): Whether the method is used as a decorator
+            factory (``@bp.route("/")``) rather than called directly.
     """
 
     @wraps(func)
     def decorator(bp, *args, **kwargs):
-        nonlocal as_decorator
         kwargs["apply"] = False
-        pass_handler = None
-
-        if args and isfunction(args[0]):
-            as_decorator = False
+        # Called with the handler first (bp.middleware(fn, "request")), the
+        # method records the future at once instead of returning a decorator.
+        # Decided per call: the decorator is shared by every blueprint.
+        decorates = as_decorator and not (args and isfunction(args[0]))
 
         def wrapper(handler):
+            bp._ensure_not_started()
             future = func(bp, *args, **kwargs)
-            if as_decorator:
+            if decorates:
                 future = future(handler)
-
-            if bp.registered:
-                for app in bp.apps:
-                    bp.register(app, {})
-
+            for registration in bp._registrations:
+                bp._apply(registration)
             return future
 
-        return wrapper if as_decorator else wrapper(pass_handler)
+        return wrapper if decorates else wrapper(None)
 
     return decorator
+
+
+class _Registration:
+    """One registration of a blueprint on an app: the options it was
+    registered with, the routes it added there, and which of the
+    blueprint's futures it has applied."""
+
+    __slots__ = ("app", "options", "route_names", "futures", "applied_routes")
+
+    def __init__(self, app: OldmanServer, options: dict[str, Any]):
+        self.app = app
+        self.options = options
+        self.route_names: list[str] = []
+        self.futures: set[Any] = set()
+        # The routes and static routes it added, as applied (with the
+        # registration's prefix, version and name).
+        self.applied_routes: set[Any] = set()
 
 
 class Blueprint(BaseApp):
@@ -95,6 +109,7 @@ class Blueprint(BaseApp):
         "_future_exceptions",
         "_future_signals",
         "_allow_route_overwrite",
+        "_registrations",
         "copied_from",
         "ctx",
         "exceptions",
@@ -188,6 +203,7 @@ class Blueprint(BaseApp):
     def reset(self) -> None:
         """Reset the blueprint to its initial state."""
         self._apps: set[OldmanServer] = set()
+        self._registrations: list[_Registration] = []
         self._allow_route_overwrite = False
         self.exceptions: list[RouteHandler] = []
         self.listeners: dict[str, list[ListenerType[Any]]] = {}
@@ -225,6 +241,7 @@ class Blueprint(BaseApp):
 
         attrs_backup = {
             "_apps": self._apps,
+            "_registrations": self._registrations,
             "routes": self.routes,
             "websocket_routes": self.websocket_routes,
             "middlewares": self.middlewares,
@@ -331,14 +348,55 @@ class Blueprint(BaseApp):
         return bps
 
     def register(self, app, options):
-        """Register the blueprint to the sanic app.
+        """Register the blueprint to the app.
+
+        Each distinct registration (an app and its options, such as the
+        prefix of a group the blueprint is in) is remembered: routes,
+        middleware, exception handlers, listeners and signals added to the
+        blueprint later are applied to it as if they had been there when it
+        was registered.
 
         Args:
-            app (OldmanServer): Sanic app to register the blueprint to.
+            app (OldmanServer): App to register the blueprint to.
             options (dict): Options to be passed to the blueprint.
         """
 
         self._apps.add(app)
+        for registration in self._registrations:
+            if registration.app is app and registration.options == options:
+                break
+        else:
+            registration = _Registration(app, dict(options))
+            self._registrations.append(registration)
+        self._apply(registration)
+
+        if self._future_commands:
+            raise OldmanServerException(
+                "Registering commands with blueprints is not supported."
+            )
+
+    def _ensure_not_started(self) -> None:
+        started = sorted(
+            {r.app.name for r in self._registrations if r.app.state.is_started}
+        )
+        if started:
+            raise OldmanServerException(
+                f"Blueprint {self.name} is registered on an application that "
+                f"has already started ({', '.join(started)}): add its routes, "
+                "middleware, exception handlers, listeners and signals before "
+                "the application starts"
+            )
+
+    def _apply(self, registration: _Registration) -> None:
+        """Apply to one registration the futures it has not applied yet:
+        routes and static routes under its options; middleware and
+        exception handlers to all of its routes (those applied before, to
+        its new routes only); listeners and signals once per app."""
+        app = registration.app
+        options = registration.options
+        applied = registration.futures
+        same_app = [r for r in self._registrations if r.app is app]
+
         url_prefix = options.get("url_prefix", self.url_prefix)
         opt_version = options.get("version", None)
         opt_strict_slashes = options.get("strict_slashes", None)
@@ -352,10 +410,12 @@ class Blueprint(BaseApp):
         middleware = []
         exception_handlers = []
         listeners = defaultdict(list)
-        registered = set()
 
         # Routes
         for future in self._future_routes:
+            if future in applied:
+                continue
+            applied.add(future)
             # Prepend the blueprint URI prefix if available
             uri = self._setup_uri(future.uri, url_prefix)
 
@@ -406,10 +466,11 @@ class Blueprint(BaseApp):
                 future.route_context,
             )
 
-            if (self, apply_route) in app._future_registry:
+            # Another registration with other options may have added the
+            # very same route.
+            if any(apply_route in r.applied_routes for r in same_app):
                 continue
-
-            registered.add(apply_route)
+            registration.applied_routes.add(apply_route)
             route = app._apply_route(
                 apply_route, overwrite=self._allow_route_overwrite
             )
@@ -430,44 +491,58 @@ class Blueprint(BaseApp):
 
         # Static Files
         for future in self._future_statics:
+            if future in applied:
+                continue
+            applied.add(future)
             # Prepend the blueprint URI prefix if available
             uri = self._setup_uri(future.uri, url_prefix)
             apply_route = FutureStatic(uri, *future[1:])
 
-            if (self, apply_route) in app._future_registry:
+            if any(apply_route in r.applied_routes for r in same_app):
                 continue
-
-            registered.add(apply_route)
+            registration.applied_routes.add(apply_route)
             route = app._apply_static(apply_route)
             routes.append(route)
 
-        route_names = [route.name for route in routes if route]
+        new_names = [route.name for route in routes if route]
+        all_names = registration.route_names + new_names
+        registration.route_names = all_names
 
-        if route_names:
-            # Middleware
-            for future in self._future_middleware:
-                if (self, future) in app._future_registry:
-                    continue
-                middleware.append(app._apply_middleware(future, route_names))
+        # Middleware and exception handlers apply to the blueprint's routes
+        # only: those already applied reach the new routes, new ones reach
+        # all of them.
+        for future in self._future_middleware:
+            names = new_names if future in applied else all_names
+            if future not in applied:
+                applied.add(future)
+                if names:
+                    middleware.append(app._apply_middleware(future, names))
+            elif names:
+                app._apply_middleware(future, names)
 
-            # Exceptions
-            for future in self._future_exceptions:
-                if (self, future) in app._future_registry:
-                    continue
-                exception_handlers.append(
-                    app._apply_exception_handler(future, route_names)
-                )
+        for future in self._future_exceptions:
+            names = new_names if future in applied else all_names
+            if future not in applied:
+                applied.add(future)
+                if names:
+                    exception_handlers.append(
+                        app._apply_exception_handler(future, names)
+                    )
+            elif names:
+                app._apply_exception_handler(future, names)
 
-        # Event listeners
+        # Event listeners and signals belong to the app: once per app,
+        # whatever the number of registrations there.
         for future in self._future_listeners:
-            if (self, future) in app._future_registry:
+            if any(future in r.futures for r in same_app):
                 continue
+            applied.add(future)
             listeners[future.event].append(app._apply_listener(future))
 
-        # Signals
         for future in self._future_signals:
-            if (self, future) in app._future_registry:
+            if any(future in r.futures for r in same_app):
                 continue
+            applied.add(future)
             future.condition.update({"__blueprint__": self.name})
             # Force exclusive to be False
             app._apply_signal(
@@ -480,31 +555,14 @@ class Blueprint(BaseApp):
                 )
             )
 
-        self.routes += [route for route in routes if isinstance(route, Route)]
+        new_routes = [route for route in routes if isinstance(route, Route)]
+        self.routes += new_routes
         self.websocket_routes += [
-            route for route in self.routes if route.extra.websocket
+            route for route in new_routes if route.extra.websocket
         ]
         self.middlewares += middleware
         self.exceptions += exception_handlers
         self.listeners.update(dict(listeners))
-
-        if self.registered:
-            self.register_futures(
-                self.apps,
-                self,
-                chain(
-                    registered,
-                    self._future_middleware,
-                    self._future_exceptions,
-                    self._future_listeners,
-                    self._future_signals,
-                ),
-            )
-
-        if self._future_commands:
-            raise OldmanServerException(
-                "Registering commands with blueprints is not supported."
-            )
 
     async def dispatch(self, *args, **kwargs):
         """Dispatch a signal event
@@ -587,22 +645,6 @@ class Blueprint(BaseApp):
                 uri += base
 
         return uri[1:] if uri.startswith("//") else uri
-
-    @staticmethod
-    def register_futures(
-        apps: set[OldmanServer], bp: Blueprint, futures: Sequence[tuple[Any, ...]]
-    ):
-        """Register futures to the apps.
-
-        Args:
-            apps (Set[Sanic]): Set of apps to register the futures to.
-            bp (Blueprint): Blueprint that the futures belong to.
-            futures (Sequence[Tuple[Any, ...]]): Sequence of futures to be
-                registered.
-        """
-
-        for app in apps:
-            app._future_registry.update({(bp, item) for item in futures})
 
 
 bpg_base = MutableSequence[Blueprint]

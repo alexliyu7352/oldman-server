@@ -1150,3 +1150,131 @@ def test_blueprint_copy_returns_blueprint_with_overwritten_properties(
         for key, value in expected.items()
         if hasattr(actual, key)
     )
+
+
+# ------------------------------------------------------------ #
+#  Added after registration
+# ------------------------------------------------------------ #
+
+
+def test_routes_added_after_registration_get_the_blueprint_middleware(
+    app: OldmanServer,
+):
+    bp = Blueprint("late", url_prefix="/late")
+
+    @bp.on_request
+    async def guard(request):
+        if request.headers.get("x-token") != "secret":
+            return text("denied", status=403)
+
+    @bp.exception(NotFound)
+    async def missing(request, exception):
+        return text("blueprint handler", status=404)
+
+    @bp.get("/early")
+    async def early(request):
+        return text("early")
+
+    app.blueprint(bp)
+
+    @bp.get("/added")
+    async def added(request):
+        raise NotFound("gone")
+
+    @bp.on_response
+    async def mark(request, response):
+        response.headers["x-blueprint"] = "late"
+
+    @app.get("/outside")
+    async def outside(request):
+        return text("outside")
+
+    _, response = app.test_client.get("/late/added")
+    assert (response.status, response.text) == (403, "denied")
+    _, response = app.test_client.get(
+        "/late/added", headers={"x-token": "secret"}
+    )
+    assert (response.status, response.text) == (404, "blueprint handler")
+    assert response.headers["x-blueprint"] == "late"
+    _, response = app.test_client.get(
+        "/late/early", headers={"x-token": "secret"}
+    )
+    assert response.text == "early"
+    assert response.headers["x-blueprint"] == "late"
+    _, response = app.test_client.get("/outside")
+    assert response.text == "outside"
+    assert "x-blueprint" not in response.headers
+
+
+def test_routes_added_to_a_nested_group_after_registration(app: OldmanServer):
+    bp = Blueprint("inner", url_prefix="/inner")
+
+    @bp.get("/early")
+    async def early(request):
+        return text("early")
+
+    group = Blueprint.group(bp, url_prefix="/group", version=2)
+    outer = Blueprint.group(group, url_prefix="/api")
+
+    @outer.on_request
+    async def grouped(request):
+        request.ctx.grouped = True
+
+    app.blueprint(outer)
+
+    @bp.get("/added")
+    async def added(request):
+        return text(f"{request.route.name} {request.ctx.grouped}")
+
+    assert sorted(route.path for route in app.router.routes) == [
+        "v2/api/group/inner/added",
+        "v2/api/group/inner/early",
+    ]
+    _, response = app.test_client.get("/v2/api/group/inner/added")
+    assert response.text == f"{app.name}.inner.added True"
+
+
+def test_routes_added_after_registration_in_two_groups(app: OldmanServer):
+    bp = Blueprint("shared", url_prefix="/shared")
+
+    @bp.on_response
+    async def mark(request, response):
+        response.headers["x-shared"] = request.route.name
+
+    @bp.get("/early")
+    async def early(request):
+        return text(request.route.name)
+
+    app.blueprint(Blueprint.group(bp, url_prefix="/a", name_prefix="a"))
+    app.blueprint(Blueprint.group(bp, url_prefix="/b", name_prefix="b"))
+
+    @bp.get("/added")
+    async def added(request):
+        return text(request.route.name)
+
+    for prefix in ("a", "b"):
+        for path in ("early", "added"):
+            _, response = app.test_client.get(f"/{prefix}/shared/{path}")
+            name = f"{app.name}.{prefix}_shared.{path}"
+            assert response.text == name
+            assert response.headers["x-shared"] == name
+
+
+def test_adding_to_a_blueprint_after_its_app_started_raises(app: OldmanServer):
+    bp = Blueprint("started")
+
+    @bp.get("/")
+    async def index(request):
+        return text("index")
+
+    app.blueprint(bp)
+    _, response = app.test_client.get("/")
+    assert response.text == "index"
+
+    with pytest.raises(OldmanServerException, match="has already started"):
+
+        @bp.get("/later")
+        async def later(request):
+            return text("later")
+
+    assert [future.uri for future in bp._future_routes] == ["/"]
