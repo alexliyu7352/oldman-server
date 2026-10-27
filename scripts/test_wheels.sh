@@ -23,10 +23,10 @@ for wheel in "$@"; do
   venv="$(mktemp -d)/venv"
   uv venv --quiet --python "$python" "$venv"
   echo "== $(basename "$wheel")"
-  # With only its declared requirements, as pip installs it: the package, the
-  # command line and the extensions (whose optional libraries are absent).
+  # With only its declared requirements, as pip installs it: the package and
+  # the command line.
   uv pip install --quiet --python "$venv/bin/python" "$wheel"
-  "$venv/bin/python" -I -c "import oldman_server.ext; from oldman_server import OldmanServer; OldmanServer('wheel').extend()" \
+  "$venv/bin/python" -I -c "from oldman_server import OldmanServer; OldmanServer('wheel')" \
     && "$venv/bin/oldman-server" --version \
     || failed+=("$tag: declared requirements")
   uv pip install --quiet --python "$venv/bin/python" "$wheel" --group test
@@ -34,10 +34,10 @@ for wheel in "$@"; do
   "$venv/bin/python" -I -c "import oldman_server.native._native as n; assert '/site-packages/' in n.__file__, n.__file__" \
     || failed+=("$tag: import")
   OLDMAN_SERVER_NATIVE_SERVER=false \
-    "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \
+    "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework \
     || failed+=("$tag: framework suites (asyncio server)")
   OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 \
-    "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework tests/ext \
+    "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/framework \
     || failed+=("$tag: framework suites (native host)")
   "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/test_sanic_native_run.py tests/test_sanic_native_workers.py \
     || failed+=("$tag: native host runs")

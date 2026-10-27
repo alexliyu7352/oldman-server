@@ -223,44 +223,9 @@ oxapy 没有用满服务端的 4 个 CPU（3.1–3.8 核），所以每请求 CP
 - 框架：服务端满载（2 个 CPU）时本项目排第一，13.7 µs，wred 14.3、oxapy 15.8。对 wred 领先约 4%，主要在 `GET /user/0`（13.9 对 15.0 µs），`GET /` 与 `POST /user` 少约 0.3 µs。4 个 CPU 时按每请求 CPU 与 oxapy 并列第一（14.54 对 14.51 µs，oxapy 没有用满 4 个 CPU），wred 15.14，两种连接数的 RPS 本项目都最高。oxapy 的路由与请求处理在 Rust 里，Python 端只有同步的 handler；wred 是约 120 行的 ASGI 微框架（跑在 weft 上），按路径查字典找到 handler，handler 直接返回（正文, 响应头, 状态），没有中间件、信号、异常处理与请求生命周期；weft 自己驱动 ASGI 的协程，不为每个请求建 asyncio Task。本项目保留了 Sanic 的这些功能和每请求一个 Task（contextvars、取消、超时都靠它），满载时每请求 CPU 是原版 Sanic（29.4 µs）的 0.47 倍。
 - `6fcf554` 时用 perf 看本项目的框架路由（2 个 CPU 满载）：内核的网络收发约占 39%，Python 约 35%（分散在框架的快速路径、每请求 Task 的建立与调度、请求与响应对象上，没有单个热点），原生主机约 14%，libc 约 6%。内核那部分每请求约 6 µs，对各家都差不多。
 
-## 挂上 oldman 的五个扩展（wrk，4 核）
+## 挂上 oldman 的五个扩展
 
-同一套 wrk 对照，两边都照 oldman 的方式挂上依赖注入、OpenAPI、HTTP（CORS 等）、健康检查与模板五个扩展：`Extend(app, config=Config(oas=False, oas_autodoc=False, templating_enable_async=True, logging=False), extensions=[...], built_in_extensions=False)`。原版用 sanic-ext 25.12.0（pydantic 2.12.5），本项目用随包的 `oldman_server.ext`；两边的响应头逐条相同，都运行在 uvloop 上。每请求 CPU 为三条路由、两种连接数的平均；每组的四个服务在同一时段交替。
-
-| 服务 | 每请求 CPU µs | RPS，64 连接 | RPS，256 连接 |
-|---|---:|---:|---:|
-| 2026-10-25，本项目 `793c489` | | | |
-| 原版 Sanic | 33.5 | 116,686 | 120,756 |
-| 原版 Sanic + sanic-ext | 49.1 | 79,576 | 82,609 |
-| 本项目 | 20.8 | 183,615 | 198,520 |
-| 本项目 + ext | 48.4 | 81,076 | 83,459 |
-| 2026-10-26，本项目 `7e99767` | | | |
-| 原版 Sanic | 33.7 | 116,740 | 119,505 |
-| 原版 Sanic + sanic-ext | 49.2 | 80,230 | 81,471 |
-| 本项目 | 21.0 | 179,426 | 200,845 |
-| 本项目 + ext | 30.6 | 126,772 | 134,114 |
-| 2026-10-26，本项目 `6fcf554` | | | |
-| 原版 Sanic | 31.2 | 123,474 | 131,212 |
-| 原版 Sanic + sanic-ext | 45.8 | 84,646 | 88,975 |
-| 本项目 | 17.7 | 212,817 | 237,709 |
-| 本项目 + ext | 26.1 | 146,316 | 158,969 |
-| 2026-10-26，本项目 `2eb41f2` | | | |
-| 原版 Sanic | 31.4 | 123,619 | 129,581 |
-| 原版 Sanic + sanic-ext | 46.2 | 84,067 | 88,078 |
-| 本项目 | 16.8 | 223,613 | 250,180 |
-| 本项目 + ext | 24.8 | 152,924 | 168,775 |
-| 2026-10-26，本项目 `16fd826` | | | |
-| 原版 Sanic | 31.0 | 125,264 | 131,643 |
-| 原版 Sanic + sanic-ext | 45.7 | 85,156 | 88,905 |
-| 本项目 | 14.9 | 254,456 | 279,252 |
-| 本项目 + ext | 21.5 | 175,562 | 195,296 |
-| 2026-10-27，本项目 `956ef97` | | | |
-| 原版 Sanic | 31.2 | 123,800 | 131,300 |
-| 原版 Sanic + sanic-ext | 45.6 | 85,270 | 89,078 |
-| 本项目 | 14.5 | 262,354 | 285,686 |
-| 本项目 + ext | 21.2 | 178,950 | 197,810 |
-
-`793c489` 挂上扩展后每请求多约 28 µs（原版多约 16 µs），领先完全消失：依赖注入扩展为每个应用注册了一个 `http.routing.after` 信号，原生主机因此从快速路径退回一般路径；CORS 钩子为了检查响应头而建出整份响应头，响应不能再走快速的头部编码。`ad2e4ce` 起快速路径也按一般路径的位置触发这类信号，信号分派先查启动时存下的结果，CORS 不再建响应头：扩展只多约 10 µs，对原版 + sanic-ext 为 1.6 倍。`6fcf554` 上扩展多约 8.4 µs，对原版 + sanic-ext 为 1.75 倍；服务端 2 个 CPU（见上一节）时为 24.4 对 43.6 µs（1.79 倍）。`2eb41f2` 上扩展多约 8.0 µs，对原版 + sanic-ext 为 1.86 倍；服务端 2 个 CPU 时为 23.0 对 43.7 µs（1.90 倍）。`16fd826` 上扩展多约 6.6 µs，对原版 + sanic-ext 为 2.12 倍；服务端 2 个 CPU 时为 20.0 对 43.6 µs（2.18 倍）。`956ef97` 上扩展同样多约 6.6 µs，对原版 + sanic-ext 为 2.15 倍；服务端 2 个 CPU 时为 19.7 对 43.5 µs（2.20 倍）。
+本包原先随附 sanic-ext 25.12.0 的 fork（`oldman_server.ext`），这一节对照过两边挂上 oldman 那五个扩展后的成本（最后一次 `956ef97`，4 个 CPU：本项目 21.2 µs，原版 + sanic-ext 45.6 µs）。之后扩展从本包移除，模板、CORS 这类配套改由 oldman 自己提供，这组对照不再维护；以前的表格见本文件在 `8018234` 的版本。
 
 ## 内存分配器
 
@@ -354,7 +319,7 @@ python probes/wrk_comparison/run.py --out build/wrk-close --close --connections 
 python probes/wrk_comparison/run.py --out build/wrk-small --path /static/small.bin --connections 256 --services candidate,candidate-shards,stock,candidate-io_uring
 python probes/wrk_comparison/run.py --out build/wrk-large --path /static/large.bin --connections 64 --services candidate,candidate-shards,stock,candidate-io_uring
 bash probes/framework_comparison/setup.sh                                   # web-frameworks-benchmark 的应用与各自的环境（build/framework-comparison）
-python probes/framework_comparison/drive.py build/frameworks-2cpu --server-cpus 2   # 全部服务（含挂上扩展的一对），服务端 2 个 CPU
+python probes/framework_comparison/drive.py build/frameworks-2cpu --server-cpus 2   # 全部服务，服务端 2 个 CPU
 python probes/framework_comparison/drive.py build/frameworks-4cpu                   # 服务端 4 个 CPU
 ```
 

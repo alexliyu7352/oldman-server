@@ -10,7 +10,6 @@ import uuid
 
 from logging import LogRecord
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -229,21 +228,6 @@ def message_in_records():
         return error_captured
 
     return msg_in_log
-
-
-@pytest.fixture
-def ext_instance():
-    ext_instance = MagicMock()
-    ext_instance.injection = MagicMock()
-    return ext_instance
-
-
-@pytest.fixture(autouse=True)  # type: ignore
-def mock_extend(ext_instance):  # noqa
-    # The extensions an app asks for (app.extend(), app.ext) are this mock.
-    with patch("oldman_server.ext.Extend") as extend:
-        extend.return_value = ext_instance
-        yield extend
 
 
 @pytest.fixture(scope="module")

@@ -1,4 +1,4 @@
-"""The framework suites (tests/framework, tests/ext) one test file per process,
+"""The framework suite (tests/framework) one test file per process,
 each with a time limit, for the compatible wheel on macOS and Windows: a hung
 test there ends its whole process (pytest-timeout's thread method on Windows),
 so the other files still report. Prints each file's result (and the end of
@@ -14,8 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
-    files = sorted(path for suite in ("tests/framework", "tests/ext")
-                   for path in (ROOT / suite).rglob("test_*.py"))
+    files = sorted((ROOT / "tests/framework").rglob("test_*.py"))
     failed, broken = [], []
     for path in files:
         name = path.relative_to(ROOT).as_posix()

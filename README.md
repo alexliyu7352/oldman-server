@@ -7,9 +7,9 @@
 - **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 15.9 万对 7.6 万 RPS（2.07 倍），回显请求体约 13.2 万对 6.6 万（2.01 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 11.7 万对 8.5 万（1.39 倍，p99 延迟 5.3 对 8.8 ms），每请求总 CPU 约为原版的 0.42–0.60 倍，每组配对都领先；io_uring 为 2.02 / 2.00 / 1.39 倍。
 - **多 worker**：同 4 个物理核，4 个同线程 worker 进程（默认布局，各一个 CPU，见「多 worker」）对原版 Sanic 4 个 worker：小 JSON 25.1 万对 10.1 万 RPS（2.50 倍），回显请求体 22.3 万对 8.6 万（2.59 倍），sleep 18.6 万对 10.4 万（1.76 倍），每请求总 CPU 约为原版的 0.39–0.56 倍，每组配对都领先；io_uring 为 2.60 / 2.67 / 1.79 倍。（AMD Ryzen 7 3800X，Ubuntu 20.04，Linux 5.15，2026-10-27；客户端为本仓库基于 Asio 的 `build/http_load`，占另外 3 个核。）
 - **wrk 同机参照**（2026-10-25，`probes/wrk_comparison`，web-frameworks-benchmark 的路由，256 连接，4 核）：空文本路由 21.5 万对原版 12.9 万 RPS；同样的布局里挂一个不经框架的裸函数 27.1 万，即原生主机自己的上限，框架每请求约多 4 µs（裸函数之后又快了不少，见下一条）；handler 自己花 25 µs CPU 时 9.0 万对原版 7.0 万；每个请求一条新连接时 4.4 万对 2.5 万；`app.static` 的 4 KiB 文件 2.4 万对 1.1 万，256 KiB 的文件 1.0 万对 7.1 千。
-- **与其他 Python 框架**（wrk，同机，web-frameworks-benchmark 的应用与路由，按服务端 2 个 CPU 满载时的每请求 CPU 比）：本项目 13.7 µs，在框架里排第一，wred 14.3（约 120 行的 ASGI 微框架，没有中间件、信号与异常处理）、oxapy 15.8（路由与请求处理在 Rust 里）；asgineer 25.0、原版 Sanic 29.4、Starlette 32.6、FastAPI 69.3。服务端 4 个 CPU 时本项目 14.5 µs 与 oxapy（14.5，没有用满 4 个 CPU）并列第一，wred 15.1，两种连接数的 RPS 本项目都最高。不经框架的裸函数 9.05 µs，也排第一，比 Rust 写的 weft-wsgi（10.05）、C 写的 fastpysgi（10.13）少约 10%。挂上 oldman 的五个扩展时（4 个 CPU）本项目 21.2 µs，原版 + sanic-ext 45.6 µs（2.15 倍）。
+- **与其他 Python 框架**（wrk，同机，web-frameworks-benchmark 的应用与路由，按服务端 2 个 CPU 满载时的每请求 CPU 比）：本项目 13.7 µs，在框架里排第一，wred 14.3（约 120 行的 ASGI 微框架，没有中间件、信号与异常处理）、oxapy 15.8（路由与请求处理在 Rust 里）；asgineer 25.0、原版 Sanic 29.4、Starlette 32.6、FastAPI 69.3。服务端 4 个 CPU 时本项目 14.5 µs 与 oxapy（14.5，没有用满 4 个 CPU）并列第一，wred 15.1，两种连接数的 RPS 本项目都最高。不经框架的裸函数 9.05 µs，也排第一，比 Rust 写的 weft-wsgi（10.05）、C 写的 fastpysgi（10.13）少约 10%。
 - **完整对照**：各场景的吞吐、每请求 CPU、延迟，以及各阶段相对原版的变化，见 [BENCHMARKS.md](https://github.com/alexliyu7352/oldman-server/blob/main/BENCHMARKS.md)。
-- **测试**：Sanic 与 sanic-ext 的测试集已并入本项目（`tests/framework`、`tests/ext`），按本包的行为维护，经 asyncio 服务器（`OLDMAN_SERVER_NATIVE_SERVER=false`）和经原生主机两种方式都全部通过。与 Sanic 的差异见下文。
+- **测试**：Sanic 的测试集已并入本项目（`tests/framework`），按本包的行为维护，经 asyncio 服务器（`OLDMAN_SERVER_NATIVE_SERVER=false`）和经原生主机两种方式都全部通过。与 Sanic 的差异见下文。
 
 ## 安装
 
@@ -47,7 +47,7 @@ app.run(host="0.0.0.0", port=8000)
 
 `app.run()`、`oldman-server` 命令行（即 Sanic 的 CLI）、`app.create_server()`、测试客户端 `app.test_client`（`oldman_server.testing`）都会走原生主机，默认运行的 `main_process_*` 监听器照常触发。
 
-Sanic Extensions（sanic-ext 25.12.0，MIT）随包提供为 `oldman_server.ext`：依赖注入、OpenAPI、HTTP（CORS、自动 HEAD/OPTIONS 等）、健康检查、日志、模板与请求校验。可选的库按需另装：模板需要 Jinja2，用 pydantic、msgspec 或 attrs 的模型做校验时需要对应的库；不装它们，其余功能照常可用。与没有安装 sanic-ext 的 Sanic 一样，应用默认不被扩展；`app.extend()`、`app.ext` 或 `Extend(app, ...)` 时才启用。
+本包只是服务器与请求路径上的核心框架：模板、CORS、自动 HEAD / OPTIONS、OpenAPI、依赖注入、worker 存活监视这类配套（Sanic 由 sanic-ext 提供）不在包里，由上层框架（如 oldman）或应用自己提供。
 
 名称与 Sanic 不同：应用类是 `OldmanServer`，配置环境变量前缀是 `OLDMAN_SERVER_`，日志名是 `oldman_server.*`（对照见「与 Sanic 的差异」）。
 
@@ -154,16 +154,16 @@ server {
 
 接口：
 
-- 包名 `oldman_server`，不再提供 `import sanic` 的别名。类名去掉 Sanic：`Sanic` → `OldmanServer`、`SanicException` → `OldmanServerException`、`DefaultSanic` → `DefaultServer`、`SanicTestClient` → `TestClient`（内部类同样去掉 Sanic 字样）。配置环境变量前缀 `SANIC_` → `OLDMAN_SERVER_`（如 `OLDMAN_SERVER_NATIVE_SERVER`；不用 `OLDMAN_`，因为 oldman 自己的 `OLDMAN_*` 变量会被读成设置）；日志名 `sanic.root` / `error` / `access` / `server` / `websockets` → `oldman_server.*`；进程名 `Sanic-Main`、`Sanic-Server-*` → `Oldman-Main`、`Oldman-Server-*`。命令行程序名、`--version`、启动信息（MOTD）与 HTML 错误页显示 oldman-server，不再带 Sanic 的标志和 sanic.dev 链接；颜色 `Colors.SANIC` → `Colors.PINK`；健康检查端点（`oldman_server.ext`）的蓝图 `SanicHealth` → `OldmanServerHealth`（路由名与 OpenAPI 标签随之改变）。日志与报错里仍指向 sanic.dev 的说明，是原版 Sanic 的文档（框架层源自它）。
-- Sanic Extensions 随包提供为 `oldman_server.ext`，只在应用要求时启用：`app.extend()`、`app.ext` 或 `Extend(app, ...)`。不再查找 `sanic_ext` 模块，服务器启动时也不会自动扩展应用（原版装了 sanic-ext 时会）；`AUTO_EXTEND = False` 时 `app.extend()` 抛 `RuntimeError`。
-- 不再把 setuptools 列为运行依赖（包里没有用到它；原版 Sanic 列着）；`oldman_server.ext` 在没有 pydantic 时也能导入（原版 sanic-ext 会因此导入失败）。
+- 包名 `oldman_server`，不再提供 `import sanic` 的别名。类名去掉 Sanic：`Sanic` → `OldmanServer`、`SanicException` → `OldmanServerException`、`DefaultSanic` → `DefaultServer`、`SanicTestClient` → `TestClient`（内部类同样去掉 Sanic 字样）。配置环境变量前缀 `SANIC_` → `OLDMAN_SERVER_`（如 `OLDMAN_SERVER_NATIVE_SERVER`；不用 `OLDMAN_`，因为 oldman 自己的 `OLDMAN_*` 变量会被读成设置）；日志名 `sanic.root` / `error` / `access` / `server` / `websockets` → `oldman_server.*`；进程名 `Sanic-Main`、`Sanic-Server-*` → `Oldman-Main`、`Oldman-Server-*`。命令行程序名、`--version`、启动信息（MOTD）与 HTML 错误页显示 oldman-server，不再带 Sanic 的标志和 sanic.dev 链接；颜色 `Colors.SANIC` → `Colors.PINK`。日志与报错里仍指向 sanic.dev 的说明，是原版 Sanic 的文档（框架层源自它）。
+- 不支持 Sanic Extensions：没有 `app.ext`、`app.extend()` 与 `AUTO_EXTEND`，服务器启动时也不查找、不加载 sanic-ext（原版装了它就会自动扩展应用）。sanic-ext 导入的是 `sanic` 包本身，不能用在本包的应用上。
+- 不再把 setuptools 列为运行依赖（包里没有用到它；原版 Sanic 列着）。
 - 测试客户端随包提供为 `oldman_server.testing`（源自 sanic-testing 24.6.0），`app.test_client` 需要 httpx；不再需要 sanic-testing。
 - 新增 `response.abort()`：对 `request.respond()` 得到的流式响应，在已发出的数据之后关闭连接、不完成响应（没有结束块，或少于 Content-Length），请求方因此知道内容不完整；之后再 `send()` 会抛出，handler 在下一次 await 被取消（与请求方断开时相同）。还没发出任何数据时抛 `ServerError`（这时应抛异常或返回错误响应），响应已结束时什么都不做。asyncio 服务器与原生主机行为相同；oldman 代理里的 `request.transport.get_protocol().close()`（在原生主机上不起作用）可以换成它。
 - 新增 `@app.rewrite_path`：注册的函数在路由与所有中间件之前对每个请求执行，返回新路径（以 `/` 开头）或 None；按注册顺序依次执行。之后请求的 `path` 和路由都用新路径，查询串保留，`raw_url` 仍是请求方发来的。抛出的异常交给错误处理器。oldman 的 `I18nRequest`（重写私有的 `_parsed_url`）可以换成它：自定义请求类会让原生主机走一般路径，用这个钩子则保留快速路径。
 - 新增设置 `UNIX_SOCKET_MODE`：服务器绑定的 unix socket（`unix=`、`NATIVE_WORKER_LISTEN`）的权限位，默认 0o666（与 Sanic 相同）；可写 `0o660` 或八进制字符串（环境变量写 `OLDMAN_SERVER_UNIX_SOCKET_MODE=0o660`）。不是 0–0o777 的值在绑定时报 `ValueError`。
 - 新增设置 `TRUSTED_PROXIES`：地址或网段（列表，或逗号分隔的字符串，如 `"127.0.0.1, 10.0.0.0/8"`），`"unix"` 表示 unix socket 连接（能连上 socket 的进程都被信任，权限见 `UNIX_SOCKET_MODE`）。设置后，只有来自这些来源的连接，其 `Forwarded` / `X-Forwarded-*` 等转发头才按 `FORWARDED_SECRET`、`REAL_IP_HEADER`、`PROXIES_COUNT` 生效；其他连接的 `remote_addr` 为空，`client_ip`、`scheme`、`host` 取实际连接。双栈监听收到的 IPv4 映射地址（`::ffff:a.b.c.d`）按 IPv4 网段比较。格式错误在服务器启动时报 `ValueError`。不设置时与原版相同：转发头对所有连接都按上述设置生效。
 - 新增 `HTTPMethodView.before_dispatch(request, *args, **kwargs)`：覆写后在方法 handler 之前以同样的参数执行（可为同步或协程），返回响应则直接用它回应，返回 None 才进入 handler；抛出的异常交给错误处理器。不覆写时没有额外开销。oldman 的 `HTTPMethodView` 不必再复制整个 `dispatch_request`，把登录与权限检查放进这里即可。
-- 已移除：coffee 模式（`app.make_coffee()`、`prepare(coffee=...)`、`--coffee`，Sanic 标志的彩蛋）；REPL（`--repl`、`app.repl_ctx`）；后台运行（`--daemon` 及 `kill` / `status` / `restart` / `stop` 命令，进程管理交给 systemd 或 oldman 自己的服务命令）；inspector（`INSPECTOR*` 设置、`app.inspector`、`inspect` 命令）；TLS（`run()` / `prepare()` / `create_server()` 的 `ssl`、`auto_tls`，`--cert` / `--key` / `--tls` / `--auto-tls`，`LOCAL_CERT_CREATOR` 等设置，`certloader_class`，`conn_info.ssl` / `cert` / `server_name`）与 HTTP/3（`version` 参数、`--http` / `-1` / `-3`、`request.stream_id`、`Alt-Svc`）：TLS 由前端代理终止，`request.scheme` 照旧取 `Forwarded` / `X-Forwarded-Proto`；ASGI（应用不再是 ASGI 可调用对象，`app.asgi`、`app.asgi_client`、`request.scope` 一并移除），只由本包自己的服务器运行；`oldman_server.ext` 的 `Extend.injection()`（sanic-ext 自 v22.6 起标为弃用的旧名称），用 `add_dependency()`。
+- 已移除：coffee 模式（`app.make_coffee()`、`prepare(coffee=...)`、`--coffee`，Sanic 标志的彩蛋）；REPL（`--repl`、`app.repl_ctx`）；后台运行（`--daemon` 及 `kill` / `status` / `restart` / `stop` 命令，进程管理交给 systemd 或 oldman 自己的服务命令）；inspector（`INSPECTOR*` 设置、`app.inspector`、`inspect` 命令）；TLS（`run()` / `prepare()` / `create_server()` 的 `ssl`、`auto_tls`，`--cert` / `--key` / `--tls` / `--auto-tls`，`LOCAL_CERT_CREATOR` 等设置，`certloader_class`，`conn_info.ssl` / `cert` / `server_name`）与 HTTP/3（`version` 参数、`--http` / `-1` / `-3`、`request.stream_id`、`Alt-Svc`）：TLS 由前端代理终止，`request.scheme` 照旧取 `Forwarded` / `X-Forwarded-Proto`；ASGI（应用不再是 ASGI 可调用对象，`app.asgi`、`app.asgi_client`、`request.scope` 一并移除），只由本包自己的服务器运行。
 - 请求头的值去掉两端的空白（RFC 9110 的可选空白；原版只去掉开头，`X-A: v␠␠` 原版得到 `"v  "`），两种服务器相同；迭代 `request.headers` 得到的名字都是小写（原版的解析器本来如此，原生主机现在也一样）。
 - 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。
 - JSON 默认用 orjson（`json()`、`request.json`、JSON 错误页与 JSON 日志），不再用 ujson：输出为紧凑的 UTF-8（非 ASCII 字符不再转成 `\uXXXX`）；datetime、UUID、dataclass、enum 可直接编码；非 str 的键照旧转成字符串；超过 64 位的整数会抛 `TypeError`；`NaN`、`Infinity` 输出为 `null`（原版输出不合法的 `NaN`）；不认识的对象不再调用 `__json__` 或 `toDict()`，`Decimal`（数据库驱动的 DECIMAL 列）与含孤立代理项的字符串也会抛 `TypeError`，要编码它们就用 `json(..., default=...)`（如 `default=str`，或把 `Decimal` 转成 `float`）。`request.json` 用 orjson 解析：超出 64 位的整数会变成 `float`（失去精度），`NaN`、`Infinity` 不被接受（400）；要精确的大整数就用 `OldmanServer(loads=json.loads)`。JSON 与文本错误页里编码器不认识的上下文值显示为它的 `str()`，不会让错误响应本身变成 500。`json()` 的额外关键字参数交给 orjson（`default`、`option`，如 `option=orjson.OPT_SORT_KEYS`）；`json_dumps` 返回 bytes。要换编码器仍可用 `json(..., dumps=...)` 或 `OldmanServer(dumps=..., loads=...)`。
@@ -182,7 +182,6 @@ server {
 - 分块请求体按 RFC 9112 解析：块长度只能是十六进制数字（原版也接受 `0x5`、带空白的长度），块数据后必须是 CRLF（原版不检查这两个字节），块长度行（含扩展）最长 64 字节、扩展里不能有控制字符（原版只在这一行还没收完时限长，扩展内容不看），否则 400，与原生主机相同。HTTP/1.0 请求带 `Transfer-Encoding`（RFC 9112 6.1）或请求有多个 `Host`（RFC 9112 3.2）时 400；缺 `Host` 的 HTTP/1.1 请求仍照原版接受。
 - `content_type=None` 的响应不发送 `Content-Type`，不再发送字面值 `None`（oldman 代理里的默认值）。
 - `file_stream()` 带 Range 时按剩余量读取：范围大于 `chunk_size` 又不是它的整数倍时，原版最后一次多读多发，送出的字节超过 `Content-Range` 声明的范围。两种服务器相同。
-- 内置扩展类 `HealthExtension`、`HTTPExtension`、`InjectionExtension`、`OpenAPIExtension`、`TemplatingExtension` 从 `oldman_server.ext` 导出（oldman 原先从内部模块路径导入）。`TemplatingExtension` 需要 Jinja2，用到时才导入，不在 `from oldman_server.ext import *` 里。
 
 经原生主机时：
 
@@ -206,13 +205,13 @@ server {
 
 ## 测试与测量
 
-`tests/framework`、`tests/ext` 源自 Sanic 25.12.1 与 sanic-ext 25.12.0 的测试集（MIT），已改为本包的 import 名和行为，两种运行方式都要全部通过：
+`tests/framework` 源自 Sanic 25.12.1 的测试集（MIT），已改为本包的 import 名和行为，两种运行方式都要全部通过：
 
 ```sh
 python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>    # 本项目原生主机测试，每个用例独立进程
-OLDMAN_SERVER_NATIVE_SERVER=false .venv/bin/python -m pytest tests/framework tests/ext   # 框架测试：asyncio 服务器
-OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 .venv/bin/python -m pytest tests/framework tests/ext   # 框架测试：经原生主机
-OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SAME_THREAD=true .venv/bin/python -m pytest tests/framework tests/ext   # 同上，同线程模式
+OLDMAN_SERVER_NATIVE_SERVER=false .venv/bin/python -m pytest tests/framework   # 框架测试：asyncio 服务器
+OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 .venv/bin/python -m pytest tests/framework   # 框架测试：经原生主机
+OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SAME_THREAD=true .venv/bin/python -m pytest tests/framework   # 同上，同线程模式
 OLDMAN_SERVER_NATIVE_SAME_THREAD=true python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>   # 原生主机测试，同线程模式
 python scripts/calibrate.py build/calib-<目录> candidate:small candidate:body      # 服务端吞吐与主线程 µs
 python probes/sanic_comparison/run.py --python-only --out build/compare-<新目录>     # 阶段验收：与原版 Sanic 配对对照
@@ -236,11 +235,10 @@ python probes/wrk_comparison/run.py --out build/wrk-<新目录> --quiet         
 - `src/oldman_server/native/host.py`：应用与原生主机之间的适配层，包括请求、响应、流、文件、协议错误和 WebSocket。
 - `src/oldman_server/native/engine.py`：原生运行时的 Python 端（事件取出、每请求 Task、回传批次、背压、文件操作）。
 - `native/`：原生主机（`server.cc`）与运行时（`runtime.cc`，另有 io_uring 构建 `liboldman_native_uring.so`），基于 Asio；HTTP/1.1 解析与写出（`http1.cc`）、multipart 解析（`multipart.hh`）、Python 绑定（`bridge.cc`，构建为 `oldman_server.native._native`）。
-- `src/oldman_server/ext/`：Sanic Extensions（源自 sanic-ext 25.12.0，许可见 `LICENSE.sanic-ext`）。
 - `src/oldman_server/testing/`：测试客户端（源自 sanic-testing 24.6.0，许可见 `LICENSE.sanic-testing`）。
 - `upstream/`：所依据的上游版本（归档地址、提交）与各文件的 SHA-256。与原版 Sanic 的性能对照要先把 `upstream/sanic.json` 的归档解压到 `build/sanic-upstream/`（得到 `sanic-<提交>/`），对照前逐个文件核对。
-- `tests/`：本项目测试，其中 `tests/framework`、`tests/ext` 源自 Sanic 与 sanic-ext 的测试集；`scripts/`：构建、测试与测量工具；`probes/`：对照与诊断用的服务端和驱动。
+- `tests/`：本项目测试，其中 `tests/framework` 源自 Sanic 的测试集；`scripts/`：构建、测试与测量工具；`probes/`：对照与诊断用的服务端和驱动。
 
 ## 许可证
 
-MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.ext` 源自 sanic-ext 25.12.0，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方代码（Asio、pybind11、liburing）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND BSD-3-Clause AND BSL-1.0`。
+MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方代码（Asio、pybind11、liburing）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND BSD-3-Clause AND BSL-1.0`。

@@ -30,7 +30,6 @@ ENV_PREFIX = "OLDMAN_SERVER_"
 DEFAULT_CONFIG = {
     "_FALLBACK_ERROR_FORMAT": _default,
     "ACCESS_LOG": False,
-    "AUTO_EXTEND": True,
     "AUTO_RELOAD": False,
     "EVENT_AUTOREGISTER": False,
     "DEPRECATION_FILTER": "once",
@@ -146,7 +145,6 @@ class Config(dict, metaclass=DescriptorMeta):
     """
 
     ACCESS_LOG: bool
-    AUTO_EXTEND: bool
     AUTO_RELOAD: bool
     EVENT_AUTOREGISTER: bool
     DEPRECATION_FILTER: FilterWarningType

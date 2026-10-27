@@ -1,8 +1,6 @@
 """Same-machine wrk runs of web-frameworks-benchmark's Python entries (the
 apps and environments setup.sh makes) beside oldman-server, in two groups: bare
-callables on a server, and frameworks with routing; and stock Sanic with
-sanic-ext against oldman-server with its ext, both with oldman's five
-extensions (ext_app.py). Server: 4 CPUs (taskset), 4 workers or processes
+callables on a server, and frameworks with routing. Server: 4 CPUs (taskset), 4 workers or processes
 each (PYTHON_CPU_COUNT=4 where the app sizes itself by cpu_count); wrk on 3
 other CPUs, as probes/wrk_comparison. --server-cpus 2 gives every service 2 CPUs
 and 2 workers, so that the server, not wrk, is the bottleneck for the
@@ -64,14 +62,9 @@ SERVICES = {
     "fastapi": ("framework", "fastapi", "fastapi", UVICORN, "uvicorn", {}),
     "lihil": ("framework", "lihil", "lihil", UVICORN, "uvicorn", {}),
     "asgineer": ("framework", "asgineer", "asgineer", UVICORN, "uvicorn", {}),
-    # oldman's five extensions on each side (ext_app.py), beside the plain sanic / oldman-server rows.
-    "sanic-ext5": ("ext", "sanic-ext", HERE, [str(HERE / "ext_app.py"), "stock", "3000", "{workers}"],
-                   "sanic + sanic-ext, oldman's five extensions", {}),
-    "oldman-server-ext5": ("ext", None, HERE, [str(HERE / "ext_app.py"), "candidate", "3000", "{workers}"],
-                           "oldman-server native host + ext, oldman's five extensions", {}),
 }
-# Services with a /loop route, checked to run on uvloop: ours, and both sides of the ext pair.
-LOOP_ROUTE = {"oldman-server-bare", "oldman-server", "sanic-ext5", "oldman-server-ext5"}
+# Services with a /loop route, checked to run on uvloop: ours.
+LOOP_ROUTE = {"oldman-server-bare", "oldman-server"}
 ROUTES = {"root": ("GET", "/", b""), "user": ("GET", "/user/0", b"0"), "post": ("POST", "/user", b"")}
 POST_LUA = HERE / "post.lua"
 
@@ -114,7 +107,7 @@ def start(name, layout):
                     status, got = request(method, path)
                     if not 200 <= status < 300 or got != body:  # litestar answers POST with 201
                         raise RuntimeError(f"{name} {method} {path}: {status} {got[:80]!r}")
-                # Ours and the ext pair must run on uvloop (the project's rule for its
+                # Ours must run on uvloop (the project's rule for its
                 # own comparisons); the others run as the site configures them.
                 if name in LOOP_ROUTE and request("GET", "/loop")[1] != b"uvloop":
                     raise RuntimeError(f"{name} does not run on uvloop")

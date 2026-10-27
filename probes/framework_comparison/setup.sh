@@ -24,7 +24,6 @@ declare -A packages=(
   [robyn]='robyn==0.88.0 uvloop==0.22.1'
   [emmett]='emmett[uvloop]==2.8.2 granian==2.8.5 uvloop==0.22.1'
   [sanic]='sanic==25.12.1 uvloop==0.22.1'
-  [sanic-ext]='sanic==25.12.1 sanic-ext==25.12.0 jinja2==3.1.6 pydantic==2.12.5 uvloop==0.22.1'
   [blacksheep]="blacksheep==2.6.4 $uvicorn"
   [starlette]="starlette==1.10.0 $uvicorn"
   [litestar]="litestar==2.25.0 $uvicorn"

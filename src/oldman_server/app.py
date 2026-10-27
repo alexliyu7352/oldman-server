@@ -43,7 +43,6 @@ from urllib.parse import urlencode, urlunparse
 from sanic_routing.exceptions import FinalizationError, NotFound
 from sanic_routing.route import Route
 
-from oldman_server.application.ext import setup_ext
 from oldman_server.application.state import ApplicationState, ServerStage
 from oldman_server.base.root import BaseApp
 from oldman_server.blueprint_group import BlueprintGroup
@@ -89,11 +88,6 @@ from oldman_server.worker.manager import WorkerManager
 
 
 if TYPE_CHECKING:
-    try:
-        from oldman_server.ext import Extend  # type: ignore
-        from oldman_server.ext.extensions.base import Extension  # type: ignore
-    except ImportError:
-        Extend = TypeVar("Extend", type)  # type: ignore
     from oldman_server.testing.testing import TestClient
 
 
@@ -170,7 +164,6 @@ class OldmanServer(
     __slots__ = (
         "_blueprint_order",
         "_delayed_tasks",
-        "_ext",
         "_future_commands",
         "_future_exceptions",
         "_future_listeners",
@@ -1997,97 +1990,6 @@ class OldmanServer(
         return self.state.reload_dirs
 
     # -------------------------------------------------------------------- #
-    # Sanic Extensions
-    # -------------------------------------------------------------------- #
-
-    @property
-    def ext(self) -> Extend:
-        """Convenience property for accessing Sanic Extensions.
-
-        This property is available if the `sanic-ext` package is installed.
-
-        See [Sanic Extensions](/en/plugins/sanic-ext/getting-started)
-            for details.
-
-        Returns:
-            Extend: The Sanic Extensions instance.
-
-        Examples:
-            A typical use case might be for registering a dependency injection.
-            ```python
-            app.ext.dependency(SomeObject())
-            ```
-        """
-        if not hasattr(self, "_ext"):
-            setup_ext(self)
-
-        if not hasattr(self, "_ext"):
-            raise RuntimeError(
-                "The extensions are off: the AUTO_EXTEND setting is False."
-            )
-        return self._ext  # type: ignore
-
-    def extend(
-        self,
-        *,
-        extensions: list[type[Extension]] | None = None,
-        built_in_extensions: bool = True,
-        config: Config | dict[str, Any] | None = None,
-        **kwargs,
-    ) -> Extend:
-        """Extend Sanic with additional functionality using Sanic Extensions.
-
-        This method enables you to add one or more Sanic Extensions to the
-        current Sanic instance. It allows for more control over the Extend
-        object, such as enabling or disabling built-in extensions or providing
-        custom configuration.
-
-        See [Sanic Extensions](/en/plugins/sanic-ext/getting-started)
-            for details.
-
-        Args:
-            extensions (Optional[List[Type[Extension]]], optional): A list of
-                extensions to add. Defaults to `None`, meaning only built-in
-                extensions are added.
-            built_in_extensions (bool, optional): Whether to enable built-in
-                extensions. Defaults to `True`.
-            config (Optional[Union[Config, Dict[str, Any]]], optional):
-                Optional custom configuration for the extensions. Defaults
-                to `None`.
-            **kwargs: Additional keyword arguments that might be needed by
-                specific extensions.
-
-        Returns:
-            Extend: The Sanic Extensions instance.
-
-        Raises:
-            RuntimeError: If an attempt is made to extend Sanic after Sanic
-                Extensions has already been set up.
-
-        Examples:
-            A typical use case might be to add a custom extension along with
-                built-in ones.
-            ```python
-            app.extend(
-                extensions=[MyCustomExtension],
-                built_in_extensions=True
-            )
-            ```
-        """
-        if hasattr(self, "_ext"):
-            raise RuntimeError(
-                "Cannot extend the app after its extensions have been set up."
-            )
-        setup_ext(
-            self,
-            extensions=extensions,
-            built_in_extensions=built_in_extensions,
-            config=config,
-            **kwargs,
-        )
-        return self.ext
-
-    # -------------------------------------------------------------------- #
     # Class methods
     # -------------------------------------------------------------------- #
 
@@ -2346,9 +2248,6 @@ class OldmanServer(
         trusted = self.config.TRUSTED_PROXIES
         if trusted is not None:  # a malformed entry fails here, not per request
             trusted_networks(trusted_sources(trusted))
-
-        if hasattr(self, "_ext"):
-            self.ext._display()
 
         if self.state.is_debug and self.config.TOUCHUP is not True:
             self.config.TOUCHUP = False

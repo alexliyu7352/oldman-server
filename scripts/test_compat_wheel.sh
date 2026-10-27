@@ -21,7 +21,7 @@ else
 fi
 failed=()
 uv pip install --quiet --python "$py" "$wheel"
-"$py" -I -c "import oldman_server.ext; from oldman_server import OldmanServer; OldmanServer('wheel').extend()" \
+"$py" -I -c "from oldman_server import OldmanServer; OldmanServer('wheel')" \
   && "$bin/oldman-server" --version \
   || failed+=("declared requirements")
 "$py" -I scripts/compat_smoke.py || failed+=("serving")

@@ -35,10 +35,6 @@ dependencies = [
     "html5tagger>=1.2.1",
     "tracerite>=2.2.0",
     "typing-extensions>=4.4.0",
-    # oldman_server.ext (Sanic Extensions 25.12.0). Optional: Jinja2 (templating),
-    # pydantic, msgspec and attrs (validation of models of those kinds).
-    # scripts/test_wheels.sh imports the package with only these installed.
-    "pyyaml>=3.0.0",
 ]
 
 [project.urls]
@@ -73,11 +69,9 @@ only-include = [
 [dependency-groups]
 build = ["cmake==4.4.3", "ninja==1.13.2", "pybind11==3.1.0"]
 http = ["aiohttp==3.13.5"]
-# tests/framework and tests/ext (from Sanic's and Sanic Extensions' suites)
-# also need httpx (the test client) and the extensions' optional libraries.
+# tests/framework (from Sanic's suite) also needs httpx (the test client).
 test = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-timeout==2.4.0", "pytest-benchmark==5.3.0",
-        "httpx==0.28.1", "beautifulsoup4==4.15.0",
-        "jinja2==3.1.6", "pydantic==2.12.5", "msgspec==0.20.0", "attrs==26.1.0", {include-group = "http"}]
+        "httpx==0.28.1", "beautifulsoup4==4.15.0", {include-group = "http"}]
 # ujson: stock Sanic's json() encoder in the comparison with stock Sanic.
 benchmark = ["ujson==6.0.0", {include-group = "http"}]
 
