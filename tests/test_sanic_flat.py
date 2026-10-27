@@ -1,5 +1,6 @@
 """The flat native path must match Sanic's generic handle_request path exactly."""
 import asyncio
+import logging
 
 import pytest
 from oldman_server import Blueprint, OldmanServer
@@ -227,8 +228,13 @@ def test_flat_path_matches_generic_handle_request(signals):
         for attach_to in ("request", "response")} if signals else set())
 
 
-@pytest.mark.parametrize("change", ["signal", "request_class", "handle_request"])
-def test_flat_path_is_not_used_outside_its_contract(change):
+@pytest.mark.parametrize("change, reason", [
+    ("signal", "the signal http.lifecycle.* is a parameterized http event"),
+    ("request_class", "Custom, not Request"),
+    ("handle_request", "Overridden replaces handle_request"),
+    ("touchup", "TOUCHUP is off"),
+])
+def test_flat_path_is_not_used_outside_its_contract(change, reason, caplog):
     async def scenario():
         from oldman_server.request import Request
         if change == "request_class":
@@ -240,6 +246,9 @@ def test_flat_path_is_not_used_outside_its_contract(change):
                 async def handle_request(self, request):
                     return await super().handle_request(request)
             app = Overridden(f"flat_off_{change}", configure_logging=False)
+        elif change == "touchup":
+            app = OldmanServer(f"flat_off_{change}", configure_logging=False)
+            app.config.TOUCHUP = False  # as debug mode sets it
         else:
             app = OldmanServer(f"flat_off_{change}", configure_logging=False)
 
@@ -253,7 +262,28 @@ def test_flat_path_is_not_used_outside_its_contract(change):
             return text("ok")
         app.state.native_loop = asyncio.get_running_loop()
         await app._startup()
-        adapter = NativeApplication(app, 65536)
+        with caplog.at_level(logging.INFO, logger="oldman_server.server"):
+            adapter = NativeApplication(app, 65536)
         assert not adapter._flat
+        # Said once, at startup, with the reason.
+        notes = [record.getMessage() for record in caplog.records
+                 if "without its fast path" in record.getMessage()]
+        assert len(notes) == 1 and reason in notes[0], notes
         assert (await adapter(native("GET", b"/")))[:2] == (200, b"ok")
+    uvloop.run(scenario())
+
+
+def test_flat_path_is_used_without_a_note(caplog):
+    async def scenario():
+        app = OldmanServer("flat_on", configure_logging=False)
+
+        @app.get("/")
+        async def handler(request):
+            return text("ok")
+        app.state.native_loop = asyncio.get_running_loop()
+        await app._startup()
+        with caplog.at_level(logging.INFO, logger="oldman_server.server"):
+            adapter = NativeApplication(app, 65536)
+        assert adapter._flat
+        assert not [record for record in caplog.records if "fast path" in record.getMessage()]
     uvloop.run(scenario())

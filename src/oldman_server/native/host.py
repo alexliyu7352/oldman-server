@@ -23,7 +23,7 @@ from oldman_server.exceptions import (BadRequest, ExpectationFailed, PayloadTooL
 from oldman_server.helpers import has_message_body
 from oldman_server.http import http1 as _http1
 from oldman_server.http.constants import Stage
-from oldman_server.log import access_logger, error_logger, websockets_logger
+from oldman_server.log import access_logger, error_logger, server_logger, websockets_logger
 from oldman_server.middleware import Middleware
 from oldman_server.models import server_types
 from oldman_server.request import Request
@@ -751,7 +751,12 @@ class NativeApplication:
             except NotFound:
                 handler = BaseScheme.build(handler, globals(), app)
         self._handle_request = handler.__get__(self)
-        self._flat = self._flat_supported(app)
+        reason = self._flat_unsupported(app)
+        self._flat = reason is None
+        if reason is not None:
+            # Each of these costs every request several microseconds; most
+            # come from the application's own settings, so say which.
+            server_logger.info(f"The native host serves {app.name} without its fast path: {reason}")
         if self._flat:
             # Compiled for this app as TouchUp compiles handle_request: the
             # dispatch of each http.* event without a signal is removed, so an
@@ -771,25 +776,41 @@ class NativeApplication:
         self._settle_natively = not self._access_log and not self._cached_routes
 
     @staticmethod
-    def _flat_supported(app):
-        """Whether _serve_flat reproduces handle_request for this app.
+    def _flat_unsupported(app):
+        """Why _serve_flat cannot reproduce handle_request for this app, or
+        None when it can.
 
         Decided once at startup: replacing these methods, the router or the
         request class, or registering signals, after startup is not supported.
         """
+        if app.config.TOUCHUP is not True:
+            return "TOUCHUP is off (debug mode turns it off)"
+        if not app.signal_router.finalized:
+            return "its signals are not finalized"
+        request_class = app.request_class or Request
+        if request_class is not Request:
+            return (f"its request class is {request_class.__module__}.{request_class.__qualname__}, "
+                    "not Request")
+        if type(app.router) is not Router:
+            return f"its router is {type(app.router).__module__}.{type(app.router).__qualname__}, not Router"
         app_class = type(app)
-        return (app.config.TOUCHUP is True and app.signal_router.finalized
-                and (app.request_class or Request) is Request
-                and type(app.router) is Router
-                and all(getattr(app_class, name) is getattr(OldmanServer, name) for name in (
-                    "handle_request", "handle_exception", "dispatch",
-                    "_run_request_middleware", "_run_response_middleware"))
-                # _call_flat dispatches the http.* events handle_request, the
-                # middleware runners and _dispatch_request do, at the same points
-                # (the others the native host dispatches on neither path). A
-                # parameterized one ("http.lifecycle.<name>") TouchUp cannot match.
-                and all(route.name in _HTTP_EVENTS or not route.name.startswith(("http", "<"))
-                        for route in app.signal_router.routes))
+        for name in ("handle_request", "handle_exception", "dispatch",
+                     "_run_request_middleware", "_run_response_middleware"):
+            if getattr(app_class, name) is not getattr(OldmanServer, name):
+                return f"{app_class.__qualname__} replaces {name}"
+        # _call_flat dispatches the http.* events handle_request, the
+        # middleware runners and _dispatch_request do, at the same points
+        # (the others the native host dispatches on neither path). A
+        # parameterized one ("http.lifecycle.<name>") TouchUp cannot match.
+        for route in app.signal_router.routes:
+            if route.name not in _HTTP_EVENTS and route.name.startswith(("http", "<")):
+                return f"the signal {route.name} is a parameterized http event"
+        return None
+
+    @classmethod
+    def _flat_supported(cls, app):
+        """Whether _serve_flat reproduces handle_request for this app."""
+        return cls._flat_unsupported(app) is None
 
     async def _dispatch_request(self, request):
         await self.app.dispatch("http.lifecycle.request", inline=True,

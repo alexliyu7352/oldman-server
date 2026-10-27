@@ -98,6 +98,7 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 python app.py
 - 只服务明文 HTTP/1.1：TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见「与 Sanic 的差异」）。
 - 多 worker：会启动 worker 进程的运行（`workers > 1`、`fast`、`auto_reload`、`dev`）照原版由 Sanic 的 worker manager 管理（重启、扩缩、`app.m` 都相同），每个 worker 进程各自运行原生主机：主进程把 CPU 分成每个 worker 一组，worker 的 Python 线程固定在组内第一个 CPU，shard 用其余的（按 worker 编号取组；编号见 `NATIVE_WORKER_LISTEN`）。CPU 不够每个 worker 再配一个 shard CPU 时（`fast=True` 每个 CPU 一个 worker，或 `workers` 多于 CPU 数的一半），每个 worker 只占一个 CPU，shard 在它的 Python 线程上运行（同线程模式，`NATIVE_SAME_THREAD`）：同样的核上跑 Python 的进程多了一倍，也省掉线程之间的交接。4 个核上，同一个空文本路由约 21.5 万对 2 个 worker × (1 + 1) 的 16.7 万 RPS；handler 自己花 25 µs CPU 时 9.0 万对 6.2 万（原版 Sanic 4 worker 12.9 万、7.0 万）。worker 数多于 CPU 组时，多出的 worker 与前面的共用 CPU 组（记一条警告）。
 - 用 `fork` 启动方式、且父进程已经运行过原生主机时（一个进程只启动一次原生运行时，fork 出的子进程有它的状态却没有它的线程），子进程改用 asyncio 服务器并记一条警告；默认的 `spawn` 不受影响。
+- 快速路径：普通应用的请求由原生主机一次建好请求对象、由原生代码收尾与记账，每请求比一般路径（与 Sanic 的 `handle_request` 相同）少数微秒。debug 模式（TOUCHUP 关闭）、换了 `request_class` 或 router、覆写了 `handle_request` 等方法、注册了带参数的 `http.*` 信号时退回一般路径，行为相同；启动时在 `oldman_server.server` 记一条 INFO 说明原因。
 - 每个进程只有一个原生服务器：同一进程同一事件循环上的第二个服务器（如第二个应用的服务器）使用 asyncio 服务器（记一条警告），两者都正常服务。
 
 协议错误（如非法请求行、请求头过大、坏的 chunked 编码、请求体超限）与原版报出相同的状态码和消息，并交给应用的错误处理器。
