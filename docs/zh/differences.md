@@ -60,6 +60,7 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - `request.head`、`raw_headers`、`request_line` 由解析出的请求行与字段重建（冒号后一个空格、值已去掉两端空白、名字保留请求方的大小写），不是请求方发来的原始字节。
 - `file()`（`app.static` 也用它）回应 128 KiB 以上的文件时，文件内容不读进 Python：handler 里只打开文件（打不开时照原版在 handler 里抛出），送出响应时由原生主机从文件读出、直接写入连接。响应中间件看到的 `response.body` 是 None；中间件设了别的 body，就送出那个 body。`Content-Length` 是打开时的文件大小，之后文件变短的话，连接在已送出的数据之后关闭。这种响应不受 `NATIVE_MAX_RESPONSE_SIZE` 限制。更小的文件与 asyncio 服务器照旧把文件读进 `response.body`。
 - 响应头最多 128 个字段、合计约 8 KiB，超出时交给错误处理器（500）；asyncio 服务器没有这个上限（放在 nginx 之后时，nginx 默认的 `proxy_buffer_size` 也只容纳 4 或 8 KiB 的上游响应头）。
+- 不派发 `http.lifecycle.begin`、`http.lifecycle.read_head`、`http.lifecycle.read_body`、`http.lifecycle.send`、`http.lifecycle.complete` 这五个连接与收发层面的信号，只有 asyncio 服务器派发；其余 `http.*` 信号在相同的时点派发。
 - `request.protocol` 是原生连接的替身：提供 `state`、`version`、`conn_info`，不是 `HttpProtocol` 实例。
 - 原生服务的默认运行没有 worker manager，所以没有 `app.m`（multiplexer）。这与原版 `single_process=True` 相同。
 - 原生 WebSocket 不构造 `WebSocketProtocol`，但同样由 `WebsocketImplProtocol` 处理，`WEBSOCKET_*` 设置照样生效。

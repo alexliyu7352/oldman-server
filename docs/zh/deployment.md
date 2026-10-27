@@ -41,6 +41,7 @@ server {
 - `TRUSTED_PROXIES = "unix"` 信任所有能连上这些 socket 的进程。socket 的权限默认与 Sanic 一样是 0o666，本机任何账号都能连上并伪造 `X-Forwarded-For`；所以同时设 `UNIX_SOCKET_MODE = 0o660`，并让 nginx 的用户属于服务进程的组（或把 socket 放在只有两者能进入的目录里）。
 - 同机部署用 unix socket，省掉 loopback TCP 的开销；`NATIVE_WORKER_LISTEN` 也可以是 `"127.0.0.1:81{n:02d}"` 这样的 TCP 地址（8100、8101……）。
 - worker 退出时删除自己的 socket 文件；重启的 worker 绑定同一地址。重启期间连接不上的那个地址被 nginx 暂时标记为失败（`max_fails`、`fail_timeout`，默认 1 次、10 秒），请求改走其他 worker。
+- 上面的配置为了复用上游连接把 `Connection` 设为空，WebSocket 的升级请求因此到不了应用。要经 nginx 转发 WebSocket，在 `http` 块里加 `map $http_upgrade $connection_upgrade { default upgrade; '' ''; }`，并在 `location` 里设 `proxy_set_header Upgrade $http_upgrade;` 与 `proxy_set_header Connection $connection_upgrade;`：普通请求的 `Upgrade` 为空，`Connection` 仍为空，上游连接照样复用。
 - worker 数改变时，nginx 的 `upstream` 要同时增减。
 - 监听 socket 的 backlog 默认 2048：nginx 同时打开上百条上游连接时，unix socket 不会因队列满而让 nginx 回 502（Sanic 的 100 会）。
 - 原生主机（`NATIVE_SERVER`）时，Sanic 绑定的 TCP 监听 socket 不可继承（原版设为可继承）：应用经 exec 启动的程序（`os.system` 等）不会在服务器退出后还占着这个端口的监听，让客户端连上却没人应答。worker 进程经 multiprocessing 收到这个 socket，不受影响；unix socket 在两边都不可继承。

@@ -11,7 +11,7 @@ Sanic 的设置照常生效，原生主机按下表执行：
 | 设置 | 原生主机的行为 |
 |---|---|
 | `REQUEST_MAX_SIZE`、`REQUEST_MAX_HEADER_SIZE`、`REQUEST_BUFFER_SIZE` | 请求体与请求头上限，与 Sanic 的计算相同（请求体上限在 handler 读取时检查，`stream=True` 的 handler 不受它约束）；还在到达的请求体按 `REQUEST_BUFFER_SIZE` 流控：交给 Python 而 handler 还没读走的部分不超过它，handler 读得慢，连接就收得慢 |
-| `REQUEST_TIMEOUT`、`KEEP_ALIVE`、`KEEP_ALIVE_TIMEOUT` | 由原生层执行，按 Sanic 的阶段计时：两个请求之间是 `KEEP_ALIVE_TIMEOUT`，请求头到达期间是 `REQUEST_TIMEOUT`（到期由错误处理器回 408），handler 运行期间（包括请求体还在到达时）是 `RESPONSE_TIMEOUT`。与原版一样，小于 0.1 s（包括 0）按 0.1 s，无穷大表示不限 |
+| `REQUEST_TIMEOUT`、`KEEP_ALIVE`、`KEEP_ALIVE_TIMEOUT` | 由原生层执行，按 Sanic 的阶段计时：两个请求之间是 `KEEP_ALIVE_TIMEOUT`，请求头到达期间是 `REQUEST_TIMEOUT`（到期由错误处理器回 408），handler 运行期间（包括请求体还在到达时）是 `RESPONSE_TIMEOUT`。与原版一样，小于 0.1 s（包括 0）按 0.1 s，无穷大表示不限；超过 24 h 按 24 h（写出的期限也是） |
 | `RESPONSE_TIMEOUT` | 到期时取消 handler，由错误处理器回 503 “Response Timeout”；请求体还在到达时，每收到数据就重新计时（与原版相同）。超过 24 h 按 24 h |
 | `GRACEFUL_SHUTDOWN_TIMEOUT` | 停止时不再接受连接、关闭空闲连接，在这段时间内等在途请求结束、响应写完，之后取消与切断剩下的（见[与 Sanic 的差异](differences.md#经原生主机时)） |
 | `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` | 写出的期限：请求方这么久不接收响应（一次写出，大响应按每 1 MiB 计）就断开连接 |
@@ -32,7 +32,7 @@ Sanic 的设置照常生效，原生主机按下表执行：
 | `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB；从文件直接写入连接的 `file()` 不受它限制） |
 | `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
 | `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前、内核分不出 ring 的内存），改用 epoll 并记一条警告。同线程模式两种都能用。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
-| `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见[部署](deployment.md)）；运行本身的地址照常服务。默认不设 |
+| `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀，最长 63 字节）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见[部署](deployment.md)）；运行本身的地址照常服务。默认不设 |
 
 ## 内存分配器
 
@@ -43,4 +43,4 @@ sudo apt install libtcmalloc-minimal4   # Debian / Ubuntu
 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 python app.py
 ```
 
-也可以在应用里设 `PRELOAD`（库路径，多个用空格或冒号分隔；只在 Linux 上生效）：`app.run()` 发现 `LD_PRELOAD` 里缺少它们时，带上它们把本程序重新执行一次（同样的解释器、选项与参数，之前的输出与副作用会再发生一次），worker 进程随之继承。路径不存在时启动报错；交互环境或从标准输入读入的程序无法重新执行，也报错，这时请在环境里设 `LD_PRELOAD`。
+也可以在应用里设 `PRELOAD`（库路径，多个用空格或冒号分隔；只在 Linux 上生效）：`app.run()`（及 `app.prepare()`）发现 `LD_PRELOAD` 里缺少它们时，带上它们把本程序重新执行一次（同样的解释器、选项与参数，之前的输出与副作用会再发生一次），worker 进程随之继承。路径不存在时启动报错；交互环境或从标准输入读入的程序无法重新执行，也报错，这时请在环境里设 `LD_PRELOAD`。
