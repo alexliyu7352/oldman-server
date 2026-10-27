@@ -749,8 +749,12 @@ class Service {
     // an Asio operation and without a write deadline. True when all of
     // `output` went (it is cleared); otherwise what went is dropped from it and
     // the rest goes through flush_output, which also reports a failure.
-    static bool send_now(AppConnection& connection, std::string& output) {
+    // epoll only: io_uring submits the write with the ring's other operations
+    // in one system call, and a send of each connection's own cost more
+    // (+1.3k cycles per request) than the Asio operation it saves.
+    static bool send_now([[maybe_unused]] AppConnection& connection, std::string& output) {
         if (output.empty()) return true;
+#ifndef OLDMAN_NATIVE_URING
         const ssize_t sent = ::send(connection.socket.native_handle(), output.data(), output.size(),
                                     MSG_NOSIGNAL | MSG_DONTWAIT);
         if (sent == static_cast<ssize_t>(output.size())) {
@@ -758,6 +762,7 @@ class Service {
             return true;
         }
         if (sent > 0) output.erase(0, static_cast<size_t>(sent));
+#endif
         return false;
     }
     // A sibling counts while its heartbeat (every 50 ms) is this recent: one
