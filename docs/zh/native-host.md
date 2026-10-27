@@ -28,7 +28,7 @@
 - 一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket，已在队列里的连接由其他 worker 接走。
 - 原版的 unix socket 是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。
 
-各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。用户传入的共用 socket 同样如此。放在 nginx 之后的部署见[部署](deployment.md)。
+各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（50 µs 后再看，之后间隔加倍、最长 1 ms；连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。用户传入的共用 socket 同样如此。放在 nginx 之后的部署见[部署](deployment.md)。
 
 ## 只服务明文 HTTP/1.1
 
