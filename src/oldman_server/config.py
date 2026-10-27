@@ -41,7 +41,7 @@ DEFAULT_CONFIG = {
     "KEEP_ALIVE": True,
     "LOCALHOST": "localhost",
     "LOG_EXTRA": _default,
-    # The native host (README "配置"): NATIVE_SERVER None serves through it
+    # The native host (docs/en/configuration.md): NATIVE_SERVER None serves through it
     # on Linux when the extension is installed (oldman_server.native).
     "NATIVE_MAX_MEMORY": None,  # from REQUEST_MAX_SIZE and the shard count
     "NATIVE_GC_THRESHOLD": 10000,  # the collector's first threshold while serving

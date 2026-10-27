@@ -1,245 +1,70 @@
 # oldman-server
 
-`oldman-server`（import 名 `oldman_server`）是带 C++ 原生 HTTP/1.1 主机（基于 Asio）的 Python Web 框架，主要配合 [oldman](https://github.com/alexliyu7352/oldman) 使用，也可单独使用。框架层源自 Sanic 25.12.1 的 fork（MIT，见 `src/oldman_server/LICENSE.sanic`），接口大体沿用 Sanic，差异见下文。在 Linux 上默认由原生主机服务（`NATIVE_SERVER`）：网络 IO、HTTP 解析与写出由原生 shard 承担，路由、中间件、异常处理、生命周期和业务代码仍在 Python 中执行。单进程时 shard 是另外的线程，Python 端只有一个进程、一个普通 GIL 解释器和一个 uvloop 事件循环；多 worker 时默认每个 worker 一个 CPU，shard 就在它的 Python 线程上运行（同线程模式，见下文）。
+English | [简体中文](https://github.com/alexliyu7352/oldman-server/blob/main/README.zh-CN.md)
 
-## 现状
+`oldman-server` (import name `oldman_server`) is a Python web framework with a native C++ HTTP/1.1 host built on Asio. It is made mainly for [oldman](https://github.com/alexliyu7352/oldman) and also works on its own. The framework layer is a fork of Sanic 25.12.1 (MIT), and its interface largely follows Sanic.
 
-- **吞吐**：单进程同 3 核（1 个 Python 线程 + 2 个 shard）对原版 Sanic 3 个 worker 进程，两边都用 uvloop 和各自默认的 `json()`（原版为 ujson，本包为 orjson）：小 JSON 约 15.9 万对 7.6 万 RPS（2.07 倍），回显请求体约 13.2 万对 6.6 万（2.01 倍），handler 等 1 ms 计时器的 I/O 等待型业务约 11.7 万对 8.5 万（1.39 倍，p99 延迟 5.3 对 8.8 ms），每请求总 CPU 约为原版的 0.42–0.60 倍，每组配对都领先；io_uring 为 2.02 / 2.00 / 1.39 倍。
-- **多 worker**：同 4 个物理核，4 个同线程 worker 进程（默认布局，各一个 CPU，见「多 worker」）对原版 Sanic 4 个 worker：小 JSON 25.1 万对 10.1 万 RPS（2.50 倍），回显请求体 22.3 万对 8.6 万（2.59 倍），sleep 18.6 万对 10.4 万（1.76 倍），每请求总 CPU 约为原版的 0.39–0.56 倍，每组配对都领先；io_uring 为 2.60 / 2.67 / 1.79 倍。（AMD Ryzen 7 3800X，Ubuntu 20.04，Linux 5.15，2026-10-27；客户端为本仓库基于 Asio 的 `build/http_load`，占另外 3 个核。）
-- **wrk 同机参照**（2026-10-25，`probes/wrk_comparison`，web-frameworks-benchmark 的路由，256 连接，4 核）：空文本路由 21.5 万对原版 12.9 万 RPS；同样的布局里挂一个不经框架的裸函数 27.1 万，即原生主机自己的上限，框架每请求约多 4 µs（裸函数之后又快了不少，见下一条）；handler 自己花 25 µs CPU 时 9.0 万对原版 7.0 万；每个请求一条新连接时 4.4 万对 2.5 万；`app.static` 的 4 KiB 文件 2.4 万对 1.1 万，256 KiB 的文件 1.0 万对 7.1 千。
-- **与其他 Python 框架**（wrk，同机，web-frameworks-benchmark 的应用与路由，按服务端 2 个 CPU 满载时的每请求 CPU 比）：本项目 13.7 µs，在框架里排第一，wred 14.3（约 120 行的 ASGI 微框架，没有中间件、信号与异常处理）、oxapy 15.8（路由与请求处理在 Rust 里）；asgineer 25.0、原版 Sanic 29.4、Starlette 32.6、FastAPI 69.3。服务端 4 个 CPU 时本项目 14.5 µs 与 oxapy（14.5，没有用满 4 个 CPU）并列第一，wred 15.1，两种连接数的 RPS 本项目都最高。不经框架的裸函数 9.05 µs，也排第一，比 Rust 写的 weft-wsgi（10.05）、C 写的 fastpysgi（10.13）少约 10%。
-- **完整对照**：各场景的吞吐、每请求 CPU、延迟，以及各阶段相对原版的变化，见 [BENCHMARKS.md](https://github.com/alexliyu7352/oldman-server/blob/main/BENCHMARKS.md)。
-- **测试**：Sanic 的测试集已并入本项目（`tests/framework`），按本包的行为维护，经 asyncio 服务器（`OLDMAN_SERVER_NATIVE_SERVER=false`）和经原生主机两种方式都全部通过。与 Sanic 的差异见下文。
+On Linux the native host serves by default: native shards do the network I/O, HTTP parsing and writing, while routing, middleware, exception handling, the lifecycle and your code still run in Python, each request in its own Task as before. In a single process the shards are separate threads, and the Python side is one process with one regular GIL interpreter and one uvloop event loop. With several workers, each worker gets one CPU by default and runs its shard on its Python thread (same-thread mode).
 
-## 安装
+## Performance
+
+Paired against stock Sanic 25.12.1 on the same machine and the same server CPUs, both on uvloop (AMD Ryzen 7 3800X, Linux 5.15, CPython 3.14, 2026-10-27):
+
+| Scenario | oldman-server RPS | Stock Sanic RPS | Ratio |
+|---|---:|---:|---:|
+| Single process (3 cores), small JSON | 159,028 | 76,469 | 2.07 |
+| Single process (3 cores), echo a 1 KiB body | 132,466 | 65,534 | 2.01 |
+| Single process (3 cores), handler waits a 1 ms timer | 117,421 | 84,784 | 1.39 |
+| 4 workers (4 cores), small JSON | 251,376 | 100,814 | 2.50 |
+| 4 workers (4 cores), echo a 1 KiB body | 223,347 | 86,306 | 2.59 |
+| 4 workers (4 cores), handler waits a 1 ms timer | 186,170 | 104,483 | 1.76 |
+
+Against other Python frameworks (the apps and routes of web-frameworks-benchmark, driven by wrk, ranked by CPU per request with the server's 2 CPUs saturated): oldman-server takes 13.7 µs, first among the frameworks, ahead of wred 14.3, oxapy 15.8, stock Sanic 29.4 and FastAPI 69.3. A bare function served without the framework takes 9.05 µs, also first (weft-wsgi 10.05, fastpysgi 10.13).
+
+CPU per request, latency, io_uring, static files, the changes by stage and how to reproduce them are in [Benchmarks](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/benchmarks.md).
+
+## Installation
 
 ```sh
-pip install oldman-server               # 或 uv add oldman-server
+pip install oldman-server               # or: uv add oldman-server
 ```
 
-PyPI 上是编译好的 wheel：Linux x86_64 与 aarch64（manylinux_2_28，即 glibc 2.28 及以上，如 Ubuntu 20.04、Debian 10、RHEL 8 及以后），CPython 3.12–3.14。wheel 只依赖 manylinux 允许的系统库，不需要另装别的库。
+Native wheels cover Linux x86_64 and aarch64 (glibc 2.28 or later) on CPython 3.12–3.14. Other platforms, such as macOS and Windows, get the compatibility build: no native host, served by the asyncio server, meant for local development and small services that do not need the speed. See [Installation](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/installation.md).
 
-其他平台（macOS、Windows，以及没有对应 wheel 的 Linux，如 Alpine）装的是兼容版：同一个包的纯 Python wheel，没有原生主机，由 asyncio 服务器服务（macOS 上用 uvloop，Windows 上用默认的 selector 事件循环），供本机开发和不追求性能的小服务（本地的 MCP 服务器、面板）使用，吞吐与原版 Sanic 相当。pip 在有原生 wheel 的系统上总是优先选原生的。`NATIVE_SERVER` 不设（默认）时，Linux 上有原生扩展就由原生主机服务，缺少时记一条警告、由 asyncio 服务器服务，macOS、Windows 上由 asyncio 服务器服务；设为 `True` 时，macOS、Windows 上记一条警告后照常由 asyncio 服务器服务（开发机与 Linux 生产环境可以用同一份配置），Linux 上缺少原生扩展则启动报错，不会悄悄退回较慢的服务器；设为 `False` 总是用 asyncio 服务器。unix socket 在 Windows 上不可用。不提供源码包：源码包不构建原生扩展，从源码构建需要 C++23 编译器、Asio 与 liburing（见下文开发环境与「发布」）。在源码树里构建的源码包只含 `pyproject.toml` 列出的公开源码（`[tool.hatch.build.targets.sdist]`）。
-
-## 快速开始
-
-开发环境：Ubuntu 20.04 宿主；CPython 3.14.7（普通 GIL 构建；支持 3.12–3.14），由 uv 管理（装在 uv 共用的 Python 目录，需要认得这个版本的 uv）；编译器是锁定的 GCC 14，放在 `/opt/tools/gcc-14`（`PROBE_TOOLCHAIN`）；原生依赖 Asio、liburing 在 `build/deps`（`PROBE_DEPS`）。第一次先运行 `bash scripts/bootstrap.sh`：它按 `dependency-lock.json` 下载编译器（已有则跳过）与依赖，构建 liburing、扩展与性能对照的压测客户端（`build/http_load`，也基于 Asio），要求宿主的系统包与锁文件 `host_requirements` 的版本逐个相同（不同即拒绝，不会换用别的版本）。其他环境请用发布构建的容器流程（见「发布」，`scripts/build_wheels.sh` 在 manylinux_2_28 容器里从源码构建全部依赖）。
-
-```sh
-bash scripts/bootstrap.sh               # 第一次：锁定的工具链与原生依赖、扩展、压测客户端
-uv sync --locked                        # Python 依赖（官方 PyPI），本包以可编辑方式安装
-source scripts/env.sh                   # 原生库路径
-bash scripts/build.sh                   # 构建原生扩展 oldman_server.native._native（增量约 10 秒）
-# 其他 Python 版本：各自的环境与构建目录，只构建扩展
-UV_PROJECT_ENVIRONMENT=build/venv312 uv sync --locked --python 3.12
-PROBE_PYTHON=$PWD/build/venv312/bin/python PROBE_PROJECT_BUILD=$PWD/build/cmake312 bash scripts/build.sh _native
-```
-
-Linux 上默认由原生主机服务；要用 asyncio 服务器，设 `NATIVE_SERVER = False`（二选一）：
+## Quick start
 
 ```python
 from oldman_server import OldmanServer
+from oldman_server.response import json
 
-app = OldmanServer("app")
-app.config.NATIVE_SERVER = False        # 或环境变量 OLDMAN_SERVER_NATIVE_SERVER=false
-app.run(host="0.0.0.0", port=8000)
+app = OldmanServer("hello")
+
+
+@app.get("/")
+async def index(request):
+    return json({"hello": "world"})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)   # fast=True runs one worker per CPU
 ```
 
-`app.run()`、`app.create_server()`、测试客户端 `app.test_client`（`oldman_server.testing`）都会走原生主机，默认运行的 `main_process_*` 监听器照常触发。
+Routing, middleware, blueprints and signals work as in Sanic; see the [Sanic documentation](https://sanic.dev/). The names differ: the application class is `OldmanServer`, the environment prefix for settings is `OLDMAN_SERVER_`, and the loggers are `oldman_server.*`. The other differences are listed in [Differences from Sanic](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/differences.md).
 
-本包只是服务器与请求路径上的核心框架：模板、CORS、自动 HEAD / OPTIONS、OpenAPI、依赖注入、worker 存活监视这类配套（Sanic 由 sanic-ext 提供）不在包里，由上层框架（如 oldman）或应用自己提供。
+This package is only the server and the core framework on the request path. Templates, CORS, automatic HEAD / OPTIONS, OpenAPI, dependency injection and worker health monitoring (which Sanic gets from sanic-ext) are not included; a framework on top, such as oldman, or the application provides them.
 
-名称与 Sanic 不同：应用类是 `OldmanServer`，配置环境变量前缀是 `OLDMAN_SERVER_`，日志名是 `oldman_server.*`（对照见「与 Sanic 的差异」）。
+## Documentation
 
-## 配置
-
-Sanic 的设置照常生效：
-
-| 设置 | 原生主机的行为 |
+| Page | Contents |
 |---|---|
-| `REQUEST_MAX_SIZE`、`REQUEST_MAX_HEADER_SIZE`、`REQUEST_BUFFER_SIZE` | 请求体与请求头上限，与 Sanic 的计算相同（请求体上限在 handler 读取时检查，`stream=True` 的 handler 不受它约束）；还在到达的请求体按 `REQUEST_BUFFER_SIZE` 流控：交给 Python 而 handler 还没读走的部分不超过它，handler 读得慢，连接就收得慢 |
-| `REQUEST_TIMEOUT`、`KEEP_ALIVE`、`KEEP_ALIVE_TIMEOUT` | 由原生层执行，按 Sanic 的阶段计时：两个请求之间是 `KEEP_ALIVE_TIMEOUT`，请求头到达期间是 `REQUEST_TIMEOUT`（到期由错误处理器回 408），handler 运行期间（包括请求体还在到达时）是 `RESPONSE_TIMEOUT`。与原版一样，小于 0.1 s（包括 0）按 0.1 s，无穷大表示不限 |
-| `RESPONSE_TIMEOUT` | 到期时取消 handler，由错误处理器回 503 “Response Timeout”；请求体还在到达时，每收到数据就重新计时（与原版相同）。超过 24 h 按 24 h |
-| `GRACEFUL_SHUTDOWN_TIMEOUT` | 停止时不再接受连接、关闭空闲连接，在这段时间内等在途请求结束、响应写完，之后取消与切断剩下的（见「与 Sanic 的差异」） |
-| `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` | 写出的期限：请求方这么久不接收响应（一次写出，大响应按每 1 MiB 计）就断开连接 |
-| `ACCESS_LOG`、`WEBSOCKET_*`、错误处理器、`FALLBACK_ERROR_FORMAT` | 与原版相同 |
+| [Installation](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/installation.md) | Native wheels and the compatibility build, choosing the server, building from source |
+| [Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md) | How Sanic's settings apply under the native host, native host settings, memory allocators |
+| [Native host](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/native-host.md) | File responses, listening sockets, multiple workers, the fast path, fixed responses and the native micro-cache |
+| [Deployment](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/deployment.md) | Behind nginx |
+| [Differences from Sanic](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/differences.md) | Interface differences, removed features, behavior fixes, differences under the native host |
+| [Benchmarks](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/benchmarks.md) | Full comparison with stock Sanic and other Python frameworks, with the commands to reproduce it |
+| [Development](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/development.md) | Development environment, tests and measurement, releases, repository layout |
 
-原生专属设置（都在 `DEFAULT_CONFIG` 里有默认值，`app.config.NATIVE_*` 总能读到；也可用 `OLDMAN_SERVER_NATIVE_*` 环境变量设置）：
+## License
 
-| 设置 | 含义 |
-|---|---|
-| `NATIVE_SERVER` | 是否由原生主机服务：不设（默认）为 Linux 上有原生扩展时；`True` 为 Linux 上总是（缺少扩展时启动报错）；`False` 为从不（见「安装」） |
-| `NATIVE_SHARDS` / `NATIVE_SHARD_CPUS` | shard 线程数量（默认最多 2，取进程 CPU 集合中最后几个）或指定 CPU（只用于单进程）。多 worker 时设了 `NATIVE_SHARDS` 就保留 shard 线程，不自动用同线程模式 |
-| `NATIVE_SAME_THREAD` | 同线程模式：不另开 shard 线程，进程唯一的 shard 在 Python 线程上运行，一个进程一个 CPU，省掉两个线程之间交接请求与响应。默认不设：worker 进程的 CPU 不够每个再配一个 shard CPU 时自动启用（`fast=True` 即每个 CPU 一个 worker），除非设了 `NATIVE_SHARDS`；单进程默认不用。设 `True` / `False` 则总是 / 从不 |
-| `NATIVE_WORKER_CPUS` | 多 worker 时每个 worker 的 CPU 组，如 `"0,1,2;3,4,5"`（每组第一个给 Python，其余给 shard），或每组一个 CPU（`"0;1;2;3"`，同线程模式）；默认由主进程按 1 + `NATIVE_SHARDS` 个 CPU 一组依次切分，同线程模式每个 CPU 一组 |
-| `NATIVE_GC_THRESHOLD` | 原生主机开始服务时，把 Python 垃圾回收的第一个阈值（年轻代）设为它（默认 10000），只在进程仍是 Python 自己的默认值（3.12 为 700，3.13 起为 2000）时；设 `None` 或 `0`（环境变量写 `0`）则不动。在途请求多时，默认阈值让年轻代每几毫秒回收一次、把在途请求的对象提升，很快引发扫描整个程序对象的全量回收（每次数毫秒，在途请求一起等，什么也回收不到）；调高后单进程 sleep 业务的主线程每请求少约 8%，p99 也更低。代价是循环引用的垃圾晚一些回收（最多多占约一万个对象） |
-| `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出时由原生层直接回 503，不经错误处理器：这时 Python 已经满载） |
-| `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB；从文件直接写入连接的 `file()` 不受它限制） |
-| `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
-| `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前、内核分不出 ring 的内存），改用 epoll 并记一条警告。同线程模式两种都能用。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
-| `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见「放在 nginx 之后」）；运行本身的地址照常服务。默认不设 |
-
-内存分配器：Python 与原生主机的内存分配大多经过 glibc 的 malloc，换成 tcmalloc 后，这台机器上服务端每请求 CPU 少约 7–11%（小 JSON 单进程 23.1 → 20.6 µs；jemalloc、mimalloc 介于两者之间，见 BENCHMARKS.md）。用 `LD_PRELOAD` 载入即可，worker 进程随之继承：
-
-```sh
-sudo apt install libtcmalloc-minimal4   # Debian / Ubuntu
-LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 python app.py
-```
-
-也可以在应用里设 `PRELOAD`（库路径，多个用空格或冒号分隔；只在 Linux 上生效）：`app.run()`（及 CLI）发现 `LD_PRELOAD` 里缺少它们时，带上它们把本程序重新执行一次（同样的解释器、选项与参数，之前的输出与副作用会再发生一次），worker 进程随之继承。路径不存在时启动报错；交互环境或从标准输入读入的程序无法重新执行，也报错，这时请在环境里设 `LD_PRELOAD`。
-
-## 原生主机与 asyncio 服务器
-
-原生主机在当前进程内服务明文 HTTP/1.1，监听 TCP 或 unix socket，包括 keep-alive、pipelining、chunked 请求体、流式请求与流式响应、背压、100-continue 和 WebSocket。
-
-- 文件响应：`file()`、`file_stream()` 与 `app.static()` 的 stat 和读取由原生主机的文件线程完成（在 shard 的 CPU 上，读盘时不阻塞 shard），不再经 aiofiles 线程池；`file_stream()` 与 128 KiB 以上的 `file()` 的文件内容由文件线程读出、shard 直接写入连接，不经 Python（`file()` 因此带来的差异见「与 Sanic 的差异」），`file_stream()` 的分块与原版相同（带 Range 时的修正见「行为修正」）；更小的文件由 `file()` 读进响应，这样更省。响应头、304/206、错误类型与原版一致。
-- multipart 表单：`request.form` / `request.files` 的解析由 C++ 完成（`native/multipart.hh`），结果与 Sanic 的 `parse_multipart_form` 相同；遇到需要 Python 编解码或 Unicode 处理的表单（非 ASCII 的段头、非 UTF-8 字段、`filename*`、没有 name 的段、格式错误）则照旧由 Sanic 的解析器处理。
-- 监听 socket：由 Sanic 照原样绑定（unix socket 用临时名、权限默认 0o666（`UNIX_SOCKET_MODE`）、改名替换，退出时删除），原生主机在这个 socket 上接受连接（shard 0 接受后分给各 shard），它在服务期间保持打开、随服务器关闭，所以传入的 `sock`（TCP 或 AF_UNIX）、`app.serve_location` 与原版一致。多 worker 时与原版的 TCP 一样，由主进程绑定并监听一次，各 worker 都在这一个 socket 上接受连接（unix socket 也是，退出时由主进程删除）。主进程从启动到退出一直在监听：还没有 worker 在接受时（启动时、所有 worker 一起重启时）新连接在队列里等，而不是被拒绝，别的程序这时也绑定不了这个地址；一个 worker 停止（重启、缩减）不会关闭其他 worker 仍在用的这个 socket，已在队列里的连接由其他 worker 接走。各 worker 经主进程分配的共享内存公布自己的连接数，轮流接受：连接数不是最少的 worker 暂不 accept（每 50 µs 起再看一次，连接等了 1 ms 仍没有人接时照接；退出的 worker 立即让出，崩溃或卡住的 200 ms 后不再等它；重启的 worker 接替原来的位置），否则 shard 正忙（轮询而不睡眠）的那个 worker 几乎总是先接到新连接。用户传入的共用 socket 同样如此。原版的 unix socket 是每个 worker 各自绑定再改名覆盖路径，结果只有最后改名的 worker 收到连接。放在 nginx 之后的部署见下一节。
-- 只服务明文 HTTP/1.1：TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见「与 Sanic 的差异」）。
-- 多 worker：会启动 worker 进程的运行（`workers > 1`、`fast`、`auto_reload`、`dev`）照原版由 Sanic 的 worker manager 管理（重启、扩缩、`app.m` 都相同），每个 worker 进程各自运行原生主机：主进程把 CPU 分成每个 worker 一组，worker 的 Python 线程固定在组内第一个 CPU，shard 用其余的（按 worker 编号取组；编号见 `NATIVE_WORKER_LISTEN`）。CPU 不够每个 worker 再配一个 shard CPU 时（`fast=True` 每个 CPU 一个 worker，或 `workers` 多于 CPU 数的一半），每个 worker 只占一个 CPU，shard 在它的 Python 线程上运行（同线程模式，`NATIVE_SAME_THREAD`）：同样的核上跑 Python 的进程多了一倍，也省掉线程之间的交接。4 个核上，同一个空文本路由约 21.5 万对 2 个 worker × (1 + 1) 的 16.7 万 RPS；handler 自己花 25 µs CPU 时 9.0 万对 6.2 万（原版 Sanic 4 worker 12.9 万、7.0 万）。worker 数多于 CPU 组时，多出的 worker 与前面的共用 CPU 组（记一条警告）。
-- 用 `fork` 启动方式、且父进程已经运行过原生主机时（一个进程只启动一次原生运行时，fork 出的子进程有它的状态却没有它的线程），子进程改用 asyncio 服务器并记一条警告；默认的 `spawn` 不受影响。
-- 快速路径：普通应用的请求由原生主机一次建好请求对象、由原生代码收尾与记账，每请求比一般路径（与 Sanic 的 `handle_request` 相同）少数微秒。debug 模式（TOUCHUP 关闭）、换了 `request_class` 或 router、覆写了 `handle_request` 等方法、注册了带参数的 `http.*` 信号时退回一般路径，行为相同；启动时在 `oldman_server.server` 记一条 INFO 说明原因。
-- 每个进程只有一个原生服务器：同一进程同一事件循环上的第二个服务器（如第二个应用的服务器）使用 asyncio 服务器（记一条警告），两者都正常服务。
-
-协议错误（如非法请求行、请求头过大、坏的 chunked 编码、请求体超限）与原版报出相同的状态码和消息，并交给应用的错误处理器。
-
-两个不经 Python 的回答方式，都要明确设置：
-
-- **固定响应**：`app.add_fixed_response("/health", "ok")`（可选 `status`、`content_type`、`headers`）。这个路径的 GET 与 HEAD 请求（不管查询字符串）在一切之前回答：不改写路径、不路由、不跑中间件、不触发信号、没有 Request 对象、不记访问日志；带请求体的请求和其他方法照常路由，同一路径的路由收不到这两个方法。原生主机直接写出，不进 Python；asyncio 服务器按同样的规则回答（只在读到请求行之前触发的连接级信号除外）。在服务器启动之前设置。
-- **原生微缓存**：`@native_cache(seconds)`（`from oldman_server.native import native_cache`，加在 handler 上、路由装饰器之下）。这个 handler 对 GET 的完整 200 响应，没有 Set-Cookie、Vary，Cache-Control 也允许共享缓存保存（没有 private、no-store、no-cache）时，原生主机保存 `seconds` 秒，期间同一请求目标（路径加查询字符串）的 GET 直接由它回答：不进 Python，所以中间件（包括认证）、信号、handler 都不运行，请求头也不看；带 Cookie 或 Authorization 的请求既不从缓存回答，响应也不保存。只适合公开内容。每个 shard（同线程模式即每个 worker 进程）各有一份，最多 1024 条、每条 1 MiB。asyncio 服务器忽略它。
-
-## 放在 nginx 之后
-
-多 worker 放在 nginx（或 OpenResty）之后时，推荐让每个 worker 另外监听自己的地址，由 nginx 按请求均衡：
-
-```python
-app.config.NATIVE_SERVER = True
-app.config.NATIVE_WORKER_LISTEN = "/run/app/{n}.sock"   # worker 0 是 /run/app/0.sock，依次类推
-app.config.TRUSTED_PROXIES = "unix"                     # 只信任经 unix socket 来的转发头
-app.config.UNIX_SOCKET_MODE = 0o660                     # 只有服务的用户与同组（nginx）能连上
-app.config.PROXIES_COUNT = 1
-app.run(unix="/run/app/app.sock", workers=2)            # 运行本身的地址照常服务（健康检查、直接访问）
-```
-
-```nginx
-upstream app {
-    least_conn;
-    server unix:/run/app/0.sock;
-    server unix:/run/app/1.sock;
-    keepalive 32;
-}
-server {
-    location / {
-        proxy_pass http://app;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-原因（OpenResty 1.31 实测）：新版 nginx 不写任何设置时也对上游用 HTTP/1.1 并复用连接，且优先取最近释放的空闲连接。负载不高时少数几条“热”连接承担大部分请求，所以只给 nginx 一个地址时，请求集中在这几条连接所在的 worker：约四成负载（2 万请求/秒，两个 worker 共约 5 万/秒的能力）时，较闲 worker 与较忙 worker 的请求比，TCP 地址最低 0.10，unix socket 最低 0.72，较忙 worker 的 Python 线程到 0.9 核；每个 worker 一个地址并用 `least_conn` 时为 0.97–1.0，两边各约 0.65 核。服务器只能决定连接落在哪个进程，决定不了 nginx 在已有连接上怎么分请求，所以要让 nginx 分别看待各 worker。
-
-- `TRUSTED_PROXIES = "unix"` 信任所有能连上这些 socket 的进程。socket 的权限默认与 Sanic 一样是 0o666，本机任何账号都能连上并伪造 `X-Forwarded-For`；所以同时设 `UNIX_SOCKET_MODE = 0o660`，并让 nginx 的用户属于服务进程的组（或把 socket 放在只有两者能进入的目录里）。
-- 同机部署用 unix socket，省掉 loopback TCP 的开销；`NATIVE_WORKER_LISTEN` 也可以是 `"127.0.0.1:81{n:02d}"` 这样的 TCP 地址（8100、8101……）。
-- worker 退出时删除自己的 socket 文件；重启的 worker 绑定同一地址。重启期间连接不上的那个地址被 nginx 暂时标记为失败（`max_fails`、`fail_timeout`，默认 1 次、10 秒），请求改走其他 worker。
-- worker 数改变时，nginx 的 `upstream` 要同时增减。
-- 监听 socket 的 backlog 默认 2048：nginx 同时打开上百条上游连接时，unix socket 不会因队列满而让 nginx 回 502（Sanic 的 100 会）。
-- 原生主机（`NATIVE_SERVER`）时，Sanic 绑定的 TCP 监听 socket 不可继承（原版设为可继承）：应用经 exec 启动的程序（`os.system` 等）不会在服务器退出后还占着这个端口的监听，让客户端连上却没人应答。worker 进程经 multiprocessing 收到这个 socket，不受影响；unix socket 在两边都不可继承。
-
-## 与 Sanic 的差异
-
-本包不再追求与 Sanic 的公开接口一致。下面列出刻意的差异，oldman 等按 Sanic 写的代码据此调整；每处改动在同一个 commit 里改测试。
-
-接口：
-
-- 包名 `oldman_server`，不再提供 `import sanic` 的别名。类名去掉 Sanic：`Sanic` → `OldmanServer`、`SanicException` → `OldmanServerException`、`DefaultSanic` → `DefaultServer`、`SanicTestClient` → `TestClient`（内部类同样去掉 Sanic 字样）。配置环境变量前缀 `SANIC_` → `OLDMAN_SERVER_`（如 `OLDMAN_SERVER_NATIVE_SERVER`；不用 `OLDMAN_`，因为 oldman 自己的 `OLDMAN_*` 变量会被读成设置）；日志名 `sanic.root` / `error` / `access` / `server` / `websockets` → `oldman_server.*`；进程名 `Sanic-Main`、`Sanic-Server-*` → `Oldman-Main`、`Oldman-Server-*`。HTML 错误页显示 oldman-server，不再带 Sanic 的标志和 sanic.dev 链接；颜色 `Colors.SANIC` → `Colors.PINK`。日志与报错里仍指向 sanic.dev 的说明，是原版 Sanic 的文档（框架层源自它）。
-- 不支持 Sanic Extensions：没有 `app.ext`、`app.extend()` 与 `AUTO_EXTEND`，服务器启动时也不查找、不加载 sanic-ext（原版装了它就会自动扩展应用）。sanic-ext 导入的是 `sanic` 包本身，不能用在本包的应用上。
-- 不再把 setuptools 列为运行依赖（包里没有用到它；原版 Sanic 列着）。
-- 测试客户端随包提供为 `oldman_server.testing`（源自 sanic-testing 24.6.0），`app.test_client` 需要 httpx；不再需要 sanic-testing。
-- 新增 `response.abort()`：对 `request.respond()` 得到的流式响应，在已发出的数据之后关闭连接、不完成响应（没有结束块，或少于 Content-Length），请求方因此知道内容不完整；之后再 `send()` 会抛出，handler 在下一次 await 被取消（与请求方断开时相同）。还没发出任何数据时抛 `ServerError`（这时应抛异常或返回错误响应），响应已结束时什么都不做。asyncio 服务器与原生主机行为相同；oldman 代理里的 `request.transport.get_protocol().close()`（在原生主机上不起作用）可以换成它。
-- 新增 `@app.rewrite_path`：注册的函数在路由与所有中间件之前对每个请求执行，返回新路径（以 `/` 开头）或 None；按注册顺序依次执行。之后请求的 `path` 和路由都用新路径，查询串保留，`raw_url` 仍是请求方发来的。抛出的异常交给错误处理器。oldman 的 `I18nRequest`（重写私有的 `_parsed_url`）可以换成它：自定义请求类会让原生主机走一般路径，用这个钩子则保留快速路径。
-- 新增设置 `UNIX_SOCKET_MODE`：服务器绑定的 unix socket（`unix=`、`NATIVE_WORKER_LISTEN`）的权限位，默认 0o666（与 Sanic 相同）；可写 `0o660` 或八进制字符串（环境变量写 `OLDMAN_SERVER_UNIX_SOCKET_MODE=0o660`）。不是 0–0o777 的值在绑定时报 `ValueError`。
-- 新增设置 `TRUSTED_PROXIES`：地址或网段（列表，或逗号分隔的字符串，如 `"127.0.0.1, 10.0.0.0/8"`），`"unix"` 表示 unix socket 连接（能连上 socket 的进程都被信任，权限见 `UNIX_SOCKET_MODE`）。设置后，只有来自这些来源的连接，其 `Forwarded` / `X-Forwarded-*` 等转发头才按 `FORWARDED_SECRET`、`REAL_IP_HEADER`、`PROXIES_COUNT` 生效；其他连接的 `remote_addr` 为空，`client_ip`、`scheme`、`host` 取实际连接。双栈监听收到的 IPv4 映射地址（`::ffff:a.b.c.d`）按 IPv4 网段比较。格式错误在服务器启动时报 `ValueError`。不设置时与原版相同：转发头对所有连接都按上述设置生效。
-- 新增 `HTTPMethodView.before_dispatch(request, *args, **kwargs)`：覆写后在方法 handler 之前以同样的参数执行（可为同步或协程），返回响应则直接用它回应，返回 None 才进入 handler；抛出的异常交给错误处理器。不覆写时没有额外开销。oldman 的 `HTTPMethodView` 不必再复制整个 `dispatch_request`，把登录与权限检查放进这里即可。
-- 已移除：命令行（`oldman-server` 命令与 `python -m oldman_server`，包括 `--simple` 静态文件服务器）：由 `app.run()` 或上层框架自己的命令启动，多进程加载应用照旧可用 `AppLoader`；静态目录的列表页（`app.static(..., directory_view=True)` 与 `DirectoryHandler` 的 `directory_view`）：目录只按 `index` 回答索引文件；启动信息（MOTD 与标志；`run()` / `prepare()` 的 `motd`、`motd_display`，设置 `MOTD`、`MOTD_DISPLAY`）：主进程开始服务时改为一行 INFO 日志（`oldman_server.root`），写出应用名、地址、运行方式与 worker 数；coffee 模式（`app.make_coffee()`、`prepare(coffee=...)`、`--coffee`，Sanic 标志的彩蛋）；REPL（`--repl`、`app.repl_ctx`）；后台运行（`--daemon` 及 `kill` / `status` / `restart` / `stop` 命令，进程管理交给 systemd 或 oldman 自己的服务命令）；inspector（`INSPECTOR*` 设置、`app.inspector`、`inspect` 命令）；TLS（`run()` / `prepare()` / `create_server()` 的 `ssl`、`auto_tls`，`--cert` / `--key` / `--tls` / `--auto-tls`，`LOCAL_CERT_CREATOR` 等设置，`certloader_class`，`conn_info.ssl` / `cert` / `server_name`）与 HTTP/3（`version` 参数、`--http` / `-1` / `-3`、`request.stream_id`、`Alt-Svc`）：TLS 由前端代理终止，`request.scheme` 照旧取 `Forwarded` / `X-Forwarded-Proto`；ASGI（应用不再是 ASGI 可调用对象，`app.asgi`、`app.asgi_client`、`request.scope` 一并移除），只由本包自己的服务器运行。
-- 请求头的值去掉两端的空白（RFC 9110 的可选空白；原版只去掉开头，`X-A: v␠␠` 原版得到 `"v  "`），两种服务器相同；迭代 `request.headers` 得到的名字都是小写（原版的解析器本来如此，原生主机现在也一样）。
-- 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。
-- JSON 默认用 orjson（`json()`、`request.json`、JSON 错误页与 JSON 日志），不再用 ujson：输出为紧凑的 UTF-8（非 ASCII 字符不再转成 `\uXXXX`）；datetime、UUID、dataclass、enum 可直接编码；非 str 的键照旧转成字符串；超过 64 位的整数会抛 `TypeError`；`NaN`、`Infinity` 输出为 `null`（原版输出不合法的 `NaN`）；不认识的对象不再调用 `__json__` 或 `toDict()`，`Decimal`（数据库驱动的 DECIMAL 列）与含孤立代理项的字符串也会抛 `TypeError`，要编码它们就用 `json(..., default=...)`（如 `default=str`，或把 `Decimal` 转成 `float`）。`request.json` 用 orjson 解析：超出 64 位的整数会变成 `float`（失去精度），`NaN`、`Infinity` 不被接受（400）；要精确的大整数就用 `OldmanServer(loads=json.loads)`。JSON 与文本错误页里编码器不认识的上下文值显示为它的 `str()`，不会让错误响应本身变成 500。`json()` 的额外关键字参数交给 orjson（`default`、`option`，如 `option=orjson.OPT_SORT_KEYS`）；`json_dumps` 返回 bytes。要换编码器仍可用 `json(..., dumps=...)` 或 `OldmanServer(dumps=..., loads=...)`。
-
-行为修正（oldman 原先为此打的补丁，切换后可以删除）：
-
-- worker 启动期间收到 SIGTERM 时，主进程结束服务，而不是一直等待 worker 确认（Sanic 25.12.1 会空转；oldman 的 `_wait_for_ack`）。
-- worker 在已确认启动之后、开始服务之前失败（`after_server_start`，或原生主机启动失败）时，主进程结束服务，而不是把这条消息当作要重启的进程名、留下没有 worker 的主进程（oldman 的 `_handle_message`）。只有启动阶段的失败才结束服务：已经服务过的 worker 在停止时（重启、缩减）出错只记日志；重启的 worker 在确认之前失败（如 auto-reload 读到有语法错误的文件）时记一条错误，其他 worker 照常服务（与原版相同）。服务器启动失败时 `app.run()` 抛出异常（原版只记日志、正常返回，退出码 0）。
-- multiprocessing 的启动方式已被设为本包需要的那一种时不再报错（oldman 的 `prepare_process_context` 直接设 `START_METHOD_SET`）。
-- 服务器监听器成对执行：`before_server_start` 失败时仍执行 `after_server_stop`；`after_server_start` 失败时照常停止服务器并执行 `before_server_stop`、`after_server_stop`；`before_server_stop` 失败时清理与 `after_server_stop` 仍执行；失败最后照样抛出。监听器抛出的 `RuntimeError` 也不再被当成事件循环提前停止而吞掉或再执行一次。（oldman 的 `_services_*_server_*` 里的 except 清理）
-- 服务进程的 SIGINT / SIGTERM 处理在开始应答之前就装好，并且是 Python 层的处理：启动期间收到的信号等启动完成再停止（第二个信号立即停止），停止阶段照常执行。原版用事件循环的 `add_signal_handler`，uvloop 会丢掉循环没在运行时（启动的各步骤之间）到达的信号，进程就停不下来；原生主机还会在注册之前就应答请求，这时的 SIGTERM 直接杀死进程、不执行停止监听器。`loop.add_signal_handler` 不再被调用。
-- worker 进程在主进程退出（包括被 SIGKILL）时收到 SIGTERM 而停止，不再成为无人管理、仍占着端口的孤儿进程（Linux；oldman 的 `_process_group` 检查仍可保留给其他子进程）。
-- worker manager 结束服务时（worker 启动失败、关机时再收到信号等）只杀 worker 进程：原版对 worker 所在的进程组 `killpg`，而 worker 与主进程同组，主进程也随之被 SIGKILL，`main_process_stop` 监听器、套接字与 unix socket 文件的清理都不执行。现在主进程照常收尾，以退出码 1 结束；自成进程组的 worker 仍连同其进程组一起杀掉。
-- `Authorization` 的认证方案取头部第一个词、不分大小写比较，不再按子字符串匹配：`request.token` 只认 `Bearer` / `Token`，其他方案（如 `Basic`）得到 None，不再返回整个头部；`request.credentials` 的 Basic 密码可以含冒号，非法 base64 视为没有凭据（oldman 的 `bearer_credential`、`basic_credentials`；只接受 Bearer 时用 `parse_credentials(header, ("Bearer",))` 并检查返回的方案）。不带方案的单个令牌仍按令牌处理；只有方案名、没有凭据（`Authorization: Bearer`）时没有令牌（`token` 为 None，原版是空字符串）；方案与凭据之间的任意空白（如 Tab）都算分隔。
-- 响应中间件抛出的异常与 handler 抛出的一样交给错误处理器，送出错误处理器的响应，这个响应不再经过响应中间件；原版只记一条日志、照样送出原响应（oldman session 的 `save_session` 为此自己把响应换成 500，切换后直接抛出即可）。流式响应在 `request.respond()` 处抛出，handler 不拦截时同样交给错误处理器；拦截之后可以改回别的响应（它不再经过响应中间件）。送错误响应时（包括错误处理器自己调用 `request.respond()`）响应中间件再出错，仍只记日志、照送错误响应（与原版相同）。
-- 分块请求体按 RFC 9112 解析：块长度只能是十六进制数字（原版也接受 `0x5`、带空白的长度），块数据后必须是 CRLF（原版不检查这两个字节），块长度行（含扩展）最长 64 字节、扩展里不能有控制字符（原版只在这一行还没收完时限长，扩展内容不看），否则 400，与原生主机相同。HTTP/1.0 请求带 `Transfer-Encoding`（RFC 9112 6.1）或请求有多个 `Host`（RFC 9112 3.2）时 400；缺 `Host` 的 HTTP/1.1 请求仍照原版接受。
-- `content_type=None` 的响应不发送 `Content-Type`，不再发送字面值 `None`（oldman 代理里的默认值）。
-- `file_stream()` 带 Range 时按剩余量读取：范围大于 `chunk_size` 又不是它的整数倍时，原版最后一次多读多发，送出的字节超过 `Content-Range` 声明的范围。两种服务器相同。
-
-经原生主机时：
-
-- `request.headers` 是 `NativeHeaders`：`[]`、`get`、`getone`、`getall`、`in` 与属性访问（`headers.content_type`）直接查原生请求；迭代、`items()`、`len()`、`==`、`copy()` 与修改在第一次用到时建一个 `Header`，之后都在它上面进行，结果与 `Header` 相同。它是 `multidict.MultiMapping`（也是 `Mapping`），但不是 `CIMultiDict`：`isinstance(request.headers, CIMultiDict)` 为 False。
-- 请求行之前的空行按 RFC 9112 跳过，计入请求头上限（`REQUEST_MAX_HEADER_SIZE` 等），超出回 413；原版对任何前导空行都回 400。
-- `request.head`、`raw_headers`、`request_line` 由解析出的请求行与字段重建（冒号后一个空格、值已去掉两端空白、名字保留请求方的大小写），不是请求方发来的原始字节。
-- `file()`（`app.static` 也用它）回应 128 KiB 以上的文件时，文件内容不读进 Python：handler 里只打开文件（打不开时照原版在 handler 里抛出），送出响应时由原生主机从文件读出、直接写入连接。响应中间件看到的 `response.body` 是 None；中间件设了别的 body，就送出那个 body。`Content-Length` 是打开时的文件大小，之后文件变短的话，连接在已送出的数据之后关闭。这种响应不受 `NATIVE_MAX_RESPONSE_SIZE` 限制。更小的文件与 asyncio 服务器照旧把文件读进 `response.body`。
-- 响应头最多 128 个字段、合计约 8 KiB，超出时交给错误处理器（500）；asyncio 服务器没有这个上限（放在 nginx 之后时，nginx 默认的 `proxy_buffer_size` 也只容纳 4 或 8 KiB 的上游响应头）。
-- `request.protocol` 是原生连接的替身：提供 `state`、`version`、`conn_info`，不是 `HttpProtocol` 实例。
-- 原生服务的默认运行没有 worker manager，所以没有 `app.m`（multiplexer）。这与原版 `single_process=True` 相同。
-- 原生 WebSocket 不构造 `WebSocketProtocol`，但同样由 `WebsocketImplProtocol` 处理，`WEBSOCKET_*` 设置照样生效。
-- 设了 `NATIVE_SHARDS` 时，`fast=True` 启动 CPU 数 ÷ (1 + `NATIVE_SHARDS`) 个 worker，而不是每个 CPU 一个：每个这样的原生 worker 要占一组 CPU。不设时与原版一样每个 CPU 一个（同线程模式）。
-- `app.create_server()` 创建后即开始服务：`asyncio_server_kwargs`（如 `start_serving=False`）只用于 asyncio 服务器。
-- 原生主机开始服务时把垃圾回收的第一个阈值调到 10000（`NATIVE_GC_THRESHOLD`，只在进程仍是 Python 的默认值时，见「配置」），对整个进程生效；原版不动垃圾回收。
-- 关机时被截断的请求不另记 `Request: ... stopped. Transport is closed.` 日志（asyncio 服务器会记）。
-- 流式响应开始后不再受 `RESPONSE_TIMEOUT` 约束；原版在两次发送之间计时。
-- 带 `Expect: 100-continue` 的请求：请求体还没到时，原生主机在请求交给 Python 之前就回 `100 Continue`（请求体已随请求头到齐时不回，RFC 9110 允许）。原版在第一次读请求体时回；非 stream 路由在 handler 之前就读请求体，所以同样是立即回，只有 `stream=True` 且 handler 不读请求体就回应时，原版把 100 与响应一起发出。
-- 请求头的 `REQUEST_TIMEOUT` 从请求的第一个字节起计，原版从最后一次收到数据起计：一个字节一个字节慢慢发请求头的客户端不能无限拖住连接。
-- 请求体超过 `REQUEST_MAX_SIZE` 时（`stream=True` 的 handler 照常读完），这个请求的响应之后连接关闭；原版在 stream handler 读完请求体时保持 keep-alive。
-- 优雅停止与原版一样先停止接受新连接、关闭空闲连接，忙的连接照常服务（已经送达的 pipelined 请求也服务），在 `GRACEFUL_SHUTDOWN_TIMEOUT` 内等在途请求结束、响应写完；不同的是忙的连接在最后一个响应之后关闭（响应带 `Connection: close`），原版则让它保持 keep-alive，到宽限期结束才断开。宽限期过后取消仍在运行的 handler，最多再等 1 秒：不理会取消、继续运行的 handler 被留下（记一条警告），服务器照常停止（原版关闭事件循环时同样不等它）。asyncio 服务器在 Python 3.12 起 asyncio 自带的事件循环上（Windows、`USE_UVLOOP=False`）也按这个顺序停止；原版在那里先等所有连接自己关闭（包括空闲的 keep-alive 连接）才开始这些步骤，停止可能一直等下去。
-
-## 测试与测量
-
-`tests/framework` 源自 Sanic 25.12.1 的测试集（MIT），已改为本包的 import 名和行为，两种运行方式都要全部通过：
-
-```sh
-python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>    # 本项目原生主机测试，每个用例独立进程
-OLDMAN_SERVER_NATIVE_SERVER=false .venv/bin/python -m pytest tests/framework   # 框架测试：asyncio 服务器
-OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SHARDS=1 .venv/bin/python -m pytest tests/framework   # 框架测试：经原生主机
-OLDMAN_SERVER_NATIVE_SERVER=true OLDMAN_SERVER_NATIVE_SAME_THREAD=true .venv/bin/python -m pytest tests/framework   # 同上，同线程模式
-OLDMAN_SERVER_NATIVE_SAME_THREAD=true python scripts/run_framework_correctness.py --sanic --out build/correct-<目录>   # 原生主机测试，同线程模式
-python scripts/calibrate.py build/calib-<目录> candidate:small candidate:body      # 服务端吞吐与主线程 µs
-python probes/sanic_comparison/run.py --python-only --out build/compare-<新目录>     # 阶段验收：与原版 Sanic 配对对照
-python probes/wrk_comparison/run.py --out build/wrk-<新目录> --quiet                # 4 核同机：各布局、裸函数（原生主机自己的上限）与原版，wrk 压测
-```
-
-## 发布
-
-推送 tag `v<版本>`（与 `src/oldman_server/__version__.py` 一致，如 `v0.1.0`）后，`.github/workflows/release.yml`：
-
-1. 在 manylinux_2_28 容器里分别为 x86_64 与 aarch64 构建 wheel（`scripts/build_wheels.sh`）：按 `dependency-lock.json` 下载 liburing 与 Asio 的源码并校验 SHA-256（`scripts/fetch_sources.py`），构建 liburing，再为 CPython 3.12–3.14 各构建扩展与运行时的 io_uring 构建（liburing 静态链入）、打包（`hatch_build.py` 把两者放进 wheel 并标上解释器与平台；树里没有扩展时拒绝构建 wheel，`OLDMAN_SERVER_PURE_WHEEL=1` 才构建只能用 asyncio 服务器的纯 Python wheel），由 auditwheel 核对所链接的库并标为 manylinux_2_28。容器镜像（连同编译器）按标签与摘要固定（`wheels.yml`）。
-2. 核对每个 wheel 所带的库都附有许可证（`scripts/check_wheel_licenses.py`），再把每个 wheel 装进全新环境：只装声明的依赖时能导入，再装上测试依赖，跑经 asyncio 服务器与经原生主机的框架测试、原生主机的运行测试（`scripts/test_wheels.sh`）。auditwheel 只标 manylinux_2_28（`--only-plat`：测试只在 glibc 2.28 的镜像里做，不标更早的 glibc）。另在 `python:3.12/3.13/3.14-slim` 镜像里安装每个 wheel 并加载原生扩展：manylinux 允许 wheel 依赖少数系统库（libstdc++、libgcc_s、libz、libatomic）而不自带，精简镜像未必都有。
-3. 经 PyPI trusted publishing 发布（环境 `pypi`，只接受 `v*` tag 的部署），再用 runner 自带的 `gh` 建 GitHub release，附上 wheel 与 SHA256SUMS。工作流里的 action 都固定到提交。
-
-每次推送与 PR 由 `.github/workflows/ci.yml` 构建并测试同样的 wheel，不发布。wheel 带上所含第三方库的许可证（`LICENSES/`，作为包的 license files）：编进扩展的 pybind11 与 Asio、编进 io_uring 构建的 liburing 都要有许可证文件；auditwheel 若复制了库进 wheel，它也要在上述脚本的清单里并有许可证文件，否则测试失败。
-
-## 目录
-
-- `BENCHMARKS.md`：与原版 Sanic 的完整性能对照及复现命令。
-- `src/oldman_server/`：框架（源自 Sanic 25.12.1 的 fork）。
-- `src/oldman_server/native/host.py`：应用与原生主机之间的适配层，包括请求、响应、流、文件、协议错误和 WebSocket。
-- `src/oldman_server/native/engine.py`：原生运行时的 Python 端（事件取出、每请求 Task、回传批次、背压、文件操作）。
-- `native/`：原生主机（`server.cc`）与运行时（`runtime.cc`，另有 io_uring 构建 `liboldman_native_uring.so`），基于 Asio；HTTP/1.1 解析与写出（`http1.cc`）、multipart 解析（`multipart.hh`）、Python 绑定（`bridge.cc`，构建为 `oldman_server.native._native`）。
-- `src/oldman_server/testing/`：测试客户端（源自 sanic-testing 24.6.0，许可见 `LICENSE.sanic-testing`）。
-- `upstream/`：所依据的上游版本（归档地址、提交）与各文件的 SHA-256。与原版 Sanic 的性能对照要先把 `upstream/sanic.json` 的归档解压到 `build/sanic-upstream/`（得到 `sanic-<提交>/`），对照前逐个文件核对。
-- `tests/`：本项目测试，其中 `tests/framework` 源自 Sanic 的测试集；`scripts/`：构建、测试与测量工具；`probes/`：对照与诊断用的服务端和驱动。
-
-## 许可证
-
-MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方代码（Asio、pybind11、liburing）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND BSD-3-Clause AND BSL-1.0`。
+MIT (`LICENSE`). The framework layer derives from Sanic 25.12.1 and `oldman_server.testing` from sanic-testing 24.6.0, both MIT (their licenses ship in the package). The licenses of the third-party code in the published wheels (Asio, pybind11, liburing) are in `LICENSES/`, so the package's license expression is `MIT AND BSD-3-Clause AND BSL-1.0`.
