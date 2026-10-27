@@ -840,6 +840,31 @@ def io_uring_available():
     return True
 
 
+@pytest.mark.parametrize("setup, expected", [
+    ("", 10000),                                         # Python's own: raised
+    ("gc.set_threshold(5000, *gc.get_threshold()[1:])", 5000),  # tuned by the program: kept
+    ("app.config.NATIVE_GC_THRESHOLD = None", None),     # turned off: Python's own
+])
+def test_the_native_host_raises_the_collectors_first_threshold(setup, expected):
+    port = free_port()
+    lines, _ = run(f'''
+        import gc
+        default = gc.get_threshold()
+        app.config.NATIVE_SERVER = True
+        {setup}
+
+        @app.after_server_start
+        async def thresholds(app):
+            print("GC " + json.dumps([default, gc.get_threshold()]), flush=True)
+
+        drive({port})
+        app.run(host="127.0.0.1", port={port}, single_process=True, motd=False)
+    ''')
+    default, serving = json.loads(lines["GC"])
+    assert serving == [expected or default[0], *default[1:]]
+    assert [status for status, _ in json.loads(lines["RESULTS"])] == ["200", "200"]
+
+
 @pytest.mark.parametrize("backend", ["epoll", "io_uring"])
 def test_reactor_backend_setting(backend):
     if backend == "io_uring" and not io_uring_available():

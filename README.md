@@ -72,6 +72,7 @@ Sanic 的设置照常生效：
 | `NATIVE_SHARDS` / `NATIVE_SHARD_CPUS` | shard 线程数量（默认最多 2，取进程 CPU 集合中最后几个）或指定 CPU（只用于单进程）。多 worker 时设了 `NATIVE_SHARDS` 就保留 shard 线程，不自动用同线程模式 |
 | `NATIVE_SAME_THREAD` | 同线程模式：不另开 shard 线程，进程唯一的 shard 在 Python 线程上运行，一个进程一个 CPU，省掉两个线程之间交接请求与响应。默认不设：worker 进程的 CPU 不够每个再配一个 shard CPU 时自动启用（`fast=True` 即每个 CPU 一个 worker），除非设了 `NATIVE_SHARDS`；单进程默认不用。设 `True` / `False` 则总是 / 从不 |
 | `NATIVE_WORKER_CPUS` | 多 worker 时每个 worker 的 CPU 组，如 `"0,1,2;3,4,5"`（每组第一个给 Python，其余给 shard），或每组一个 CPU（`"0;1;2;3"`，同线程模式）；默认由主进程按 1 + `NATIVE_SHARDS` 个 CPU 一组依次切分，同线程模式每个 CPU 一组 |
+| `NATIVE_GC_THRESHOLD` | 原生主机开始服务时，把 Python 垃圾回收的第一个阈值（年轻代）设为它（默认 10000），只在进程仍是 Python 自己的默认值（3.12 为 700，3.13 起为 2000）时；设 `None` 或 `0`（环境变量写 `0`）则不动。在途请求多时，默认阈值让年轻代每几毫秒回收一次、把在途请求的对象提升，很快引发扫描整个程序对象的全量回收（每次数毫秒，在途请求一起等，什么也回收不到）；调高后单进程 sleep 业务的主线程每请求少约 8%，p99 也更低。代价是循环引用的垃圾晚一些回收（最多多占约一万个对象） |
 | `NATIVE_MAX_REQUESTS` | 同时在处理的请求上限（默认 4096，超出时由原生层直接回 503，不经错误处理器：这时 Python 已经满载） |
 | `NATIVE_MAX_RESPONSE_SIZE` | 单个完整响应或流片段的上限（默认 128 MiB；从文件直接写入连接的 `file()` 不受它限制） |
 | `NATIVE_MAX_MEMORY` | 在途请求随请求头一起到达的请求体可占用的内存（之后到达的部分受 `REQUEST_BUFFER_SIZE` 流控） |
@@ -195,6 +196,7 @@ server {
 - 原生 WebSocket 不构造 `WebSocketProtocol`，但同样由 `WebsocketImplProtocol` 处理，`WEBSOCKET_*` 设置照样生效。
 - 设了 `NATIVE_SHARDS` 时，`fast=True` 启动 CPU 数 ÷ (1 + `NATIVE_SHARDS`) 个 worker，而不是每个 CPU 一个：每个这样的原生 worker 要占一组 CPU。不设时与原版一样每个 CPU 一个（同线程模式）。
 - `app.create_server()` 创建后即开始服务：`asyncio_server_kwargs`（如 `start_serving=False`）只用于 asyncio 服务器。
+- 原生主机开始服务时把垃圾回收的第一个阈值调到 10000（`NATIVE_GC_THRESHOLD`，只在进程仍是 Python 的默认值时，见「配置」），对整个进程生效；原版不动垃圾回收。
 - 关机时被截断的请求不另记 `Request: ... stopped. Transport is closed.` 日志（asyncio 服务器会记）。
 - 流式响应开始后不再受 `RESPONSE_TIMEOUT` 约束；原版在两次发送之间计时。
 - 带 `Expect: 100-continue` 的请求：请求体还没到时，原生主机在请求交给 Python 之前就回 `100 Continue`（请求体已随请求头到齐时不回，RFC 9110 允许）。原版在第一次读请求体时回；非 stream 路由在 handler 之前就读请求体，所以同样是立即回，只有 `stream=True` 且 handler 不读请求体就回应时，原版把 100 与响应一起发出。

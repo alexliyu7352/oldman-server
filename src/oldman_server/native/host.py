@@ -5,8 +5,10 @@ and its response, stream, WebSocket tunnel or file goes back to the shards.
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import gc
 import os
 import socket
+import sys
 from inspect import isawaitable
 from time import perf_counter
 from types import CoroutineType
@@ -1262,6 +1264,25 @@ def serving(loop):
     return _engine is not None and not _engine.closed and _engine._loop is loop
 
 
+# CPython's own first collector threshold (3.12; 3.13 and 3.14): a process
+# still at it has not tuned its collector.
+_DEFAULT_GC_THRESHOLD = 700 if sys.version_info < (3, 13) else 2000
+
+
+def _tune_gc(app_config):
+    """NATIVE_GC_THRESHOLD: the collector's first threshold from when the native
+    host serves, while the process has Python's own. The objects of requests in
+    flight are alive at each young collection: with hundreds in flight, Python's
+    threshold collects every few milliseconds and promotes them, which soon
+    starts full collections that scan every object of the program (several ms
+    each, all requests in flight waiting, nothing freed). None or 0 leaves the
+    collector as it is."""
+    threshold = app_config.get("NATIVE_GC_THRESHOLD")
+    first, *older = gc.get_threshold()
+    if threshold and first == _DEFAULT_GC_THRESHOLD:
+        gc.set_threshold(int(threshold), *older)
+
+
 async def open_engine(app, config, *, python_cpu=None):
     """Start the native host for `app` after its Sanic startup and before
     listeners: lifecycle events stay with the caller. Returns the Engine.
@@ -1278,6 +1299,7 @@ async def open_engine(app, config, *, python_cpu=None):
         # one server per process; stop that one before starting this one.
         error_logger.warning("Stopping the running native server: one native server per process")
         _engine.abandon()
+    _tune_gc(app.config)
     max_response = config.server.max_response_bytes
     if app.state.is_started:
         adapter = NativeApplication(app, max_response)

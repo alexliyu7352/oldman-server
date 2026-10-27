@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
     # The native host (README "配置"): NATIVE_SERVER None serves through it
     # on Linux when the extension is installed (oldman_server.native).
     "NATIVE_MAX_MEMORY": None,  # from REQUEST_MAX_SIZE and the shard count
+    "NATIVE_GC_THRESHOLD": 10000,  # the collector's first threshold while serving
     "NATIVE_MAX_REQUESTS": 4096,
     "NATIVE_MAX_RESPONSE_SIZE": 128 * 1024 * 1024,
     "NATIVE_REACTOR_BACKEND": "epoll",
@@ -159,6 +160,7 @@ class Config(dict, metaclass=DescriptorMeta):
     LOG_EXTRA: Default | bool
     MOTD: bool
     MOTD_DISPLAY: dict[str, str]
+    NATIVE_GC_THRESHOLD: int | None
     NATIVE_MAX_MEMORY: int | None
     NATIVE_MAX_REQUESTS: int
     NATIVE_MAX_RESPONSE_SIZE: int
