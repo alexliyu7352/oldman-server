@@ -254,9 +254,22 @@ def test_a_restarted_worker_that_fails_to_start_leaves_the_others(tmp_path):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
+    # Each worker loads the module by name (as oldman's runner does), so the
+    # restarted one imports the broken file again.
+    (tmp_path / "run.py").write_text(textwrap.dedent(
+        f"""
+        from oldman_server import OldmanServer
+        from oldman_server.worker.loader import AppLoader
+
+        if __name__ == "__main__":
+            loader = AppLoader("broken_app:app")
+            app = loader.load()
+            app.prepare(host="127.0.0.1", port={port}, workers=2, motd=False)
+            OldmanServer.serve(primary=app, app_loader=loader)
+        """
+    ))
     process = subprocess.Popen(
-        [sys.executable, "-m", "oldman_server", "broken_app:app", "--workers", "2",
-         "--host", "127.0.0.1", "--port", str(port), "--no-motd"],
+        [sys.executable, "run.py"],
         cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(tmp_path)},
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
     )

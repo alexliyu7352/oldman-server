@@ -15,14 +15,13 @@ venv="$(mktemp -d)/venv"
 # The interpreter's own path (on Windows, Git Bash's has no .exe).
 uv venv --quiet --python "$(python -c 'import sys; print(sys.executable)')" "$venv"
 if [[ -x "$venv/Scripts/python.exe" ]]; then
-  bin="$venv/Scripts" py="$venv/Scripts/python.exe"
+  py="$venv/Scripts/python.exe"
 else
-  bin="$venv/bin" py="$venv/bin/python"
+  py="$venv/bin/python"
 fi
 failed=()
 uv pip install --quiet --python "$py" "$wheel"
 "$py" -I -c "from oldman_server import OldmanServer; OldmanServer('wheel')" \
-  && "$bin/oldman-server" --version \
   || failed+=("declared requirements")
 "$py" -I scripts/compat_smoke.py || failed+=("serving")
 uv pip install --quiet --python "$py" "$wheel" --group test

@@ -23,11 +23,9 @@ for wheel in "$@"; do
   venv="$(mktemp -d)/venv"
   uv venv --quiet --python "$python" "$venv"
   echo "== $(basename "$wheel")"
-  # With only its declared requirements, as pip installs it: the package and
-  # the command line.
+  # With only its declared requirements, as pip installs it.
   uv pip install --quiet --python "$venv/bin/python" "$wheel"
   "$venv/bin/python" -I -c "from oldman_server import OldmanServer; OldmanServer('wheel')" \
-    && "$venv/bin/oldman-server" --version \
     || failed+=("$tag: declared requirements")
   uv pip install --quiet --python "$venv/bin/python" "$wheel" --group test
   # Not the tree's package: the installed one.

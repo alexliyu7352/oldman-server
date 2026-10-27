@@ -40,9 +40,6 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/alexliyu7352/oldman-server"
 
-[project.scripts]
-oldman-server = "oldman_server.__main__:main"
-
 [build-system]
 requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"

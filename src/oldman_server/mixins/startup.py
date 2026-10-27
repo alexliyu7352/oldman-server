@@ -162,11 +162,6 @@ class StartupMixin(metaclass=AppMeta):
 
         .. note::
             When you need control over running the Sanic instance, this is the method to use.
-            However, in most cases the preferred method is to use the CLI command:
-
-            ```sh
-            oldman-server server:app`
-            ```
 
         If you are using this method to run Sanic, make sure you do the following:
 
@@ -653,7 +648,7 @@ class StartupMixin(metaclass=AppMeta):
         ):
             error_logger.warning(
                 f"{Colors.YELLOW}oldman-server is running in PRODUCTION mode. "
-                "Consider using '--debug' or '--dev' while actively "
+                "Consider using debug=True or dev=True while actively "
                 f"developing your application.{Colors.END}"
             )
 
@@ -1164,15 +1159,8 @@ class StartupMixin(metaclass=AppMeta):
         Similar to `serve`, but only serves a single process. When used,
         certain features are disabled, such as `fast`, `workers`,
         `multiplexer` and `auto_reload`. It is almost
-        never needed to use this method directly. Instead, you should
-        use the CLI:
-
-        ```sh
-        oldman-server app.server:app --single-process
-        ```
-
-        Or, if you need to do it programmatically, you should use the
-        `single_process` argument of `run`:
+        never needed to use this method directly. Instead, you should use
+        the `single_process` argument of `run`:
 
         ```python
         app.run(single_process=True)
