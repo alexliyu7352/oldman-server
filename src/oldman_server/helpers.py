@@ -3,7 +3,7 @@
 import sys
 
 from importlib import import_module
-from inspect import ismodule
+from inspect import ismodule, signature
 
 from orjson import OPT_NON_STR_KEYS
 from orjson import dumps as orjson_dumps
@@ -157,6 +157,22 @@ def import_string(module_name, package=None):
 
 def is_atty() -> bool:
     return bool(sys.stdout and sys.stdout.isatty())
+
+
+def accepts(func, *args, **kwargs) -> bool:
+    """Whether `func` can be called with these arguments, by its signature,
+    without calling it: a TypeError raised inside a call is the function's
+    own, not a sign that it takes other arguments. True when the signature
+    cannot be read (some builtins), so the call itself decides."""
+    try:
+        bound = signature(func)
+    except (TypeError, ValueError):
+        return True
+    try:
+        bound.bind(*args, **kwargs)
+    except TypeError:
+        return False
+    return True
 
 
 class Default:

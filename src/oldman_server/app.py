@@ -59,7 +59,7 @@ from oldman_server.exceptions import (
 )
 from oldman_server.handlers import ErrorHandler
 from oldman_server.headers import trusted_networks, trusted_sources
-from oldman_server.helpers import Default, _default
+from oldman_server.helpers import Default, _default, accepts
 from oldman_server.http import Stage
 from oldman_server.log import LOGGING_CONFIG_DEFAULTS, error_logger, logger
 from oldman_server.logging.deprecation import deprecation
@@ -1663,9 +1663,10 @@ class OldmanServer(
     async def _listener(
         app: OldmanServer, loop: AbstractEventLoop, listener: ListenerType
     ):
-        try:
+        # Decided by the signature: a TypeError the listener raises is its own.
+        if accepts(listener, app) or not accepts(listener, app, loop):
             maybe_coro = listener(app)  # type: ignore
-        except TypeError:
+        else:
             name = getattr(
                 listener,
                 "__qualname__",
@@ -1695,9 +1696,11 @@ class OldmanServer(
         async def do(task):
             try:
                 if callable(task):
-                    try:
+                    # The app when it takes an argument, by its signature: a
+                    # TypeError raised inside the task is its own.
+                    if accepts(task, app) or not accepts(task):
                         task = task(app)
-                    except TypeError:
+                    else:
                         task = task()
                 if isawaitable(task):
                     return await task

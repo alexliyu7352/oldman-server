@@ -76,3 +76,18 @@ def test_fast(app: OldmanServer, caplog):
     messages = [m[2] for m in caplog.record_tuples]
     fragment = f"(production mode, {workers} worker{'s' if workers != 1 else ''})"
     assert any(message.endswith(fragment) for message in messages), messages
+
+
+def test_a_run_s_mode_is_its_own(app: OldmanServer):
+    from oldman_server.application.state import Mode
+
+    # Within one run, another address can only turn debug and auto-reload on.
+    app.prepare(debug=True, auto_reload=True, port=9991)
+    app.prepare(port=9992)
+    assert app.state.mode is Mode.DEBUG
+    assert app.state.auto_reload
+    # A run ends by clearing its server_info; the next one starts afresh.
+    app.state.server_info.clear()
+    app.prepare(port=9993)
+    assert app.state.mode is Mode.PRODUCTION
+    assert not app.state.auto_reload

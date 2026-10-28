@@ -1,7 +1,7 @@
 import typing
 
+from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedOK
-from websockets.legacy.client import connect
 
 
 class WebsocketProxy:
@@ -21,7 +21,13 @@ class WebsocketProxy:
 
 
 async def websocket_proxy(url, *args, **kwargs) -> WebsocketProxy:
+    """Connect to `url` and run mimic(ws), the client side of the test, with
+    websockets' asyncio client: other keyword arguments go to its connect()
+    (additional_headers=, subprotocols=, ...). After mimic returns, an empty
+    message is sent, then the connection closes."""
     mimic = kwargs.pop("mimic", None)
+    # The local test server, never through a proxy from the environment.
+    kwargs.setdefault("proxy", None)
     async with connect(url, *args, **kwargs) as websocket:
         ws_proxy = WebsocketProxy(websocket)
 

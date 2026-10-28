@@ -83,13 +83,15 @@ def test_method_not_allowed():
     async def test_post(request: Request):
         return response.json({"hello": "world"})
 
+    # The 405 is the app's own error page, as in production (the test client
+    # no longer answers HEAD, PATCH, PUT and DELETE 405s with an empty body).
     request, response = app.test_client.head("/")
     assert response.status == 405
     assert set(response.headers["Allow"].split(", ")) == {
         "GET",
         "POST",
     }
-    assert response.headers["Content-Length"] == "0"
+    assert response.content == b""
 
     request, response = app.test_client.patch("/")
     assert response.status == 405
@@ -97,7 +99,8 @@ def test_method_not_allowed():
         "GET",
         "POST",
     }
-    assert response.headers["Content-Length"] == "0"
+    assert "Method Not Allowed" in response.text
+    assert response.headers["Content-Length"] == str(len(response.content))
 
 
 def test_response_header(app):

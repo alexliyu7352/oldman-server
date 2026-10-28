@@ -4,6 +4,8 @@ from collections.abc import Iterable
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, Callable
 
+from oldman_server.helpers import accepts
+
 
 if TYPE_CHECKING:
     from oldman_server import OldmanServer
@@ -24,13 +26,12 @@ def trigger_events(
     """
     if events:
         for event in events:
-            try:
-                result = event(**kwargs) if not app else event(app, **kwargs)
-            except TypeError:
-                result = (
-                    event(loop, **kwargs)
-                    if not app
-                    else event(app, loop, **kwargs)
-                )
+            # By the signature, not by calling it: a TypeError the event
+            # raises is its own.
+            first = () if not app else (app,)
+            if accepts(event, *first, **kwargs) or not accepts(event, *first, loop, **kwargs):
+                result = event(*first, **kwargs)
+            else:
+                result = event(*first, loop, **kwargs)
             if isawaitable(result):
                 loop.run_until_complete(result)

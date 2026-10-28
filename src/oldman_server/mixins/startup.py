@@ -76,7 +76,10 @@ if TYPE_CHECKING:
     from oldman_server.config import Config
 
 
-
+# The settings prepare() and create_server() write from their arguments
+# (ACCESS_LOG: access_log, on in debug mode unless given; AUTO_RELOAD;
+# NOISY_EXCEPTIONS). The test clients restore them after a run they make.
+RUN_CONFIG_KEYS = ("ACCESS_LOG", "AUTO_RELOAD", "NOISY_EXCEPTIONS")
 
 
 class StartupMixin(metaclass=AppMeta):
@@ -335,8 +338,7 @@ class StartupMixin(metaclass=AppMeta):
             access_log = True
 
         self.state.verbosity = verbosity
-        if not self.state.auto_reload:
-            self.state.auto_reload = bool(auto_reload)
+        self._set_run_mode(debug, auto_reload, not self.state.server_info)
 
         if fast and workers != 1:
             raise RuntimeError("You cannot use both fast=True and workers=X")
@@ -380,11 +382,9 @@ class StartupMixin(metaclass=AppMeta):
             )
 
         # Set explicitly passed configuration values
-        for attribute, value in {
-            "ACCESS_LOG": access_log,
-            "AUTO_RELOAD": auto_reload,
-            "NOISY_EXCEPTIONS": noisy_exceptions,
-        }.items():
+        for attribute, value in zip(
+            RUN_CONFIG_KEYS, (access_log, auto_reload, noisy_exceptions)
+        ):
             if value is not None:
                 setattr(self.config, attribute, value)
 
@@ -504,12 +504,14 @@ class StartupMixin(metaclass=AppMeta):
             )
 
         # Set explicitly passed configuration values
-        for attribute, value in {
-            "ACCESS_LOG": access_log,
-            "NOISY_EXCEPTIONS": noisy_exceptions,
-        }.items():
+        for attribute, value in zip(
+            RUN_CONFIG_KEYS, (access_log, None, noisy_exceptions)
+        ):
             if value is not None:
                 setattr(self.config, attribute, value)
+
+        # A server of its own: create_server() starts a run every time.
+        self._set_run_mode(debug, False, True)
 
         if not return_asyncio_server:
             return_asyncio_server = True
@@ -575,6 +577,25 @@ class StartupMixin(metaclass=AppMeta):
         if unregister:
             self.__class__.unregister_app(self)  # type: ignore
 
+    def _set_run_mode(
+        self, debug: bool, auto_reload: bool | None, starts_run: bool
+    ) -> None:
+        """Debug mode and auto-reload of the run prepare() or create_server()
+        sets up. The call that starts a run (prepare() with no server_info
+        yet, as a run ends by clearing them; every create_server()) sets both
+        from its arguments, so a run does not inherit the last one's: a
+        process may run an app several times, as the test clients do. A later
+        prepare() of the same run, adding another address to serve, can only
+        turn them on."""
+        if starts_run:
+            self.state.mode = Mode.DEBUG if debug else Mode.PRODUCTION
+            self.state.auto_reload = bool(auto_reload)
+        else:
+            if debug:
+                self.state.mode = Mode.DEBUG
+            if auto_reload:
+                self.state.auto_reload = True
+
     def _helper(
         self,
         host: str | None = None,
@@ -594,9 +615,6 @@ class StartupMixin(metaclass=AppMeta):
             raise ValueError(
                 "PROXIES_COUNT cannot be negative."
             )
-
-        if not self.state.is_debug:
-            self.state.mode = Mode.DEBUG if debug else Mode.PRODUCTION
 
         setup_logging(
             self.state.is_debug, self.config.NO_COLOR, self.config.LOG_EXTRA
@@ -1104,7 +1122,16 @@ class StartupMixin(metaclass=AppMeta):
             return
 
         primary_server_info = primary.state.server_info[0]
-        primary.before_server_start(partial(primary._start_servers, apps=apps))
+        # The other applications' servers start with this run only: one
+        # listener per application, which acts while run_apps names them (a
+        # listener added on every run would keep starting servers in later
+        # runs, those of create_server() included).
+        starter = primary._start_run_servers
+        if not any(
+            future.listener == starter for future in primary._future_listeners
+        ):
+            primary.before_server_start(starter)
+        primary.state.run_apps = apps
         kwargs = {
             k: v
             for k, v in primary_server_info.settings.items()
@@ -1162,6 +1189,7 @@ class StartupMixin(metaclass=AppMeta):
             raise
         finally:
             logger.info("Server Stopped")
+            primary.state.run_apps = None
             for app in apps:
                 app.state.server_info.clear()
                 app.router.reset()
@@ -1185,6 +1213,13 @@ class StartupMixin(metaclass=AppMeta):
 
             cls._cleanup_env_vars()
             cls._cleanup_apps()
+
+    async def _start_run_servers(self, primary: OldmanServer) -> None:
+        """before_server_start of a serve_single() run: the servers of the
+        applications it runs beside the primary (_start_servers); nothing
+        outside such a run."""
+        if self.state.run_apps:
+            await self._start_servers(primary, self.state.run_apps)
 
     async def _start_servers(
         self,

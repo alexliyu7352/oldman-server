@@ -58,6 +58,9 @@ class ApplicationState:
     workers: int = field(default=0)
     primary: bool = field(default=True)
     server_info: list[ApplicationServerInfo] = field(default_factory=list)
+    # serve_single(): the applications whose other servers its run starts
+    # before the primary serves; None outside such a run.
+    run_apps: list[OldmanServer] | None = field(default=None, repr=False)
 
     # This property relates to the ApplicationState instance and should
     # not be changed except in the __post_init__ method
