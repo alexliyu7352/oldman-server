@@ -158,7 +158,7 @@ class HTTPMethodView:
         handler = getattr(self, method, None)
 
         if not handler and method == "head":
-            handler = getattr(self, "get")
+            handler = getattr(self, "get", None)
         if not handler:
             # The router will never allow us to get here, but this is
             # included as a fallback and for completeness.

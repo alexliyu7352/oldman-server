@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import pytest
 
 from oldman_server.blueprints import Blueprint
@@ -222,3 +224,17 @@ def test_with_decorator(app):
     request, response = app.test_client.get("/")
     assert response.text == "I am get method"
     assert results[0] == 1
+
+
+def test_head_without_get_is_not_supported():
+    """A view with neither head() nor get() reports HEAD as not supported
+    instead of leaking the AttributeError of the missing get()."""
+
+    class OnlyPost(HTTPMethodView):
+        def post(self, request):
+            return text("post")
+
+    view = OnlyPost()
+    request = Mock(method="HEAD")
+    with pytest.raises(NotImplementedError, match="HEAD is not supported"):
+        view.dispatch_request(request)
