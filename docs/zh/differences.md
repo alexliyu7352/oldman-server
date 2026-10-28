@@ -68,6 +68,7 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - `main_process_stop` 按注册的倒序执行，与其他停止事件相同（先建立的资源最后释放）；原版按注册顺序（它准备的倒序列表从未被用到）。
 - worker manager 用 SIGTERM 停止服务进程（停止服务、重启、缩减），原版用 SIGINT：还在导入模块、尚未装好信号处理的 worker 因此安静结束，不再在导入的那一行抛 `KeyboardInterrupt`、打印回溯；装好之后两个信号的处理相同。`app.manager.manage()` 启动的进程仍收 SIGINT（`KeyboardInterrupt`）。
 - `RESPONSE_TIMEOUT` 只计到响应开始（流式响应的第一次发送）为止，之后不再计时；原版在两次发送之间计时，慢慢发送的流式响应（如 SSE）会被切断。请求方不接收响应时，一次写出等待超过 `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` 就断开连接，handler 像请求方断开时一样被取消；原版的 asyncio 服务器没有这个期限。两种服务器相同。
+- 静态文件（`app.static`）回答 HEAD 时送出与 GET 相同的响应头（`Content-Length`、`Cache-Control` 等），只是不带正文；原版另走一条分支，`Content-Length` 为 0（设了 `use_content_range` 时除外）、没有 `Cache-Control`。
 
 ## 经原生主机时
 

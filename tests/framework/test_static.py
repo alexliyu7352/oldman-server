@@ -244,6 +244,50 @@ def test_static_head_request(app, file_name, static_file_directory):
     )
 
 
+# Headers a HEAD response may differ in from GET: per response or per connection.
+_PER_RESPONSE = {"date", "connection", "keep-alive"}
+
+
+@pytest.mark.parametrize("options", (
+    {},
+    {"use_content_range": True},
+    {"stream_large_files": 200_000},
+), ids=("plain", "ranges", "streamed"))
+@pytest.mark.parametrize("size", (100, 300_000), ids=("small", "large"))
+def test_static_head_sends_the_get_headers(app, tmp_path, options, size):
+    """HEAD gets the header fields GET would (RFC 9110 9.3.2) without the
+    body: Content-Length, Cache-Control and the rest, for a small file, a
+    large one (written by the native host) and a streamed one. It answered
+    Content-Length: 0 without Cache-Control."""
+    (tmp_path / "data.bin").write_bytes(b"x" * size)
+    app.static("/files", tmp_path, **options)
+
+    _, get = app.test_client.get("/files/data.bin")
+    _, head = app.test_client.head("/files/data.bin")
+
+    assert get.status == head.status == 200
+    assert len(get.body) == size and head.body == b""
+    get_headers = {k: v for k, v in get.headers.items() if k not in _PER_RESPONSE}
+    head_headers = {k: v for k, v in head.headers.items() if k not in _PER_RESPONSE}
+    assert head_headers == get_headers
+
+
+def test_static_head_is_conditional_and_ignores_ranges(app, tmp_path):
+    (tmp_path / "data.bin").write_bytes(b"x" * 1000)
+    app.static("/files", tmp_path, use_content_range=True)
+
+    _, get = app.test_client.get("/files/data.bin")
+    modified = {"If-Modified-Since": get.headers["Last-Modified"]}
+    _, head = app.test_client.head("/files/data.bin", headers=modified)
+    assert head.status == 304
+
+    # Range is defined for GET only (RFC 9110 14.2): HEAD describes the
+    # whole representation.
+    _, head = app.test_client.head("/files/data.bin", headers={"Range": "bytes=0-9"})
+    assert head.status == 200
+    assert head.headers["Content-Length"] == "1000"
+
+
 @pytest.mark.parametrize("file_name", ["test.file", "decode me.txt"])
 def test_static_content_range_correct(app, file_name, static_file_directory):
     app.static(

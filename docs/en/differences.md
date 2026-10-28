@@ -68,6 +68,7 @@ oldman patched these itself; those patches can be deleted after switching.
 - `main_process_stop` runs in the reverse of its registration, like the other stop events (what was set up first is released last); stock Sanic runs it in registration order (the reversed list it prepares is never used).
 - The worker manager stops server processes (service stop, restart, scale-down) with SIGTERM, where stock Sanic uses SIGINT: a worker still importing its modules, its signal handling not set up yet, ends quietly instead of raising `KeyboardInterrupt` at the line it was importing and printing a traceback; once set up it handles both signals alike. Processes started by `app.manager.manage()` still get SIGINT (`KeyboardInterrupt`).
 - `RESPONSE_TIMEOUT` runs until the response starts (a streaming response's first send) and not after; stock Sanic times the gap between sends, so a stream that sends slowly (such as SSE) is cut off. When the client stops taking the response, a write that waits longer than `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` closes the connection and cancels the handler as the client leaving does; stock Sanic's asyncio server has no such deadline. Both servers behave the same.
+- A static file (`app.static`) answers HEAD with the header fields GET sends (`Content-Length`, `Cache-Control` and the rest), without the body; stock Sanic answers it on a branch of its own with `Content-Length: 0` (unless `use_content_range` is set) and no `Cache-Control`.
 
 ## Under the native host
 

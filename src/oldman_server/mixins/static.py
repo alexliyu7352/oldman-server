@@ -20,7 +20,7 @@ from oldman_server.log import error_logger
 from oldman_server.mixins.base import BaseMixin
 from oldman_server.models.futures import FutureStatic
 from oldman_server.request import Request
-from oldman_server.response import HTTPResponse, file, file_stream, validate_file
+from oldman_server.response import file, file_stream, validate_file
 from oldman_server.response.convenience import guess_content_type
 
 
@@ -328,29 +328,28 @@ class StaticHandleMixin(metaclass=AppMeta):
 
                 headers["Content-Type"] = content_type
 
-            if request.method == "HEAD":
-                return HTTPResponse(headers=headers)
-            else:
-                if stream_large_files:
-                    if isinstance(stream_large_files, bool):
-                        threshold = 1024 * 1024
-                    else:
-                        threshold = stream_large_files
+            # HEAD gets the very response GET would (RFC 9110 9.3.2: the same
+            # header fields); the server sends it without the body.
+            if stream_large_files:
+                if isinstance(stream_large_files, bool):
+                    threshold = 1024 * 1024
+                else:
+                    threshold = stream_large_files
 
-                    if not stats:
-                        stats = await stat_async(file_path)
-                    if stats.st_size >= threshold:
-                        return await file_stream(
-                            file_path, headers=headers, _range=_range
-                        )
-                # The stat above, instead of another stat.
-                return await file(
-                    file_path,
-                    headers=headers,
-                    _range=_range,
-                    last_modified=stats.st_mtime if stats else _default,
-                    _stat=stats,
-                )
+                if not stats:
+                    stats = await stat_async(file_path)
+                if stats.st_size >= threshold:
+                    return await file_stream(
+                        file_path, headers=headers, _range=_range
+                    )
+            # The stat above, instead of another stat.
+            return await file(
+                file_path,
+                headers=headers,
+                _range=_range,
+                last_modified=stats.st_mtime if stats else _default,
+                _stat=stats,
+            )
         except (IsADirectoryError, PermissionError):
             return await directory_handler.handle(request, request.path)
         except RangeNotSatisfiable:
