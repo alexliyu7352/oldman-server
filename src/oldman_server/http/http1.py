@@ -361,10 +361,11 @@ class Http(Stream, metaclass=TouchUpMeta):
         if not isinstance(status, int) or status < 200:
             raise RuntimeError(f"Invalid response status {status!r}")
 
-        cors = self.protocol.app._cors_table
-        if cors is not None:
+        if self.protocol.app._cors_table is not None:
             # As the native host appends them (oldman_server.cors): the fixed
-            # response's or the route's policy, else the default.
+            # response's or the route's policy, else the default. TouchUp
+            # (OptionalCors) leaves this out while no application has CORS on.
+            cors = self.protocol.app._cors_table
             request = self.request
             if self.fixed is not None:
                 code = cors.fixed.get(self.url.split("?", 1)[0], 0)

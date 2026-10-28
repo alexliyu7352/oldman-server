@@ -1373,12 +1373,12 @@ class OldmanServer(
             if self.path_rewriters:
                 self._rewrite_request_path(request)
             # A CORS preflight is answered here, before routing: no middleware
-            # or handler (oldman_server.cors).
-            cors = self._cors_table
+            # or handler (oldman_server.cors). TouchUp (OptionalCors) leaves
+            # this check out while no application has CORS on.
             if (
-                cors is not None
+                self._cors_table is not None
                 and request.method == "OPTIONS"
-                and await cors.preflight(self, request)
+                and await self._cors_table.preflight(self, request)
             ):
                 return
             # Fetch handler from router

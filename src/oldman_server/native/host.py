@@ -807,6 +807,8 @@ class NativeApplication:
         # request too.
         self._settle_natively = (not self._access_log and not self._cached_routes
                                  and not self._cors_codes)
+        # __call__ changes an answer only for these (one check per request).
+        self._adjusts = bool(self._cached_routes) or self._cors_codes
 
     @staticmethod
     def _flat_unsupported(app):
@@ -919,6 +921,15 @@ class NativeApplication:
         except Exception as failure:
             await app.handle_exception(request, failure, False)
 
+    def _adjusted(self, request, result):
+        """__call__'s answer for a native_cache route or under a route's CORS
+        policy."""
+        if self._cached_routes and request.method == "GET":
+            result = self._cached(request, result)
+        if self._cors_codes:
+            result = _with_cors(request, result)
+        return result
+
     def _cached(self, request, result):
         """A complete response to a GET for a native_cache route: one the shard
         may keep (engine.CACHED; it checks the rest)."""
@@ -955,10 +966,8 @@ class NativeApplication:
             result = exchange.finish()
             if self._access_log:
                 _log_access(request, exchange, started)
-            if self._cached_routes and request.method == "GET":
-                result = self._cached(request, result)
-            if self._cors_codes:
-                result = _with_cors(request, result)
+            if self._adjusts:
+                result = self._adjusted(request, result)
             return result
         finally:
             request_class._current.reset(token)
@@ -1018,7 +1027,9 @@ class NativeApplication:
                         app._rewrite_request_path(request)
                     # A CORS preflight is answered here, before routing
                     # (OldmanServer.handle_request), when routes have policies
-                    # of their own: the host answers the default policy's.
+                    # of their own (the host answers the default policy's).
+                    # Compiled in only then (TouchUp's OptionalCors), as the
+                    # _cors_codes block at its end and the _Answered handler.
                     if (self._cors_codes and request.method == "OPTIONS"
                             and await app._cors_table.preflight(app, request)):
                         raise _Answered

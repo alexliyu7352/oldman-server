@@ -179,3 +179,61 @@ def test_a_protocol_error_knows_no_origin():
     assert bad[0] == "HTTP/1.1 400 Bad Request"
     assert header(bad, "access-control-allow-origin") == []
     assert header(bad, "vary") == ["Origin"]
+
+
+def test_cors_checks_are_compiled_in_only_where_they_apply():
+    """OptionalCors leaves the request path's CORS checks out of the methods
+    TouchUp compiles unless they apply: none at all with CORS off, and the
+    native fast path's own only with route policies."""
+    from ast import parse, unparse
+    from inspect import getsource
+    from textwrap import dedent
+
+    from oldman_server import CORS, OldmanServer
+    from oldman_server.http.http1 import Http
+    from oldman_server.native.host import NativeApplication
+    from oldman_server.response import text
+    from oldman_server.touchup.schemes.cors import OptionalCors
+
+    def compiled(method, app):
+        node = parse(dedent(getsource(method)))
+        for visitor in OptionalCors(app).visitors():
+            node = visitor.visit(node)
+        return unparse(node)
+
+    methods = (NativeApplication._call_flat, OldmanServer.handle_request, Http.http1_response_header)
+    off = OldmanServer("cors_compiled_off", configure_logging=False)
+    default_only = OldmanServer("cors_compiled_default", configure_logging=False)
+    default_only.config.CORS_ORIGINS = "https://a.example"
+    routes = OldmanServer("cors_compiled_routes", configure_logging=False)
+    routes.config.CORS_ORIGINS = "https://a.example"
+    for app in (off, default_only, routes):
+        @app.get("/")
+        async def index(request):
+            return text("x")
+
+    @routes.get("/strict", cors=CORS(credentials=True))
+    async def strict(request):
+        return text("strict")
+
+    try:
+        off.finalize()
+        # Only the off application in the process: no CORS code anywhere.
+        registry = OldmanServer._app_registry
+        OldmanServer._app_registry = {off.name: off}
+        try:
+            assert not any("_cors" in compiled(method, off) or "_Answered" in compiled(method, off)
+                           for method in methods)
+        finally:
+            OldmanServer._app_registry = registry
+        default_only.finalize()
+        routes.finalize()
+        flat = compiled(NativeApplication._call_flat, default_only)
+        assert "_cors" not in flat and "_Answered" not in flat
+        assert "_cors_table" in compiled(OldmanServer.handle_request, default_only)
+        assert "_cors_table" in compiled(Http.http1_response_header, default_only)
+        flat = compiled(NativeApplication._call_flat, routes)
+        assert flat.count("self._cors_codes") == 2 and "except _Answered" in flat
+    finally:
+        for app in (off, default_only, routes):
+            OldmanServer.unregister_app(app)
