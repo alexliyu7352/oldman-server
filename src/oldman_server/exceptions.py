@@ -529,6 +529,32 @@ class Forbidden(HTTPException):
     quiet = True
 
 
+class TooManyRequests(HTTPException):
+    """429 Too Many Requests: refused by a rate limit.
+
+    Give the time to wait, when known, as a Retry-After header:
+
+    ```python
+    raise TooManyRequests("Slow down", headers={"Retry-After": "30"})
+    ```
+
+    Args:
+        message (Optional[Union[str, bytes]], optional): The message to be sent to the client. If `None`
+            then the HTTP status 'Too Many Requests' will be sent. Defaults to `None`.
+        quiet (Optional[bool], optional): When `True`, the error traceback will be suppressed
+            from the logs. Defaults to `None`.
+        context (Optional[Dict[str, Any]], optional): Additional mapping of key/value data that will be
+            sent to the client upon exception. Defaults to `None`.
+        extra (Optional[Dict[str, Any]], optional): Additional mapping of key/value data that will NOT be
+            sent to the client when in PRODUCTION mode. Defaults to `None`.
+        headers (Optional[Dict[str, Any]], optional): Additional headers that should be sent with the HTTP
+            response, such as Retry-After. Defaults to `None`.
+    """  # noqa: E501
+
+    status_code = 429
+    quiet = True
+
+
 class InvalidRangeType(RangeNotSatisfiable):
     """416 Range Not Satisfiable
 

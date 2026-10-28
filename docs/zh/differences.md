@@ -15,6 +15,7 @@
 - 新增设置 `UNIX_SOCKET_MODE`：服务器绑定的 unix socket（`unix=`、`NATIVE_WORKER_LISTEN`）的权限位，默认 0o666（与 Sanic 相同）；可写 `0o660` 或八进制字符串（环境变量写 `OLDMAN_SERVER_UNIX_SOCKET_MODE=0o660`）。不是 0–0o777 的值在绑定时报 `ValueError`。
 - 新增设置 `TRUSTED_PROXIES`：地址或网段（列表，或逗号分隔的字符串，如 `"127.0.0.1, 10.0.0.0/8"`），`"unix"` 表示 unix socket 连接（能连上 socket 的进程都被信任，权限见 `UNIX_SOCKET_MODE`）。设置后，只有来自这些来源的连接，其 `Forwarded` / `X-Forwarded-*` 等转发头才按 `FORWARDED_SECRET`、`REAL_IP_HEADER`、`PROXIES_COUNT` 生效；其他连接的 `remote_addr` 为空，`client_ip`、`scheme`、`host` 取实际连接。双栈监听收到的 IPv4 映射地址（`::ffff:a.b.c.d`）按 IPv4 网段比较。格式错误在服务器启动时报 `ValueError`。不设置时与原版相同：转发头对所有连接都按上述设置生效。
 - 新增 `HTTPMethodView.before_dispatch(request, *args, **kwargs)`：覆写后在方法 handler 之前以同样的参数执行（可为同步或协程），返回响应则直接用它回应，返回 None 才进入 handler；抛出的异常交给错误处理器。不覆写时没有额外开销。oldman 的 `HTTPMethodView` 不必再复制整个 `dispatch_request`，把登录与权限检查放进这里即可。
+- 新增 `TooManyRequests`（429，`oldman_server` 与 `oldman_server.exceptions` 都可导入）：限流拒绝请求时抛出，与其他 4xx 异常一样默认不记 traceback；知道要等多久时用 `headers={"Retry-After": "30"}` 给出。
 - 请求头的值去掉两端的空白（RFC 9110 的可选空白；原版只去掉开头，`X-A: v␠␠` 原版得到 `"v  "`），两种服务器相同；迭代 `request.headers` 得到的名字都是小写（原版的解析器本来如此，原生主机现在也一样）。
 - 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。
 - JSON 默认用 orjson（`json()`、`request.json`、JSON 错误页与 JSON 日志），不再用 ujson：

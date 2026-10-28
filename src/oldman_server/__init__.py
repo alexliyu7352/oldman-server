@@ -22,6 +22,7 @@ from oldman_server.exceptions import (
     OldmanServerException,
     ServerError,
     ServiceUnavailable,
+    TooManyRequests,
     Unauthorized,
 )
 from oldman_server.request import Request
@@ -76,6 +77,7 @@ __all__ = (
     "OldmanServerException",
     "ServerError",
     "ServiceUnavailable",
+    "TooManyRequests",
     "Unauthorized",
     # Common response methods
     "empty",

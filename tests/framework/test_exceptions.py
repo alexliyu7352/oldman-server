@@ -448,3 +448,23 @@ def test_request_middleware_exception_on_404(app: OldmanServer):
 
     assert response.status == 500
     assert next(counter) == 1
+
+
+def test_too_many_requests(app: OldmanServer, caplog):
+    from oldman_server import TooManyRequests as exported
+    from oldman_server.exceptions import TooManyRequests
+
+    assert exported is TooManyRequests
+    assert TooManyRequests.quiet is True
+
+    @app.get("/limited")
+    async def limited(request):
+        raise TooManyRequests("Slow down", headers={"Retry-After": "30"})
+
+    with caplog.at_level(logging.ERROR, logger="oldman_server.error"):
+        _, response = app.test_client.get("/limited", headers={"Accept": "application/json"})
+    assert response.status == 429
+    assert response.headers["retry-after"] == "30"
+    assert response.json["message"] == "Slow down"
+    assert response.json["description"] == "Too Many Requests"
+    assert not [r for r in caplog.records if r.name == "oldman_server.error"]
