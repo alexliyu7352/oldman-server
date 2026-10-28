@@ -67,8 +67,33 @@ def test_check_timeouts_request_timeout(protocol: HttpProtocol):
 
 
 def test_check_timeouts_response_timeout(protocol: HttpProtocol):
-    protocol._http.stage = Stage.RESPONSE
+    protocol._http.stage = Stage.HANDLER
     protocol._time = 0
     protocol.check_timeouts()
     protocol._task.cancel.assert_called_once()
     assert isinstance(protocol._http.exception, ServiceUnavailable)
+
+
+def test_check_timeouts_no_response_timeout_once_the_response_started(
+    protocol: HttpProtocol, mock_transport
+):
+    # RESPONSE_TIMEOUT runs until the response starts, as on the native
+    # host: a stream that sends slowly is not cut.
+    protocol._http.stage = Stage.RESPONSE
+    protocol._time = 0
+    protocol.check_timeouts()
+    protocol._task.cancel.assert_not_called()
+    mock_transport.abort.assert_not_called()
+    assert protocol._http.exception is None
+
+
+def test_check_timeouts_write_timeout(protocol: HttpProtocol, mock_transport):
+    # A write waiting for the client past KEEP_ALIVE_TIMEOUT +
+    # GRACEFUL_TCP_CLOSE_TIMEOUT cuts the connection (connection_lost then
+    # cancels the handler).
+    protocol._http.stage = Stage.RESPONSE
+    protocol.pause_writing()
+    protocol._write_paused_at = 0
+    protocol.check_timeouts()
+    mock_transport.abort.assert_called_once()
+    assert protocol._http.exception is None
