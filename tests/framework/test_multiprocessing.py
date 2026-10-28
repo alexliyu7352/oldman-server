@@ -175,3 +175,31 @@ def test_main_process_event(app, caplog, port):
         caplog.record_tuples.count(("oldman_server.root", 20, "main_process_stop"))
         == 2
     )
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="This test requires fork context",
+)
+@pytest.mark.parametrize("workers", (1, 2))
+def test_main_process_stop_runs_in_reverse_order(app, port, workers):
+    """Like every stop event, main_process_stop runs in the reverse of its
+    registration: what was set up first is released last."""
+    order = []
+
+    @app.main_process_stop
+    async def first(app):
+        order.append("first")
+
+    @app.main_process_stop
+    async def second(app):
+        order.append("second")
+
+    @app.after_server_start
+    async def stop(app):
+        app.stop()
+
+    with use_context("fork"):
+        app.run(HOST, port, workers=workers)
+
+    assert order == ["second", "first"]

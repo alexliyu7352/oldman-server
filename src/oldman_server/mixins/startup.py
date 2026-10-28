@@ -83,6 +83,12 @@ if TYPE_CHECKING:
 RUN_CONFIG_KEYS = ("ACCESS_LOG", "AUTO_RELOAD", "NOISY_EXCEPTIONS")
 
 
+def _main_process_stop(app: OldmanServer) -> list:
+    """The main_process_stop listeners in the reverse of their registration,
+    as every stop event runs: what was set up first is released last."""
+    return list(reversed(app.listeners.get("main_process_stop", ())))
+
+
 class StartupMixin(metaclass=AppMeta):
     _app_registry: ClassVar[dict[str, OldmanServer]]
     name: str
@@ -542,9 +548,7 @@ class StartupMixin(metaclass=AppMeta):
                 "the already existing loop."
             )
 
-        main_start = server_settings.pop("main_start", None)
-        main_stop = server_settings.pop("main_stop", None)
-        if main_start or main_stop:
+        if self.listeners["main_process_start"] or self.listeners["main_process_stop"]:
             logger.warning(
                 "Listener events for the main process are not available "
                 "with create_server()"
@@ -652,18 +656,6 @@ class StartupMixin(metaclass=AppMeta):
                 "Consider using debug=True or dev=True while actively "
                 f"developing your application.{Colors.END}"
             )
-
-        # Register start/stop events
-        for event_name, settings_name, reverse in (
-            ("main_process_start", "main_start", False),
-            ("main_process_stop", "main_stop", True),
-        ):
-            listeners = self.listeners[event_name].copy()
-            if reverse:
-                listeners.reverse()
-            # Prepend the app to the arguments when listeners are triggered
-            listeners = [partial(listener, self) for listener in listeners]
-            server_settings[settings_name] = listeners  # type: ignore
 
         if run_async:
             server_settings["run_async"] = True
@@ -929,10 +921,8 @@ class StartupMixin(metaclass=AppMeta):
         exit_code = 0
         workers_started = False
         try:
-            primary_server_info.settings.pop("main_start", None)
-            primary_server_info.settings.pop("main_stop", None)
             main_start = primary.listeners.get("main_process_start")
-            main_stop = primary.listeners.get("main_process_stop")
+            main_stop = _main_process_stop(primary)
             app = primary_server_info.settings.pop("app")
             app.setup_loop()
             loop = new_event_loop()
@@ -997,7 +987,7 @@ class StartupMixin(metaclass=AppMeta):
                     server_info.settings = {
                         k: v
                         for k, v in server_info.settings.items()
-                        if k not in ("main_start", "main_stop", "app")
+                        if k != "app"
                     }
                     kwargs["server_info"][app.name].append(server_info)
 
@@ -1152,12 +1142,7 @@ class StartupMixin(metaclass=AppMeta):
         kwargs = {
             k: v
             for k, v in primary_server_info.settings.items()
-            if k
-            not in (
-                "main_start",
-                "main_stop",
-                "app",
-            )
+            if k != "app"
         }
         kwargs["app_name"] = primary.name
         kwargs["app_loader"] = None
@@ -1194,7 +1179,7 @@ class StartupMixin(metaclass=AppMeta):
                 server_info.settings = {
                     k: v
                     for k, v in server_info.settings.items()
-                    if k not in ("main_start", "main_stop", "app")
+                    if k != "app"
                 }
                 kwargs["server_info"][primary.name].append(server_info)
 
@@ -1228,11 +1213,7 @@ class StartupMixin(metaclass=AppMeta):
 
             if main_loop is not None:
                 primary.state.native_main_process = False
-                trigger_events(
-                    primary.listeners.get("main_process_stop"),
-                    main_loop,
-                    primary,
-                )
+                trigger_events(_main_process_stop(primary), main_loop, primary)
                 main_loop.close()
 
             cls._cleanup_env_vars()
@@ -1277,8 +1258,8 @@ class StartupMixin(metaclass=AppMeta):
                 if server_info.stage is not ServerStage.SERVING:
                     app.state.primary = False
                     handlers = [
-                        *server_info.settings.pop("main_start", []),
-                        *server_info.settings.pop("main_stop", []),
+                        *app.listeners["main_process_start"],
+                        *app.listeners["main_process_stop"],
                     ]
                     if handlers:  # no cov
                         error_logger.warning(
