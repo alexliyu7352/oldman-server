@@ -974,10 +974,14 @@ class OldmanServer(
                 self.blueprint(item, **params)
             return
         if blueprint.name in self.blueprints:
-            assert self.blueprints[blueprint.name] is blueprint, (
-                'A blueprint with the name "%s" is already registered.  '
-                "Blueprint names must be unique." % (blueprint.name,)
-            )
+            # The same blueprint again (a second group, say) is fine; another
+            # one with its name is a registration error, raised as such even
+            # under python -O, where an assert would vanish.
+            if self.blueprints[blueprint.name] is not blueprint:
+                raise OldmanServerException(
+                    f'A blueprint named "{blueprint.name}" is already registered; '
+                    "blueprint names must be unique."
+                )
         else:
             self.blueprints[blueprint.name] = blueprint
             self._blueprint_order.append(blueprint)

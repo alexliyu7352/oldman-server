@@ -884,13 +884,15 @@ def test_duplicate_blueprint(app: OldmanServer):
 
     app.blueprint(bp)
 
-    with pytest.raises(AssertionError) as excinfo:
+    with pytest.raises(OldmanServerException) as excinfo:
         app.blueprint(bp1)
 
     assert str(excinfo.value) == (
-        f'A blueprint with the name "{bp_name}" is already registered.  '
-        "Blueprint names must be unique."
+        f'A blueprint named "{bp_name}" is already registered; '
+        "blueprint names must be unique."
     )
+    # The same blueprint again is not a duplicate.
+    app.blueprint(bp)
 
 
 def test_strict_slashes_behavior_adoption():
