@@ -1,3 +1,4 @@
+import copy
 import logging
 import sys
 import uuid
@@ -85,7 +86,7 @@ def test_logging_defaults(debug):
 def test_logging_pass_customer_logconfig():
     # reset_logging()
 
-    modified_config = LOGGING_CONFIG_DEFAULTS
+    modified_config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
     modified_config["formatters"]["generic"]["format"] = (
         "%(asctime)s - (%(name)s)[%(levelname)s]: %(message)s"
     )
@@ -129,7 +130,7 @@ def test_logger(caplog):
 def test_logging_modified_root_logger_config():
     # reset_logging()
 
-    modified_config = LOGGING_CONFIG_DEFAULTS
+    modified_config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
     modified_config["loggers"]["oldman_server.root"]["level"] = "DEBUG"
 
     OldmanServer("test_logging", log_config=modified_config)
@@ -308,3 +309,21 @@ def test_log_extra_config_respected():
     app.test_client.get("/", debug=True)
 
     assert AutoFormatter.LOG_EXTRA is False
+
+
+def test_the_default_logging_config_is_plain_data():
+    """LOGGING_CONFIG_DEFAULTS deep-copies: its streams are dictConfig's
+    "ext://" references, resolved when it is applied, not stream objects."""
+    import sys
+
+    config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
+    config["loggers"]["oldman_server.root"]["level"] = "WARNING"
+    OldmanServer("test_logging", log_config=config)
+    assert logging.getLogger("oldman_server.root").level == logging.WARNING
+    assert LOGGING_CONFIG_DEFAULTS["loggers"]["oldman_server.root"]["level"] == "INFO"
+
+    OldmanServer.unregister_app(OldmanServer.get_app("test_logging"))
+    OldmanServer("test_logging")
+    root = logging.getLogger("oldman_server.root")
+    assert root.level == logging.INFO
+    assert [handler.stream for handler in root.handlers] == [sys.stdout]

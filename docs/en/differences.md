@@ -74,6 +74,9 @@ oldman patched these itself; those patches can be deleted after switching.
 
 - Configuration: upper-case class attributes of a `Config` subclass are default settings (the rule `update_config(a class)` reads a class by), seen by `get()`, by iteration and by the native host, and overridden by the environment and later assignments; in stock Sanic they worked only for attribute reads, assignments did not change them and `get()` did not see them (so native host settings given that way were ignored). Settings with a setter (`FALLBACK_ERROR_FORMAT`) given in `Config(defaults=...)` take effect. A context object passed as `OldmanServer(ctx=...)` is used even when empty (an empty dict subclass, say) instead of being replaced by a `SimpleNamespace`. `PROXIES_COUNT` is checked when the server starts (None or a non-negative integer, else `ValueError`), not with an assert per request.
 
+- Every listener decorator takes `priority` directly (such as `@app.after_server_stop(priority=10)`); in stock Sanic only `before_server_start` does and the others raise `TypeError`.
+- `oldman_server.log.LOGGING_CONFIG_DEFAULTS` is plain data: its handlers' streams are `"ext://sys.stdout"` / `"ext://sys.stderr"`, resolved when the configuration is applied (a replaced `sys.stdout` is used too), so it can be copied with `copy.deepcopy`, changed and passed as `log_config=`; stock Sanic holds the stream objects of import time, which cannot be copied.
+
 ## Under the native host
 
 - `request.headers` is a `NativeHeaders`: `[]`, `get`, `getone`, `getall`, `in` and attribute access (`headers.content_type`) look up the native request directly; iteration, `items()`, `len()`, `==`, `copy()` and modification build a `Header` on first use and work on it from then on, with the same results as `Header`. It is a `multidict.MultiMapping` (and a `Mapping`) but not a `CIMultiDict`: `isinstance(request.headers, CIMultiDict)` is False.

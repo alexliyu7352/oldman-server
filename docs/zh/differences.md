@@ -74,6 +74,9 @@ oldman 原先为这些打的补丁，切换后可以删除。
 
 - 配置：`Config` 子类上大写的类属性是默认设置（与 `update_config(类)` 读类的规则相同），`get()`、迭代与原生主机都读得到，环境变量与之后的赋值覆盖它；原版里它只对属性读有效，赋值改不动、`get()` 读不到（原生主机的设置因此被忽略）。`Config(defaults=...)` 里带 setter 的设置（`FALLBACK_ERROR_FORMAT`）照常生效。传给 `OldmanServer(ctx=...)` 的上下文对象即使为空（如空的 dict 子类）也照用，不再被换成 `SimpleNamespace`。`PROXIES_COUNT` 在服务器启动时检查（None 或非负整数，否则 `ValueError`），不再在请求时用 assert 检查。
 
+- 每个监听器装饰器都可以直接带 `priority`（如 `@app.after_server_stop(priority=10)`）；原版只有 `before_server_start` 可以，其余的抛 `TypeError`。
+- `oldman_server.log.LOGGING_CONFIG_DEFAULTS` 是纯数据：处理器的流写成 `"ext://sys.stdout"` / `"ext://sys.stderr"`，在应用配置时才解析（替换过的 `sys.stdout` 也跟着用），可以 `copy.deepcopy` 一份再改后传给 `log_config=`；原版放的是导入时的流对象，复制会失败。
+
 ## 经原生主机时
 
 - `request.headers` 是 `NativeHeaders`：`[]`、`get`、`getone`、`getall`、`in` 与属性访问（`headers.content_type`）直接查原生请求；迭代、`items()`、`len()`、`==`、`copy()` 与修改在第一次用到时建一个 `Header`，之后都在它上面进行，结果与 `Header` 相同。它是 `multidict.MultiMapping`（也是 `Mapping`），但不是 `CIMultiDict`：`isinstance(request.headers, CIMultiDict)` 为 False。

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 
 from time import sleep
@@ -84,7 +85,7 @@ def test_response_handler_cancelled(response_handler_cancelled_app):
 
 
 def test_response_timeout_not_applied(caplog):
-    modified_config = LOGGING_CONFIG_DEFAULTS
+    modified_config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
     modified_config["loggers"]["oldman_server.websockets"]["level"] = "DEBUG"
 
     app = OldmanServer("test_logging", log_config=modified_config)

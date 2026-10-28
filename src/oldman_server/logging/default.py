@@ -1,5 +1,3 @@
-import sys
-
 from typing import Any
 
 
@@ -37,17 +35,17 @@ LOGGING_CONFIG_DEFAULTS: dict[str, Any] = dict(  # no cov
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "generic",
-            "stream": sys.stdout,
+            "stream": "ext://sys.stdout",
         },
         "error_console": {
             "class": "logging.StreamHandler",
             "formatter": "generic",
-            "stream": sys.stderr,
+            "stream": "ext://sys.stderr",
         },
         "access_console": {
             "class": "logging.StreamHandler",
             "formatter": "access",
-            "stream": sys.stdout,
+            "stream": "ext://sys.stdout",
         },
     },
     formatters={

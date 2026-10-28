@@ -194,9 +194,13 @@ class LegacyFormatter(AutoFormatter):
 
     .. code-block:: python
 
+        import copy
+
+        from oldman_server import OldmanServer
         from oldman_server.log import LOGGING_CONFIG_DEFAULTS
 
-        LOGGING_CONFIG_DEFAULTS["formatters"] = {
+        config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
+        config["formatters"] = {
             "generic": {
                 "class": "oldman_server.logging.formatter.LegacyFormatter"
             },
@@ -204,6 +208,7 @@ class LegacyFormatter(AutoFormatter):
                 "class": "oldman_server.logging.formatter.LegacyAccessFormatter"
             },
         }
+        app = OldmanServer("app", log_config=config)
     """
 
     PREFIX_FORMAT = "%(asctime)s [%(process)s] [%(levelname)s] "
@@ -242,9 +247,13 @@ class LegacyAccessFormatter(AutoAccessFormatter):
 
     .. code-block:: python
 
+        import copy
+
+        from oldman_server import OldmanServer
         from oldman_server.log import LOGGING_CONFIG_DEFAULTS
 
-        LOGGING_CONFIG_DEFAULTS["formatters"] = {
+        config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
+        config["formatters"] = {
             "generic": {
                 "class": "oldman_server.logging.formatter.LegacyFormatter"
             },
@@ -252,6 +261,7 @@ class LegacyAccessFormatter(AutoAccessFormatter):
                 "class": "oldman_server.logging.formatter.LegacyAccessFormatter"
             },
         }
+        app = OldmanServer("app", log_config=config)
     """
 
     PREFIX_FORMAT = "%(asctime)s - (%(name)s)[%(levelname)s][%(host)s]: "
@@ -292,9 +302,13 @@ class JSONFormatter(AutoFormatter):
 
     .. code-block:: python
 
+        import copy
+
+        from oldman_server import OldmanServer
         from oldman_server.log import LOGGING_CONFIG_DEFAULTS
 
-        LOGGING_CONFIG_DEFAULTS["formatters"] = {
+        config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
+        config["formatters"] = {
             "generic": {
                 "class": "oldman_server.logging.formatter.JSONFormatter"
             },
@@ -302,6 +316,7 @@ class JSONFormatter(AutoFormatter):
                 "class": "oldman_server.logging.formatter.JSONFormatter"
             },
         }
+        app = OldmanServer("app", log_config=config)
     """
 
     ATTY = False
@@ -357,9 +372,13 @@ class JSONAccessFormatter(JSONFormatter):
 
     .. code-block:: python
 
+        import copy
+
+        from oldman_server import OldmanServer
         from oldman_server.log import LOGGING_CONFIG_DEFAULTS
 
-        LOGGING_CONFIG_DEFAULTS["formatters"] = {
+        config = copy.deepcopy(LOGGING_CONFIG_DEFAULTS)
+        config["formatters"] = {
             "generic": {
                 "class": "oldman_server.logging.formatter.JSONFormatter"
             },
@@ -367,6 +386,7 @@ class JSONAccessFormatter(JSONFormatter):
                 "class": "oldman_server.logging.formatter.JSONAccessFormatter"
             },
         }
+        app = OldmanServer("app", log_config=config)
     """
 
     FIELDS = [
