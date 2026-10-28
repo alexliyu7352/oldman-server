@@ -152,7 +152,7 @@ class ListenerMixin(metaclass=AppMeta):
         )
 
     def main_process_start(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the main_process_start event.
 
@@ -176,7 +176,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "main_process_start", priority)
 
     def main_process_ready(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the main_process_ready event.
 
@@ -201,7 +201,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "main_process_ready", priority)
 
     def main_process_stop(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the main_process_stop event.
 
@@ -224,7 +224,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "main_process_stop", priority)
 
     def reload_process_start(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the reload_process_start event.
 
@@ -247,7 +247,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "reload_process_start", priority)
 
     def reload_process_stop(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the reload_process_stop event.
 
@@ -270,7 +270,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "reload_process_stop", priority)
 
     def before_reload_trigger(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the before_reload_trigger event.
 
@@ -296,7 +296,7 @@ class ListenerMixin(metaclass=AppMeta):
         )
 
     def after_reload_trigger(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the after_reload_trigger event.
 
@@ -349,7 +349,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "before_server_start", priority)
 
     def after_server_start(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the after_server_start event.
 
@@ -379,7 +379,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "after_server_start", priority)
 
     def before_server_stop(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the before_server_stop event.
 
@@ -406,7 +406,7 @@ class ListenerMixin(metaclass=AppMeta):
         return self._setup_listener(listener, "before_server_stop", priority)
 
     def after_server_stop(
-        self, listener: ListenerType[AppVar] | None, *, priority: int = 0
+        self, listener: ListenerType[AppVar] | None = None, *, priority: int = 0
     ) -> ListenerType[AppVar]:
         """Decorator for registering a listener for the after_server_stop event.
 

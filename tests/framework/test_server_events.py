@@ -274,3 +274,55 @@ def test_priority_ordering(app):
         "fourth",
         "bp_first",
     ]
+
+
+SHORTCUTS = [
+    "main_process_start",
+    "main_process_ready",
+    "main_process_stop",
+    "reload_process_start",
+    "reload_process_stop",
+    "before_reload_trigger",
+    "after_reload_trigger",
+    "before_server_start",
+    "after_server_start",
+    "before_server_stop",
+    "after_server_stop",
+]
+
+
+@pytest.mark.parametrize("event", SHORTCUTS)
+def test_every_listener_shortcut_takes_a_priority(app, event):
+    async def plain(app):
+        ...
+
+    async def called(app):
+        ...
+
+    async def prioritized(app):
+        ...
+
+    shortcut = getattr(app, event)
+    shortcut(plain)
+    shortcut()(called)
+    shortcut(priority=5)(prioritized)
+    futures = [future for future in app._future_listeners if future.event == event]
+    assert [future.listener.__name__ for future in futures] == ["plain", "called", "prioritized"]
+    assert [future.priority for future in futures] == [0, 0, 5]
+
+
+def test_stop_listeners_run_by_priority(app):
+    output = []
+
+    @app.after_server_stop
+    async def plain(app):
+        output.append("plain")
+
+    @app.after_server_stop(priority=10)
+    async def outer(app):
+        output.append("outer")
+
+    start_stop_app(app)
+    # The stop events run in the reverse of the start order: the highest
+    # priority, the first set up, is released last.
+    assert output == ["plain", "outer"]
