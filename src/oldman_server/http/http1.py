@@ -233,16 +233,16 @@ class Http(Stream, metaclass=TouchUpMeta):
                     context={"head": bytes(head)},
                 )
 
-            if protocol == "HTTP/1.1":
-                self.keep_alive = True
-            elif protocol == "HTTP/1.0":
-                self.keep_alive = False
-            else:
+            if protocol not in ("HTTP/1.1", "HTTP/1.0"):
                 raise Exception  # Raise a Bad Request on try-except
 
             self.head_only = method.upper() == "HEAD"
             request_body = False
             host = False
+            # Connection is a list of options (RFC 9110 7.6.1), in one or
+            # more fields: close ends the connection; HTTP/1.0 keeps it only
+            # with keep-alive (RFC 9112 9.3), as the native host parses it.
+            close = keep_alive = False
             headers = []
 
             for name, value in (h.split(":", 1) for h in split_headers):
@@ -266,9 +266,17 @@ class Http(Stream, metaclass=TouchUpMeta):
                         raise ValueError("Duplicate Host")
                     host = True
                 elif name == "connection":
-                    self.keep_alive = value.lower() == "keep-alive"
+                    for option in value.split(","):
+                        option = option.strip().lower()
+                        if option == "close":
+                            close = True
+                        elif option == "keep-alive":
+                            keep_alive = True
 
                 headers.append(h)
+            self.keep_alive = not close and (
+                protocol == "HTTP/1.1" or keep_alive
+            )
         except Exception:
             raise BadRequest("Bad Request")
 
