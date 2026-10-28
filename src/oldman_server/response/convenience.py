@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from email.utils import formatdate, parsedate_to_datetime
 from mimetypes import guess_type
@@ -25,7 +26,7 @@ from .types import FileResponse, HTTPResponse, JSONResponse, ResponseStream
 
 
 def empty(
-    status: int = 204, headers: dict[str, str] | None = None
+    status: int = 204, headers: Mapping[str, str] | None = None
 ) -> HTTPResponse:
     """Returns an empty response to the client.
 
@@ -42,7 +43,7 @@ def empty(
 def json(
     body: Any,
     status: int = 200,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
     content_type: str = "application/json",
     dumps: Callable[..., AnyStr] | None = None,
     **kwargs: Any,
@@ -68,7 +69,7 @@ def json(
 def text(
     body: str,
     status: int = 200,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
     content_type: str = "text/plain; charset=utf-8",
 ) -> HTTPResponse:
     """Returns response object with body in text format.
@@ -96,7 +97,7 @@ def text(
 def raw(
     body: AnyStr | None,
     status: int = 200,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
     content_type: str = DEFAULT_HTTP_CONTENT_TYPE,
 ) -> HTTPResponse:
     """Returns response object without encoding the body.
@@ -116,7 +117,7 @@ def raw(
 def html(
     body: str | bytes | HTMLProtocol,
     status: int = 200,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> HTTPResponse:
     """Returns response object with body in html format.
 
@@ -216,7 +217,7 @@ async def file(
     request_headers: Header | None = None,
     validate_when_requested: bool = True,
     mime_type: str | None = None,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
     filename: str | None = None,
     last_modified: datetime | float | int | Default | None = _default,
     max_age: float | int | None = None,
@@ -259,7 +260,8 @@ async def file(
         if response:
             return response
 
-    headers = headers or {}
+    # The response's own headers: the caller's mapping is copied, not changed.
+    headers = Header(headers) if headers else Header()
     if last_modified:
         headers.setdefault(
             "Last-Modified", formatdate(last_modified, usegmt=True)
@@ -310,26 +312,26 @@ async def file(
         if _read_length(_stat, offset, size) >= _NATIVE_SEND_SIZE:
             if opened is None:
                 opened = await files.open(location)
-            return FileResponse(
+            response = FileResponse(
                 location,
                 offset,
                 _read_length(opened, offset, size),
                 status=status,
-                headers=headers,
                 content_type=content_type,
             )
+            response.headers = headers
+            return response
     out_stream = await read_file_async(location, offset, size)
-    return HTTPResponse(
-        body=out_stream,
-        status=status,
-        headers=headers,
-        content_type=content_type,
+    response = HTTPResponse(
+        body=out_stream, status=status, content_type=content_type
     )
+    response.headers = headers
+    return response
 
 
 def redirect(
     to: str,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
     status: int = 302,
     content_type: str = "text/html; charset=utf-8",
 ) -> HTTPResponse:
@@ -337,24 +339,23 @@ def redirect(
 
     Args:
         to (str): path or fully qualified URL to redirect to
-        headers (Optional[Dict[str, str]], optional): optional dict of headers to include in the new request. Defaults to None.
+        headers (Optional[Mapping[str, str]], optional): headers to include in the response, copied (the mapping itself is not changed). Defaults to None.
         status (int, optional): status code (int) of the new request, defaults to 302. Defaults to 302.
         content_type (str, optional): the content type (string) of the response. Defaults to "text/html; charset=utf-8".
 
     Returns:
         HTTPResponse: A response object with the redirect.
     """  # noqa: E501
-    headers = headers or {}
-
     # URL Quote the URL before redirecting
     safe_to = quote_plus(to, safe=":/%#?&=@[]!$&'()*+,;")
 
-    # According to RFC 7231, a relative URI is now permitted.
-    headers["Location"] = safe_to
-
-    return HTTPResponse(
+    response = HTTPResponse(
         status=status, headers=headers, content_type=content_type
     )
+    # According to RFC 7231, a relative URI is now permitted. Set on the
+    # response's own headers: the caller's mapping is not changed.
+    response.headers["Location"] = safe_to
+    return response
 
 
 async def file_stream(
@@ -362,7 +363,7 @@ async def file_stream(
     status: int = 200,
     chunk_size: int = 4096,
     mime_type: str | None = None,
-    headers: dict[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
     filename: str | None = None,
     _range: Range | None = None,
 ) -> ResponseStream:
@@ -384,7 +385,8 @@ async def file_stream(
         filename (Optional[str], optional): Override filename.
         _range (Optional[Range], optional): The range of bytes to send.
     """  # noqa: E501
-    headers = headers or {}
+    # The response's own headers: the caller's mapping is copied, not changed.
+    headers = Header(headers) if headers else Header()
     if filename:
         headers.setdefault(
             "Content-Disposition", f'attachment; filename="{filename}"'
@@ -430,12 +432,11 @@ async def file_stream(
                         break
                     await response.write(content)
 
-    return ResponseStream(
-        streaming_fn=_streaming_fn,
-        status=status,
-        headers=headers,
-        content_type=mime_type,
+    response = ResponseStream(
+        streaming_fn=_streaming_fn, status=status, content_type=mime_type
     )
+    response.headers = headers
+    return response
 
 
 def guess_content_type(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Coroutine, Iterator
+from collections.abc import Coroutine, Iterator, Mapping
 from datetime import datetime
 from pathlib import PurePath
 from types import MemberDescriptorType
@@ -284,7 +284,7 @@ class HTTPResponse(BaseHTTPResponse):
         self,
         body: Any = None,
         status: int = 200,
-        headers: Header | dict[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
         content_type: str | None = None,
     ):
         # Same final state as BaseHTTPResponse.__init__() followed by these
@@ -345,7 +345,7 @@ class FileResponse(HTTPResponse):
         offset: int,
         length: int,
         status: int = 200,
-        headers: Header | dict[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
         content_type: str | None = None,
     ):
         super().__init__(None, status, headers, content_type)
@@ -401,7 +401,7 @@ class JSONResponse(HTTPResponse):
         self,
         body: Any = None,
         status: int = 200,
-        headers: Header | dict[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
         content_type: str = "application/json",
         dumps: Callable[..., AnyStr] | None = None,
         **kwargs: Any,
@@ -638,16 +638,14 @@ class ResponseStream:
             Coroutine[Any, Any, None],
         ],
         status: int = 200,
-        headers: Header | dict[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
         content_type: str | None = None,
     ):
-        if headers is None:
-            headers = Header()
-        elif not isinstance(headers, Header):
-            headers = Header(headers)
         self.streaming_fn = streaming_fn
         self.status = status
-        self.headers = headers or Header()
+        # Its own headers: the caller's mapping (a Header included) is copied,
+        # never shared, so middleware and cookies do not change it.
+        self.headers = Header(headers) if headers else Header()
         self.content_type = content_type
         self.request: Request | None = None
         self._cookies: CookieJar | None = None

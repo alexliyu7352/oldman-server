@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from asyncio import BaseProtocol
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import suppress
 from contextvars import ContextVar
 from inspect import isawaitable
@@ -500,7 +501,7 @@ class Request(Generic[sanic_type, ctx_type]):
         response: BaseHTTPResponse | None = None,
         *,
         status: int = 200,
-        headers: Header | dict[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
         content_type: str | None = None,
     ):
         """Respond to the request without returning.
@@ -542,7 +543,7 @@ class Request(Generic[sanic_type, ctx_type]):
         Args:
             response (ResponseType): Response instance to send.
             status (int): Status code to return in the response.
-            headers (dict[str, str] | None): Headers to return in the response, defaults to None.
+            headers (Mapping[str, str] | None): Headers to return in the response, copied; defaults to None.
             content_type (str | None): Content-Type header of the response, defaults to None.
 
         Returns:
