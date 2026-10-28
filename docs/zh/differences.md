@@ -67,6 +67,7 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - `shared_ctx` 只能在 `main_process_start` 里设置：worker 进程（以及单进程运行开始服务之后）给它赋值会抛 `RuntimeError`，提示改用 `app.ctx`。原版有上锁的代码，但判断“是不是 worker”时 worker 还没设好，锁从未生效，worker 里放入的对象只留在那个 worker、没有任何提示。
 - `main_process_stop` 按注册的倒序执行，与其他停止事件相同（先建立的资源最后释放）；原版按注册顺序（它准备的倒序列表从未被用到）。
 - worker manager 用 SIGTERM 停止服务进程（停止服务、重启、缩减），原版用 SIGINT：还在导入模块、尚未装好信号处理的 worker 因此安静结束，不再在导入的那一行抛 `KeyboardInterrupt`、打印回溯；装好之后两个信号的处理相同。`app.manager.manage()` 启动的进程仍收 SIGINT（`KeyboardInterrupt`）。
+- `RESPONSE_TIMEOUT` 只计到响应开始（流式响应的第一次发送）为止，之后不再计时；原版在两次发送之间计时，慢慢发送的流式响应（如 SSE）会被切断。请求方不接收响应时，一次写出等待超过 `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` 就断开连接，handler 像请求方断开时一样被取消；原版的 asyncio 服务器没有这个期限。两种服务器相同。
 
 ## 经原生主机时
 
@@ -83,7 +84,6 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - `app.create_server()` 创建后即开始服务：`asyncio_server_kwargs`（如 `start_serving=False`）只用于 asyncio 服务器。
 - 原生主机开始服务时把垃圾回收的第一个阈值调到 10000（`NATIVE_GC_THRESHOLD`，只在进程仍是 Python 的默认值时，见[配置](configuration.md#原生主机的设置)），对整个进程生效；原版不动垃圾回收。
 - 关机时被截断的请求不另记 `Request: ... stopped. Transport is closed.` 日志（asyncio 服务器会记）。
-- 流式响应开始后不再受 `RESPONSE_TIMEOUT` 约束；原版在两次发送之间计时。
 - 带 `Expect: 100-continue` 的请求：请求体还没到时，原生主机在请求交给 Python 之前就回 `100 Continue`（请求体已随请求头到齐时不回，RFC 9110 允许）。原版在第一次读请求体时回；非 stream 路由在 handler 之前就读请求体，所以同样是立即回，只有 `stream=True` 且 handler 不读请求体就回应时，原版把 100 与响应一起发出。
 - 请求头的 `REQUEST_TIMEOUT` 从请求的第一个字节起计，原版从最后一次收到数据起计：一个字节一个字节慢慢发请求头的客户端不能无限拖住连接。
 - 请求体超过 `REQUEST_MAX_SIZE` 时（`stream=True` 的 handler 照常读完），这个请求的响应之后连接关闭；原版在 stream handler 读完请求体时保持 keep-alive。

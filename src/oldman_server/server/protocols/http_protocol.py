@@ -32,6 +32,16 @@ from oldman_server.request import Request
 from oldman_server.server.protocols.base_protocol import ConnectionProtocol
 
 
+def _write_timeout(config) -> float | None:
+    """How long a write may wait for the client to take it (KEEP_ALIVE_TIMEOUT
+    + GRACEFUL_TCP_CLOSE_TIMEOUT), as the native host counts it: under 0.1 s
+    counts as 0.1 s, over a day as a day; None (infinity) is no limit."""
+    seconds = float(config.KEEP_ALIVE_TIMEOUT) + float(config.GRACEFUL_TCP_CLOSE_TIMEOUT)
+    if seconds == float("inf"):
+        return None
+    return min(86_400.0, max(0.1, seconds))
+
+
 class HttpProtocolMixin:
     __slots__ = ()
     __version__: HTTP
@@ -52,6 +62,7 @@ class HttpProtocolMixin:
         self.request_timeout = self.app.config.REQUEST_TIMEOUT
         self.response_timeout = self.app.config.RESPONSE_TIMEOUT
         self.keep_alive_timeout = self.app.config.KEEP_ALIVE_TIMEOUT
+        self.write_timeout = _write_timeout(self.app.config)
         self.request_max_size = self.app.config.REQUEST_MAX_SIZE
         self.request_class = self.app.request_class or Request
 
@@ -87,6 +98,8 @@ class HttpProtocol(HttpProtocolMixin, ConnectionProtocol, metaclass=TouchUpMeta)
         "request_timeout",
         "response_timeout",
         "keep_alive_timeout",
+        "write_timeout",
+        "_write_paused_at",
         "request_max_size",
         "request_class",
         "error_handler",
@@ -127,6 +140,7 @@ class HttpProtocol(HttpProtocolMixin, ConnectionProtocol, metaclass=TouchUpMeta)
             self.state["requests_count"] = 0
         self._exception = None
         self._callback_check_timeouts = None
+        self._write_paused_at = None
 
     async def connection_task(self):  # no cov
         """
@@ -208,17 +222,31 @@ class HttpProtocol(HttpProtocolMixin, ConnectionProtocol, metaclass=TouchUpMeta)
                 )
                 return
             elif (
-                stage in (Stage.HANDLER, Stage.RESPONSE, Stage.FAILED)
+                stage in (Stage.HANDLER, Stage.FAILED)
                 and duration > self.response_timeout
             ):
+                # Until the response starts: a streamed response is not
+                # timed between its sends (the client's reading is, below).
                 logger.debug("Response Timeout. Closing connection.")
                 self._http.exception = ServiceUnavailable("Response Timeout")
+            elif (
+                stage is Stage.RESPONSE
+                and self._write_paused_at is not None
+                and self.write_timeout is not None
+                and current_time() - self._write_paused_at > self.write_timeout
+            ):
+                # The client stopped taking the response: the connection is
+                # cut, which cancels the handler as the client leaving does.
+                logger.debug("Write Timeout. Closing connection.")
+                self.transport.abort()
+                return
             else:
                 interval = (
                     min(
                         self.keep_alive_timeout,
                         self.request_timeout,
                         self.response_timeout,
+                        self.write_timeout or float("inf"),
                     )
                     / 2
                 )
@@ -257,6 +285,14 @@ class HttpProtocol(HttpProtocolMixin, ConnectionProtocol, metaclass=TouchUpMeta)
         )
         self.transport.write(data)
         self._time = current_time()
+
+    def pause_writing(self):
+        super().pause_writing()
+        self._write_paused_at = current_time()
+
+    def resume_writing(self):
+        super().resume_writing()
+        self._write_paused_at = None
 
     def close_if_idle(self) -> bool:
         """
