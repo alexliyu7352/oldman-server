@@ -193,13 +193,25 @@ def _persistent_runtime(config):
 
 
 def _stop_persistent_runtime():
+    """At exit: stop the process's persistent runtime and wait for it.
+
+    A same-thread runtime's shard starts and stops only while polled (its
+    control thread waits for it), as Engine's cleanup does: with no event
+    loop polling it at exit, a runtime still serving (a server never closed)
+    or still starting kept its control thread waiting and join() never
+    returned, so the process never exited."""
     if _persistent is None:
         return  # a forked child's: not its runtime
-    runtime = _persistent[0]
+    runtime, _shards, _backend, same_thread = _persistent
+    poll = runtime.poll if same_thread else (lambda: None)
     while runtime.stats()["state"] == 0:
+        poll()
         time.sleep(.001)
     if runtime.stats()["state"] == 1:
         runtime.stop()
+    while runtime.stats()["state"] < 3:
+        poll()
+        time.sleep(.001)
     runtime.join()
     runtime.close_fd()
 

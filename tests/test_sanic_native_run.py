@@ -126,6 +126,26 @@ def test_run_single_process_serves_natively_with_listener_order():
                                            "before_server_stop", "after_server_stop"]
 
 
+
+@pytest.mark.parametrize("same_thread", (True, False), ids=("same-thread", "shard-threads"))
+def test_a_process_exits_with_a_native_server_left_open(same_thread):
+    """A server create_server() started and nobody closed: the process's
+    persistent runtime is stopped at exit. A same-thread runtime advances
+    only while polled, and its control thread waits for the shard, so an
+    exit that did not poll it never ended."""
+    port = free_port()
+    lines, result = run(f'''
+        app.config.NATIVE_SERVER = True
+        app.config.NATIVE_SAME_THREAD = {same_thread}
+        app.config.NATIVE_SHARDS = None if {same_thread} else 1
+        loop = asyncio.new_event_loop()
+        server = loop.run_until_complete(
+            app.create_server(host="127.0.0.1", port={port}, return_asyncio_server=True))
+        print("SERVING " + str(server.is_serving()))
+        loop.close()
+    ''')
+    assert lines["SERVING"] == "True", result.stdout + result.stderr
+
 def test_environment_switch_with_default_run():
     port = free_port()
     lines, _ = run(f'''
