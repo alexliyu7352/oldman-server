@@ -621,3 +621,12 @@ def test_refresh_pass_passthru_data_to_new_instance(app: OldmanServer):
 
     assert app._manager == 2
     assert app.config.TOUCHUP == 23
+
+
+def test_an_empty_context_object_is_kept():
+    class Context(dict):
+        pass
+
+    ctx = Context()
+    app = OldmanServer("EmptyContext", ctx=ctx)
+    assert app.ctx is ctx

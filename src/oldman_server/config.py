@@ -51,7 +51,6 @@ DEFAULT_CONFIG = {
     "HTTP_AUTO_OPTIONS": True,
     "KEEP_ALIVE_TIMEOUT": 120,
     "KEEP_ALIVE": True,
-    "LOCALHOST": "localhost",
     "LOG_EXTRA": _default,
     # The native host (docs/en/configuration.md): NATIVE_SERVER None serves through it
     # on Linux when the extension is installed (oldman_server.native).
@@ -97,9 +96,27 @@ DEFAULT_CONFIG = {
 
 
 class DescriptorMeta(ABCMeta):
-    """Metaclass for Config."""
+    """Metaclass for Config: the settings with a property setter, and the
+    default settings a subclass gives as upper-case class attributes."""
 
     def __init__(cls, *_):
+        # An upper-case class attribute that is not a property or method is a
+        # default setting, as update_config(a class) reads one. It moves into
+        # __class_defaults__ (the bases' first, the subclass's over them) and
+        # off the class: left there it would shadow the dict for attribute
+        # reads, so the name had one value for config.X and another for
+        # config.get("X"), which is how the native host reads its settings.
+        own = {
+            name: value
+            for name, value in vars(cls).items()
+            if name.isupper() and not hasattr(value, "__get__")
+        }
+        for name in own:
+            delattr(cls, name)
+        inherited: dict[str, Any] = {}
+        for base in reversed(cls.__mro__[1:]):
+            inherited.update(vars(base).get("__class_defaults__", {}))
+        cls.__class_defaults__ = {**inherited, **own}
         cls.__setters__ = {name for name, _ in getmembers(cls, cls._is_setter)}
 
     @staticmethod
@@ -176,7 +193,6 @@ class Config(dict, metaclass=DescriptorMeta):
     HTTP_AUTO_OPTIONS: bool
     KEEP_ALIVE_TIMEOUT: int
     KEEP_ALIVE: bool
-    LOCALHOST: str
     LOG_EXTRA: Default | bool
     NATIVE_GC_THRESHOLD: int | None
     NATIVE_MAX_MEMORY: int | None
@@ -219,8 +235,12 @@ class Config(dict, metaclass=DescriptorMeta):
         converters: Sequence[Callable[[str], Any]] | None = None,
     ):
         defaults = defaults or {}
-        self.defaults = {**DEFAULT_CONFIG, **defaults}
-        super().__init__(self.defaults)
+        class_defaults = type(self).__class_defaults__
+        self.defaults = {**DEFAULT_CONFIG, **class_defaults, **defaults}
+        super().__init__(DEFAULT_CONFIG)
+        # Through update(), so a setting with a property (FALLBACK_ERROR_FORMAT)
+        # takes its value through the setter; the environment overrides both.
+        self.update(class_defaults, defaults)
         self._configure_warnings()
 
         self._converters = [str, str_to_bool, float, int]

@@ -60,7 +60,7 @@ from oldman_server.exceptions import (
     WebsocketClosed,
 )
 from oldman_server.handlers import ErrorHandler
-from oldman_server.headers import trusted_networks, trusted_sources
+from oldman_server.headers import check_proxies_count, trusted_networks, trusted_sources
 from oldman_server.helpers import Default, _default, accepts
 from oldman_server.http import Stage
 from oldman_server.log import LOGGING_CONFIG_DEFAULTS, error_logger, logger
@@ -327,7 +327,7 @@ class OldmanServer(
         self.auto_reload = False
         self.blueprints: dict[str, Blueprint] = {}
         self.configure_logging: bool = configure_logging
-        self.ctx: ctx_type = cast(ctx_type, ctx or SimpleNamespace())
+        self.ctx: ctx_type = cast(ctx_type, SimpleNamespace() if ctx is None else ctx)
         self.error_handler: ErrorHandler = error_handler or ErrorHandler()
         self.fixed_responses: dict[str, tuple[int, bytes, tuple[tuple[str, str], ...]]] = {}
         # CORS (oldman_server.cors): the fixed responses' cors= options, and
@@ -2372,6 +2372,7 @@ class OldmanServer(
         trusted = self.config.TRUSTED_PROXIES
         if trusted is not None:  # a malformed entry fails here, not per request
             trusted_networks(trusted_sources(trusted))
+        check_proxies_count(self.config)
         worker_health_timeout(self.config)  # malformed: fails here as well
 
         if self.state.is_debug and self.config.TOUCHUP is not True:

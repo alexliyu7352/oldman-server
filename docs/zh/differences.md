@@ -37,7 +37,7 @@
 - REPL（`--repl`、`app.repl_ctx`）。
 - 后台运行（`--daemon` 及 `kill` / `status` / `restart` / `stop` 命令）：进程管理交给 systemd 或 oldman 自己的服务命令。
 - inspector（`INSPECTOR*` 设置、`app.inspector`、`inspect` 命令）。
-- TLS（`run()` / `prepare()` / `create_server()` 的 `ssl`、`auto_tls`，`--cert` / `--key` / `--tls` / `--auto-tls`，`LOCAL_CERT_CREATOR` 等设置，`certloader_class`，`conn_info.ssl` / `cert` / `server_name`）与 HTTP/3（`version` 参数、`--http` / `-1` / `-3`、`request.stream_id`、`Alt-Svc`）：TLS 由前端代理终止，`request.scheme` 照旧取 `Forwarded` / `X-Forwarded-Proto`。
+- TLS（`run()` / `prepare()` / `create_server()` 的 `ssl`、`auto_tls`，`--cert` / `--key` / `--tls` / `--auto-tls`，`LOCALHOST`、`LOCAL_CERT_CREATOR` 等设置，`certloader_class`，`conn_info.ssl` / `cert` / `server_name`）与 HTTP/3（`version` 参数、`--http` / `-1` / `-3`、`request.stream_id`、`Alt-Svc`）：TLS 由前端代理终止，`request.scheme` 照旧取 `Forwarded` / `X-Forwarded-Proto`。
 - ASGI：应用不再是 ASGI 可调用对象，`app.asgi`、`app.asgi_client`、`request.scope` 一并移除，只由本包自己的服务器运行。
 
 ## 行为修正
@@ -71,6 +71,8 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - worker manager 用 SIGTERM 停止服务进程（停止服务、重启、缩减），原版用 SIGINT：还在导入模块、尚未装好信号处理的 worker 因此安静结束，不再在导入的那一行抛 `KeyboardInterrupt`、打印回溯；装好之后两个信号的处理相同。`app.manager.manage()` 启动的进程仍收 SIGINT（`KeyboardInterrupt`）。
 - `RESPONSE_TIMEOUT` 只计到响应开始（流式响应的第一次发送）为止，之后不再计时；原版在两次发送之间计时，慢慢发送的流式响应（如 SSE）会被切断。请求方不接收响应时，一次写出等待超过 `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` 就断开连接，handler 像请求方断开时一样被取消；原版的 asyncio 服务器没有这个期限。两种服务器相同。
 - 静态文件（`app.static`）回答 HEAD 时送出与 GET 相同的响应头（`Content-Length`、`Cache-Control` 等），只是不带正文；原版另走一条分支，`Content-Length` 为 0（设了 `use_content_range` 时除外）、没有 `Cache-Control`。
+
+- 配置：`Config` 子类上大写的类属性是默认设置（与 `update_config(类)` 读类的规则相同），`get()`、迭代与原生主机都读得到，环境变量与之后的赋值覆盖它；原版里它只对属性读有效，赋值改不动、`get()` 读不到（原生主机的设置因此被忽略）。`Config(defaults=...)` 里带 setter 的设置（`FALLBACK_ERROR_FORMAT`）照常生效。传给 `OldmanServer(ctx=...)` 的上下文对象即使为空（如空的 dict 子类）也照用，不再被换成 `SimpleNamespace`。`PROXIES_COUNT` 在服务器启动时检查（None 或非负整数，否则 `ValueError`），不再在请求时用 assert 检查。
 
 ## 经原生主机时
 

@@ -43,6 +43,7 @@ from oldman_server.base.meta import AppMeta
 from oldman_server.compat import OS_IS_WINDOWS, StartMethod
 from oldman_server.constants import DEFAULT_BACKLOG
 from oldman_server.exceptions import ServerError, ServerKilled
+from oldman_server.headers import check_proxies_count
 from oldman_server.helpers import Default, _default, is_atty
 from oldman_server.log import Colors, deprecation, error_logger, logger
 from oldman_server.logging.setup import setup_logging
@@ -649,10 +650,7 @@ class StartupMixin(metaclass=AppMeta):
         run_async: bool = False,
     ) -> dict[str, Any]:
         """Helper function used by `run` and `create_server`."""
-        if self.config.PROXIES_COUNT and self.config.PROXIES_COUNT < 0:
-            raise ValueError(
-                "PROXIES_COUNT cannot be negative."
-            )
+        check_proxies_count(self.config)
 
         setup_logging(
             self.state.is_debug, self.config.NO_COLOR, self.config.LOG_EXTRA

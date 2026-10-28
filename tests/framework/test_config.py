@@ -490,13 +490,75 @@ def test_config_set_methods(app: OldmanServer, monkeypatch: MonkeyPatch):
     post_set.assert_called_once_with("FOO", 10)
 
 
-def test_negative_proxy_count(app: OldmanServer):
-    app.config.PROXIES_COUNT = -1
+@pytest.mark.parametrize("count", [-1, 1.5, "2", True])
+def test_invalid_proxy_count(app: OldmanServer, count):
+    app.config.PROXIES_COUNT = count
 
-    message = (
-        "PROXIES_COUNT cannot be negative."
-    )
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="PROXIES_COUNT is None or a non-negative integer"):
         app.prepare()
+
+
+@pytest.mark.parametrize("count", [None, 0, 2])
+def test_valid_proxy_count(app: OldmanServer, count):
+    from oldman_server.headers import check_proxies_count
+
+    app.config.PROXIES_COUNT = count
+    check_proxies_count(app.config)
+
+
+class SettingsConfig(Config):
+    FOO = "class value"
+    NATIVE_SHARDS = 1
+    FALLBACK_ERROR_FORMAT = "text"
+    lowercase = "not a setting"
+
+    def method(self):
+        return "a method stays"
+
+
+class MoreSettings(SettingsConfig):
+    FOO = "grandchild value"
+    BAR = 2
+
+
+def test_class_attributes_of_a_subclass_are_settings():
+    config = SettingsConfig()
+    assert config.FOO == config["FOO"] == config.get("FOO") == "class value"
+    assert "FOO" in config and dict(config)["FOO"] == "class value"
+    assert config.get("NATIVE_SHARDS") == 1  # how the native host reads it
+    assert config.lowercase == "not a setting" and "lowercase" not in config
+    assert config.method() == "a method stays"
+
+
+def test_a_class_attribute_setting_can_be_changed():
+    config = SettingsConfig()
+    config.FOO = "assigned"
+    assert config.FOO == config.get("FOO") == "assigned"
+    assert config.FALLBACK_ERROR_FORMAT == "text"
+    config.FALLBACK_ERROR_FORMAT = "json"
+    assert config.FALLBACK_ERROR_FORMAT == "json"
+
+
+def test_subclass_settings_override_their_bases():
+    config = MoreSettings()
+    assert config.FOO == "grandchild value"
+    assert config.BAR == 2
+    assert config.get("NATIVE_SHARDS") == 1
+
+
+def test_settings_given_as_defaults_go_through_their_setter():
+    config = Config(defaults={"FALLBACK_ERROR_FORMAT": "text"})
+    assert config.FALLBACK_ERROR_FORMAT == "text"
+
+
+def test_the_environment_overrides_a_class_attribute_setting(monkeypatch):
+    monkeypatch.setenv("OLDMAN_SERVER_FOO", "from the environment")
+    assert SettingsConfig().FOO == "from the environment"
+
+
+def test_an_app_takes_class_attribute_settings():
+    app = OldmanServer("ClassSettings", config=SettingsConfig())
+    assert app.config.get("NATIVE_SHARDS") == 1
+    assert app.config.FALLBACK_ERROR_FORMAT == "text"
 
 

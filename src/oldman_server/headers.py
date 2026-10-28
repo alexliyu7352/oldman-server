@@ -449,13 +449,23 @@ def trusted_networks(trusted: str | tuple[str, ...]):
     return unix, tuple(networks)
 
 
+def check_proxies_count(config) -> None:
+    """PROXIES_COUNT is None, or the number of trusted proxies: an int, 0 or
+    more (0 like None reads no X-Forwarded-For). Checked when a server starts
+    (run(), create_server(), every server process), not per request."""
+    count = config.PROXIES_COUNT
+    if count is not None and (type(count) is not int or count < 0):
+        raise ValueError(
+            f"PROXIES_COUNT is None or a non-negative integer, not {count!r}"
+        )
+
+
 def parse_xforwarded(headers, config) -> Options | None:
     """Parse traditional proxy headers."""
     real_ip_header = config.REAL_IP_HEADER
-    proxies_count = config.PROXIES_COUNT
+    proxies_count = config.PROXIES_COUNT  # valid: check_proxies_count
     addr = real_ip_header and headers.getone(real_ip_header, None)
     if not addr and proxies_count:
-        assert proxies_count > 0
         try:
             # Combine, split and filter multiple headers' entries
             forwarded_for = headers.getall(config.FORWARDED_FOR_HEADER)
