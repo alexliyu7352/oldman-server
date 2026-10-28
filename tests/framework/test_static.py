@@ -553,20 +553,46 @@ def test_nested_dir(app, static_file_directory):
     assert response.text == "foo\n"
 
 
-def test_handle_is_a_directory_error(app, static_file_directory):
+def test_a_directory_is_answered_by_the_directory_handler(app, static_file_directory):
+    # A directory without an index is a 404, for GET and HEAD alike; a
+    # DirectoryHandler subclass answers directories its own way.
+    from oldman_server.handlers.directory import DirectoryHandler
+
     error_text = "Is a directory. Access denied"
-    app.static("/static", static_file_directory)
 
-    @app.exception(Exception)
-    async def handleStaticDirError(request, exception):
-        if isinstance(exception, IsADirectoryError):
+    class DenyDirectories(DirectoryHandler):
+        async def handle(self, request, path):
             return text(error_text, status=403)
-        raise exception
 
-    request, response = app.test_client.get("/static/")
+    app.static("/static", static_file_directory)
+    app.static(
+        "/denied",
+        static_file_directory,
+        name="denied",
+        directory_handler=DenyDirectories("/denied", Path(static_file_directory)),
+    )
 
+    for method in ("get", "head"):
+        _, response = getattr(app.test_client, method)("/static/")
+        assert response.status == 404
+    _, response = app.test_client.get("/denied/")
     assert response.status == 403
     assert response.text == error_text
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_an_unreadable_file_is_forbidden(app, tmp_path, caplog):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret")
+    secret.chmod(0)
+    app.static("/files", tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        _, response = app.test_client.get("/files/secret.txt")
+
+    assert response.status == 403
+    assert any("not readable" in message for message in caplog.messages)
+    assert not any(record.exc_info for record in caplog.records)
 
 
 def test_stack_trace_on_not_found(app, static_file_directory, caplog):
@@ -745,3 +771,16 @@ def test_double_backslash_prohibited_on_win32(
     assert response.status == 404
     _, response = app.test_client.get("/foo/static\\../static/test.file")
     assert response.status == 404
+
+
+def test_head_on_a_directory_sends_the_index_headers(app, tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.html").write_text("<p>index</p>")
+    app.static("/site", tmp_path, index="index.html")
+
+    _, get = app.test_client.get("/site/docs/")
+    _, head = app.test_client.head("/site/docs/")
+    assert get.status == head.status == 200
+    assert head.body == b""
+    assert head.headers["content-length"] == get.headers["content-length"] == "12"
+    assert head.headers["content-type"] == get.headers["content-type"]

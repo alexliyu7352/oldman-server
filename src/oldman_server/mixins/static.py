@@ -5,6 +5,7 @@ from email.utils import formatdate
 from functools import partial, wraps
 from os import PathLike, path
 from pathlib import Path, PurePath
+from stat import S_ISDIR
 from typing import Any
 from urllib.parse import unquote
 
@@ -12,10 +13,9 @@ from oldman_server.routing.route import Route
 
 from oldman_server.base.meta import AppMeta
 from oldman_server.compat import clear_function_annotate, stat_async
-from oldman_server.exceptions import FileNotFound, HeaderNotFound, RangeNotSatisfiable
+from oldman_server.exceptions import FileNotFound, Forbidden, HeaderNotFound, RangeNotSatisfiable
 from oldman_server.handlers import ContentRangeHandler
 from oldman_server.handlers.directory import DirectoryHandler
-from oldman_server.helpers import _default
 from oldman_server.log import error_logger
 from oldman_server.mixins.base import BaseMixin
 from oldman_server.models.futures import FutureStatic
@@ -287,13 +287,23 @@ class StaticHandleMixin(metaclass=AppMeta):
             follow_external_symlink_dirs,
         )
 
+        # What the path is decides the answer, for GET and HEAD alike: nothing
+        # there is a 404, a directory goes to the directory handler (its index
+        # file, or a 404), and a file is served.
+        try:
+            stats = await stat_async(file_path)
+        except (FileNotFoundError, NotADirectoryError):
+            raise not_found
+        except PermissionError:
+            raise self._unreadable(file_path)
+        if S_ISDIR(stats.st_mode):
+            return await directory_handler.handle(request, request.path)
+
         try:
             headers = {}
             # Check if the client has been sent this file before
             # and it has not been modified since
-            stats = None
             if use_modified_since:
-                stats = await stat_async(file_path)
                 modified_since = stats.st_mtime
                 response = await validate_file(request.headers, modified_since)
                 if response:
@@ -304,8 +314,6 @@ class StaticHandleMixin(metaclass=AppMeta):
             _range = None
             if use_content_range:
                 _range = None
-                if not stats:
-                    stats = await stat_async(file_path)
                 headers["Accept-Ranges"] = "bytes"
                 headers["Content-Length"] = str(stats.st_size)
                 if request.method != "HEAD":
@@ -336,8 +344,6 @@ class StaticHandleMixin(metaclass=AppMeta):
                 else:
                     threshold = stream_large_files
 
-                if not stats:
-                    stats = await stat_async(file_path)
                 if stats.st_size >= threshold:
                     return await file_stream(
                         file_path, headers=headers, _range=_range
@@ -347,15 +353,15 @@ class StaticHandleMixin(metaclass=AppMeta):
                 file_path,
                 headers=headers,
                 _range=_range,
-                last_modified=stats.st_mtime if stats else _default,
+                last_modified=stats.st_mtime,
                 _stat=stats,
             )
-        except (IsADirectoryError, PermissionError):
-            return await directory_handler.handle(request, request.path)
         except RangeNotSatisfiable:
             raise
         except FileNotFoundError:
             raise not_found
+        except PermissionError:
+            raise self._unreadable(file_path)
         except Exception:
             error_logger.exception(
                 "Exception in static request handler: "
@@ -363,6 +369,14 @@ class StaticHandleMixin(metaclass=AppMeta):
                 f"relative_url={__file_uri__}"
             )
             raise
+
+    @staticmethod
+    def _unreadable(file_path) -> Forbidden:
+        """A file the server may not read: a configuration problem on the
+        server, answered 403 and logged once (no traceback), not taken for a
+        directory or a missing file."""
+        error_logger.warning(f"Static file not readable (permission denied): {file_path}")
+        return Forbidden("Access denied")
 
     async def _get_file_path(
         self,

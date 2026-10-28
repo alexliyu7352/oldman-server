@@ -41,8 +41,8 @@ class DirectoryHandler:
             path (str): The path to the file to serve.
 
         Raises:
-            NotFound: If no index file is found.
-            IsADirectoryError: If the path is a directory and there is no index.
+            NotFound: If the directory has none of the index files, or no
+                index is set.
 
         Returns:
             Response: The response object.
@@ -53,7 +53,5 @@ class DirectoryHandler:
             if index_file.is_file():
                 return await file(index_file)
 
-        if self.index:
-            raise NotFound("File not found")
-
-        raise IsADirectoryError(f"{self.directory.as_posix()} is a directory")
+        # A directory is not a resource the static route serves.
+        raise NotFound("File not found")
