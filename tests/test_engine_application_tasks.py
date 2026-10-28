@@ -115,7 +115,10 @@ def test_terminal_event_while_running_cancels_through_finally():
     run(scenario)
 
 
-def test_unstarted_task_cancelled_by_others_is_answered_at_close():
+def test_unstarted_task_cancelled_by_others_is_cut_off_at_close():
+    # Its coroutine never ran, so its finally never does the bookkeeping:
+    # close reaps it. Like every request still in a handler when the server
+    # stops, it is cut off without an answer.
     async def scenario(engine, runtime, started):
         engine._application_event((1 << 16, 0, request()))
         task, _ = engine._application_tasks[1 << 16]
@@ -126,8 +129,26 @@ def test_unstarted_task_cancelled_by_others_is_answered_at_close():
         engine._cancel_applications()
         engine._reap_applications()
         engine._flush_application()
-        assert runtime.responses == [(1 << 16, 503)] and not engine._application_tasks
-        assert engine._decision_stats["python_application_errors"] == 1
+        assert runtime.responses == [] and not engine._application_tasks
+        assert engine._application_terminal == set()
+        assert engine._decision_stats["python_application_finished"] == 1
+        assert engine._decision_stats["python_application_errors"] == 0
+    run(scenario)
+
+
+def test_requests_in_handlers_at_close_get_no_answer():
+    # The stop cuts off what is still running: the cancelled handler's
+    # CancelledError gives no 503 (it raced the shards' closing of unanswered
+    # requests: sometimes a 503, sometimes a bare close).
+    async def scenario(engine, runtime, started):
+        engine._application_event((1 << 16, 0, request()))
+        await asyncio.sleep(0)
+        assert len(started) == 1
+        await engine._finish_cancelled(engine._cancel_applications())
+        engine._reap_applications()
+        engine._flush_application()
+        assert runtime.responses == [] and not engine._application_tasks
+        assert engine._application_terminal == set()
     run(scenario)
 
 

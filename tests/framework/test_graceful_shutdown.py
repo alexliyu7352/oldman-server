@@ -1,6 +1,10 @@
 import asyncio
 import logging
+import socket
+import threading
 import time
+
+import pytest
 
 from pytest import LogCaptureFixture
 
@@ -75,3 +79,37 @@ def test_completes_request(app, caplog: LogCaptureFixture, port):
             break
     index_request = caplog.record_tuples.index(("oldman_server.access", 20, ""))
     assert index_request > index_stopping > 0
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_a_request_cut_off_after_the_grace_period_gets_no_answer(app, port, attempt):
+    """A handler still running when GRACEFUL_SHUTDOWN_TIMEOUT ends is
+    cancelled and its connection closed without any answer, on both servers
+    (the native host used to race a 503 against the close)."""
+    app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 0.2
+    received = []
+
+    @app.get("/")
+    async def handler(request):
+        request.app.ctx.handling.set()
+        await asyncio.sleep(100)
+
+    def client():
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            data = b""
+            while chunk := sock.recv(4096):
+                data += chunk
+            received.append(data)
+
+    @app.listener("after_server_start")
+    async def _request(app, loop):
+        app.ctx.handling = asyncio.Event()
+        app.ctx.client = threading.Thread(target=client)
+        app.ctx.client.start()
+        await app.ctx.handling.wait()
+        app.stop()
+
+    app.run(single_process=True, port=port)
+    app.ctx.client.join(timeout=10)
+    assert received == [b""]

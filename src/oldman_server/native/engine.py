@@ -1088,6 +1088,14 @@ class Engine:
                 {"python_application_active": len(self._application_tasks)})
 
     def _cancel_applications(self):
+        """Cancel every running request handler as the server stops. Their
+        requests are terminal first: the stop cuts them off without an answer,
+        as the asyncio server does, whatever the cancelled handler returns
+        (an answer still crossing to a shard as it stops would otherwise race
+        the shard's closing of unanswered requests: sometimes a 503, sometimes
+        a bare close). A proxy can then send an idempotent request to another
+        worker."""
+        self._application_terminal.update(self._application_tasks)
         tasks = tuple(task for task, _ in self._application_tasks.values())
         for task in tasks:
             task.cancel()
