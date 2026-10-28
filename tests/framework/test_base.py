@@ -60,6 +60,7 @@ def test_bp_repr_with_values(bp):
         "some_thing123",
         "some-Thing123",
         "some_Thing123",
+        "_private",
     ),
 )
 def test_names_okay(name):
@@ -81,13 +82,13 @@ def test_names_okay(name):
 def test_names_not_okay(name):
     app_message = (
         f"OldmanServer instance named '{name}' uses an invalid format. Names must "
-        "begin with a character and may only contain alphanumeric "
-        "characters, _, or -."
+        "start with an ASCII letter or _ and contain only ASCII letters, "
+        "digits, _ and -."
     )
     bp_message = (
         f"Blueprint instance named '{name}' uses an invalid format. Names "
-        "must begin with a character and may only contain alphanumeric "
-        "characters, _, or -."
+        "must start with an ASCII letter or _ and contain only ASCII "
+        "letters, digits, _ and -."
     )
 
     with pytest.raises(OldmanServerException, match=app_message):

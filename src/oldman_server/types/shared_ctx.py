@@ -45,11 +45,10 @@ class SharedContext(SimpleNamespace):
             error_logger.warning(
                 f"{Colors.YELLOW}Unsafe object {Colors.PURPLE}{name} "
                 f"{Colors.YELLOW}with type {Colors.PURPLE}{type(value)} "
-                f"{Colors.YELLOW}was added to shared_ctx. It may not "
-                "not function as intended. Consider using the regular "
-                f"ctx.\nFor more information, see Sanic's documentation: https://sanic.dev/en"
-                "/guide/deployment/manager.html#using-shared-context-between-"
-                f"worker-processes.{Colors.END}"
+                f"{Colors.YELLOW}was added to shared_ctx. It is not shared "
+                "between worker processes: only multiprocessing and ctypes "
+                "objects added in a main_process_start listener are. "
+                f"Consider using the regular ctx.{Colors.END}"
             )
 
     @property

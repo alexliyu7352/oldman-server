@@ -56,8 +56,6 @@ class MiddlewareMixin(metaclass=AppMeta):
         recommended to use *@app.on_request* or *@app.on_response* instead
         for clarity and convenience.
 
-        See [Middleware](/guide/basics/middleware) for more information.
-
         Args:
             middleware_or_request (Union[Callable, str]): Middleware function
                 or the keyword 'request' or 'response'.
@@ -67,7 +65,10 @@ class MiddlewareMixin(metaclass=AppMeta):
             apply (bool, optional): Whether the middleware should be applied.
                 Defaults to `True`.
             priority (int, optional): The priority level of the middleware.
-                Lower numbers are executed first. Defaults to `0`.
+                Higher priority runs earlier among request middleware and
+                later among response middleware (the outer layer). Equal
+                priorities keep registration order for request middleware
+                and the reverse for response middleware. Defaults to `0`.
 
         Returns:
             Union[Callable, Callable[[Callable], Callable]]: The decorated

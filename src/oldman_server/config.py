@@ -132,15 +132,21 @@ class DetailedConverter(ABC):
     sophisticated conversion logic that can take into account the variable
     name pattern, perform validation, or use default values for fallback.
 
+    Converters are tried in turn: raising ValueError means "not this
+    converter", and the next one is tried (str, tried last, always accepts).
+    To reject a value, so that creating the Config fails, raise another
+    exception (TypeError, say).
+
     Examples:
         ```python
         # Example of a converter that casts values to the type of the default
         class DefaultsCastConverter(DetailedConverter):
             def __call__(self, full_key: str, config_key: str, value: str,
                                                         defaults: dict) -> Any:
+                if config_key not in defaults:
+                    raise ValueError  # not this converter: try the next
                 try:
-                    if config_key in defaults:
-                        return type(defaults[config_key])(value)
+                    return type(defaults[config_key])(value)
                 except (ValueError, TypeError):
                     raise ValueError
         ```
@@ -391,8 +397,6 @@ class Config(dict, metaclass=DescriptorMeta):
 
         You likely won't need to call this method directly.
 
-        See [Configuration](/en/guide/deployment/configuration) for more details.
-
         Args:
             prefix (str): The prefix to use when looking for environment
                 variables. Defaults to `OLDMAN_SERVER_`.
@@ -433,8 +437,6 @@ class Config(dict, metaclass=DescriptorMeta):
         .. note::
 
             Only upper case settings are considered
-
-        See [Configuration](/en/guide/deployment/configuration) for more details.
 
         Args:
             config (Union[bytes, str, dict, Any]): Path to py file holding
@@ -504,7 +506,9 @@ class Config(dict, metaclass=DescriptorMeta):
 
         Allows for adding custom function to cast from a string value to any
         other type. The function should raise ValueError if it is not the
-        correct type.
+        correct type: the next converter is then tried (str, tried last,
+        always accepts). Raising another exception rejects the value, and
+        creating the Config fails.
 
         Args:
             converter (Callable[[str], Any]): A function that takes a string

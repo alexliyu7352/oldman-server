@@ -118,13 +118,13 @@ class CookieRequestParameters(RequestParameters):
         # cookies will be {'name1': ['value1'], 'name2': ['value2'], 'name3': ['value3']}
 
         request_cookies = CookieRequestParameters(cookies)
-        request_cookies['name1']  # 'value1'
+        request_cookies['name1']  # ['value1']
         request_cookies.get('name1')  # 'value1'
         request_cookies.getlist('name1')  # ['value1']
         ```
     """  # noqa: E501
 
-    def __getitem__(self, key: str) -> str | None:
+    def __getitem__(self, key: str) -> list[str]:
         try:
             value = self._get_prefixed_cookie(key)
         except KeyError:

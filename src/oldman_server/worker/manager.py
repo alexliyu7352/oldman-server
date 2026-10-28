@@ -58,8 +58,6 @@ class WorkerManager:
     async def ready(app: OldmanServer, _):
         app.manager.manage("MyProcess", my_process, {"foo": "bar"})
     ```
-
-    See [Worker Manager](/en/guide/deployment/manager) for more information.
     """
 
     THRESHOLD = WorkerProcess.THRESHOLD
@@ -356,8 +354,8 @@ class WorkerManager:
             "It seems that one or more of your workers failed to come "
             "online in the allowed time. oldman-server is shutting down to avoid a "
             f"deadlock. The current threshold is {self.THRESHOLD / 10}s. "
-            "If this problem persists, see Sanic's documentation: "
-            "https://sanic.dev/en/guide/deployment/manager.html#worker-ack."
+            "If startup legitimately takes longer, raise "
+            "WorkerManager.THRESHOLD (in units of 0.1 s)."
         )
         while not self._all_workers_ack():
             if self._shutdown_if_requested():
@@ -373,7 +371,7 @@ class WorkerManager:
                     "was completed. Please solve any errors experienced "
                     "during startup. If you do not see an exception traceback "
                     "in your error logs, try running the server in a single "
-                    "process using --single-process or single_process=True. "
+                    "process with app.run(single_process=True). "
                     "Once you are confident that the server is able to start "
                     "without errors you can switch back to multiprocess mode."
                 )

@@ -1,8 +1,7 @@
 """
-Sanic `provides a pattern
-<https://sanicframework.org/guide/best-practices/exceptions.html#using-sanic-exceptions>`_
-for providing a response when an exception occurs. However, if you do no handle
-an exception, it will provide a fallback. There are three fallback types:
+An exception handler registered with ``app.exception()`` answers for its
+exceptions; otherwise one of the fallback pages below is rendered. There are
+three fallback types:
 
 - HTML - *default*
 - Text

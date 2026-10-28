@@ -40,8 +40,8 @@ class BaseApp(
         if not VALID_NAME.match(name):
             raise OldmanServerException(
                 f"{class_name} instance named '{name}' uses an invalid "
-                "format. Names must begin with a character and may only "
-                "contain alphanumeric characters, _, or -."
+                "format. Names must start with an ASCII letter or _ and "
+                "contain only ASCII letters, digits, _ and -."
             )
 
         self.name = name

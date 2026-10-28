@@ -66,9 +66,9 @@ class BaseHTTPResponse:
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        # Sanic's responses keep headers in a slot, and subclasses written for
-        # it may list "headers" in their own __slots__ (sanic-ext's
-        # LazyResponse does): that slot would hide the property below.
+        # Sanic's responses keep headers in a slot, and response subclasses
+        # written for stock Sanic may list "headers" in their own __slots__:
+        # that slot would hide the property below.
         if isinstance(cls.__dict__.get("headers"), MemberDescriptorType):
             cls.headers = BaseHTTPResponse.headers
 
@@ -113,8 +113,6 @@ class BaseHTTPResponse:
     @property
     def cookies(self) -> CookieJar:
         """The response cookies.
-
-        See [Cookies](/en/guide/basics/cookies.html)
 
         Returns:
             CookieJar: The response cookies
@@ -194,8 +192,6 @@ class BaseHTTPResponse:
     ) -> Cookie:
         """Add a cookie to the CookieJar
 
-        See [Cookies](/en/guide/basics/cookies.html)
-
         Args:
             key (str): The key to be added
             value (str): The value to be added
@@ -246,8 +242,6 @@ class BaseHTTPResponse:
 
         Since it is a browser/client implementation, your results may vary
         depending upon which client is being used.
-
-        See [Cookies](/en/guide/basics/cookies.html)
 
         Args:
             key (str): The key to be deleted

@@ -160,8 +160,6 @@ class StartupMixin(metaclass=AppMeta):
         worker process using the Sanic server. It allows you to interact with
         the worker processes, such as sending messages and commands.
 
-        See [Access to the multiplexer](/en/guide/deployment/manager#access-to-the-multiplexer) for more information.
-
         Returns:
             WorkerMultiplexer: The worker multiplexer instance
 
@@ -205,8 +203,6 @@ class StartupMixin(metaclass=AppMeta):
 
         1. Use `if __name__ == "__main__"` to guard the code.
         2. Do **NOT** define the app instance inside the `if` block.
-
-        See [Dynamic Applications](/en/guide/deployment/app-loader) for more information about the second point.
 
         Args:
             host (Optional[str]): Address to host on.
@@ -833,8 +829,11 @@ class StartupMixin(metaclass=AppMeta):
             if actual != method:
                 raise RuntimeError(
                     f"Start method '{method}' was requested, but '{actual}' "
-                    "was already set.\nFor more information, see Sanic's documentation: "
-                    "https://sanic.dev/en/guide/running/manager.html#overcoming-a-coderuntimeerrorcode"
+                    "was already set.\nSet OldmanServer.start_method = "
+                    f"'{actual}' (or OldmanServer.START_METHOD_SET = True) "
+                    "before anything else sets it, or create multiprocessing "
+                    "objects in a main_process_start listener rather than at "
+                    "import time."
                 ) from None
             # Already the method wanted (set by the application or a library).
         cls.START_METHOD_SET = True
@@ -847,8 +846,11 @@ class StartupMixin(metaclass=AppMeta):
         if method != actual:
             raise RuntimeError(
                 f"Start method '{method}' was requested, but '{actual}' "
-                "was already set.\nFor more information, see Sanic's documentation: "
-                "https://sanic.dev/en/guide/running/manager.html#overcoming-a-coderuntimeerrorcode"
+                "was already set.\nSet OldmanServer.start_method = "
+                f"'{actual}' (or OldmanServer.START_METHOD_SET = True) "
+                "before anything else sets it, or create multiprocessing "
+                "objects in a main_process_start listener rather than at "
+                "import time."
             ) from None
         return get_context()
 
@@ -938,9 +940,7 @@ class StartupMixin(metaclass=AppMeta):
                 "The server could not start: worker process failed.\n\n"
                 "This may have happened if you are running the server in the "
                 "global scope and not inside of a "
-                '`if __name__ == "__main__"` block.\n\nSee Sanic\'s documentation: '
-                "https://sanic.dev/en/guide/deployment/manager.html#"
-                "how-sanic-server-starts-processes\n"
+                '`if __name__ == "__main__"` block.\n'
             )
             if not OS_IS_WINDOWS:
                 message += (

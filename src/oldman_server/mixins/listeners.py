@@ -67,8 +67,6 @@ class ListenerMixin(metaclass=AppMeta):
     ):
         """Create a listener for a specific event in the application's lifecycle.
 
-        See [Listeners](/en/guide/basics/listeners) for more details.
-
         .. note::
             Overloaded signatures allow for different ways of calling this method, depending on the types of the arguments.
 
@@ -161,8 +159,6 @@ class ListenerMixin(metaclass=AppMeta):
         resources that are shared across workers, or to initialize resources
         that are not safe to be initialized in a worker process.
 
-        See [Listeners](/en/guide/basics/listeners) for more details.
-
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
 
@@ -186,8 +182,6 @@ class ListenerMixin(metaclass=AppMeta):
         `app.manager` instance). The typical use case for this event is to
         add a managed process to the Worker Manager.
 
-        See [Running custom processes](/en/guide/deployment/manager.html#running-custom-processes) and [Listeners](/en/guide/basics/listeners.html) for more details.
-
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
 
@@ -208,8 +202,6 @@ class ListenerMixin(metaclass=AppMeta):
         This event is fired only on the main process and **NOT** on any
         worker processes. You should typically use this event to clean up
         resources that were initialized in the main_process_start event.
-
-        See [Listeners](/en/guide/basics/listeners) for more details.
 
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
@@ -232,8 +224,6 @@ class ListenerMixin(metaclass=AppMeta):
         worker processes. This is similar to the main_process_start event,
         except that it is fired only when the reload process is started.
 
-        See [Listeners](/en/guide/basics/listeners) for more details.
-
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
 
@@ -254,8 +244,6 @@ class ListenerMixin(metaclass=AppMeta):
         This event is fired only on the reload process and **NOT** on any
         worker processes. This is similar to the main_process_stop event,
         except that it is fired only when the reload process is stopped.
-
-        See [Listeners](/en/guide/basics/listeners) for more details.
 
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
@@ -278,8 +266,6 @@ class ListenerMixin(metaclass=AppMeta):
         worker processes. This event is fired before the reload process
         triggers the reload. A change event has been detected and the reload
         process is about to be triggered.
-
-        See [Listeners](/en/guide/basics/listeners) for more details.
 
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
@@ -304,8 +290,6 @@ class ListenerMixin(metaclass=AppMeta):
         worker processes. This event is fired after the reload process
         triggers the reload. A change event has been detected and the reload
         process has been triggered.
-
-        See [Listeners](/en/guide/basics/listeners) for more details.
 
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
@@ -333,8 +317,6 @@ class ListenerMixin(metaclass=AppMeta):
 
         A common use case for this event is to initialize a database connection
         pool, or to initialize a cache client.
-
-        See [Listeners](/en/guide/basics/listeners) for more details.
 
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
@@ -364,8 +346,6 @@ class ListenerMixin(metaclass=AppMeta):
         periodically performs some action, such as clearing a cache or
         performing a health check.
 
-        See [Listeners](/en/guide/basics/listeners) for more details.
-
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
 
@@ -391,8 +371,6 @@ class ListenerMixin(metaclass=AppMeta):
         A common use case for this event is to stop a background task that
         was started in the after_server_start event.
 
-        See [Listeners](/en/guide/basics/listeners) for more details.
-
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.
 
@@ -417,8 +395,6 @@ class ListenerMixin(metaclass=AppMeta):
 
         A common use case for this event is to close a database connection
         pool, or to close a cache client.
-
-        See [Listeners](/en/guide/basics/listeners) for more details.
 
         Args:
             listener (ListenerType[Sanic]): The listener handler to attach.

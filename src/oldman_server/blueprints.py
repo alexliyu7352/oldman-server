@@ -88,8 +88,6 @@ class Blueprint(BaseApp):
     A Blueprint object is the main tool for grouping functionality and similar endpoints. It allows the developer to
     organize routes, exception handlers, middleware, and other web functionalities into separate, modular groups.
 
-    See [Blueprints](/en/guide/best-practices/blueprints) for more information.
-
     Args:
         name (str): The name of the blueprint.
         url_prefix (Optional[str]): The URL prefix for all routes defined on this blueprint.

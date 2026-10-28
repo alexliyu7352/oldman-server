@@ -37,7 +37,7 @@ def test_set_startup_catch():
     OldmanServer.test_mode = False
     message = (
         "Start method 'spawn' was requested, but 'fork' was already set.\n"
-        "For more information, see Sanic's documentation: https://sanic.dev/en/guide/running/manager.html#overcoming-a-coderuntimeerrorcode"
+        "Set OldmanServer.start_method = 'fork'"
     )
     with pytest.raises(RuntimeError, match=message):
         OldmanServer._set_startup_method()

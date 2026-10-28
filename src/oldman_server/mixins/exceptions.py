@@ -33,8 +33,6 @@ class ExceptionMixin(metaclass=AppMeta):
         A general exception like `NotFound` should only be registered on the
         application instance, not on a blueprint.
 
-        See [Exceptions](/en/guide/best-practices/exceptions.html) for more information.
-
         Args:
             exceptions (Union[Type[Exception], List[Type[Exception]]]): List of
                 Python exceptions to be caught by the handler.

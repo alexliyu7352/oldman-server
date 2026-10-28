@@ -898,8 +898,6 @@ class OldmanServer(
     ) -> None:
         """Register a blueprint on the application.
 
-        See [Blueprints](/en/guide/best-practices/blueprints) for more information.
-
         Args:
             blueprint (Union[Blueprint, Iterable[Blueprint], BlueprintGroup]): Blueprint object or (list, tuple) thereof.
             url_prefix (Optional[str]): Prefix for all URLs bound to the blueprint. Defaults to `None`.
@@ -1247,10 +1245,7 @@ class OldmanServer(
                     "exception responses. If you would like to perform any "
                     "other action on a raised exception, consider using a "
                     "signal handler like "
-                    '`@app.signal("http.lifecycle.exception")`\n'
-                    "For further information, please see the docs: "
-                    "https://sanicframework.org/en/guide/advanced/"
-                    "signals.html",
+                    '`@app.signal("http.lifecycle.exception")`.',
                 )
             return
 
@@ -1877,8 +1872,6 @@ class OldmanServer(
         Naming tasks is a good practice as it allows you to cancel them later,
         and allows Sanic to manage them when the server is stopped, if needed.
 
-        [See user guide re: background tasks](/en/guide/basics/tasks#background-tasks)
-
         Args:
             task (Union[Future[Any], Coroutine[Any, Any, Any], Awaitable[Any]]):
                 The future, coroutine, or awaitable to schedule.
@@ -2067,8 +2060,6 @@ class OldmanServer(
         accept a configuration object, a dictionary, or a path to a file that
         contains a configuration object or dictionary.
 
-        See [Configuration](/en/guide/deployment/configuration) for details.
-
         Args:
             config (Union[bytes, str, dict, Any]): The configuration object,
                 dictionary, or path to a configuration file.
@@ -2239,9 +2230,8 @@ class OldmanServer(
                 f"App name '{name}' not found.\n"
                 "App instantiation must occur outside "
                 "if __name__ == '__main__' "
-                "block or by using an AppLoader.\nSee Sanic's documentation "
-                "(the framework layer is a fork of Sanic): "
-                "https://sanic.dev/en/guide/deployment/app-loader.html"
+                "block or by using an AppLoader "
+                "(oldman_server.worker.loader.AppLoader)."
             )
 
     @classmethod
@@ -2391,8 +2381,7 @@ class OldmanServer(
                 f"Duplicate route names detected: {names}. You should rename "
                 "one or more of them explicitly by using the `name` param, "
                 "or changing the implicit name derived from the class and "
-                "function name. For more details, see Sanic's release notes: "
-                "https://sanic.dev/en/guide/release-notes/v23.3.html#duplicated-route-names-are-no-longer-allowed"  # noqa
+                "function name."
             )
             raise ServerError(message)
 
@@ -2508,8 +2497,6 @@ class OldmanServer(
             Make sure to only access this property from the main process,
             as attempting to do so from a worker process will result
             in an exception.
-
-        See [WorkerManager](/en/guide/deployment/manager) for details.
 
         Returns:
             WorkerManager: The manager responsible for managing

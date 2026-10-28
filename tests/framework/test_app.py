@@ -336,9 +336,7 @@ def test_get_app_does_not_exist():
             "App name 'does-not-exist' not found.\n"
             "App instantiation must occur outside "
             "if __name__ == '__main__' "
-            "block or by using an AppLoader.\nSee Sanic's documentation "
-            r"\(the framework layer is a fork of Sanic\): "
-            "https://sanic.dev/en/guide/deployment/app-loader.html"
+            r"block or by using an AppLoader \(oldman_server.worker.loader.AppLoader\)."
         ),
     ):
         OldmanServer.get_app("does-not-exist")
