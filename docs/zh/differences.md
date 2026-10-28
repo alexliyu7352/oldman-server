@@ -64,6 +64,7 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - 监听器、`app.add_task()` 的可调用对象与主进程事件按签名决定传几个参数，不再先调用一次、遇到 `TypeError` 再换参数调用：函数体里抛出的 `TypeError` 照常传出，函数不会被执行两次（原版会再以 `(app, loop)` 调用一次，并记一条误导的“loop 参数已弃用”警告）。
 - WebSocket 的接收按消息到达的顺序进行，连接结束（正常关闭或断开）排在已收到的消息之后：`recv()` 与 `async for` 先交出关闭前收到的每一条消息，之后 `recv()` 抛 `ConnectionClosedOK`（正常关闭：`async for` 随之结束，循环之后的代码照常执行，并派发 `websocket.handler.after`）或 `ConnectionClosedError`（断开或协议错误）。`recv()` 超时或被取消（`asyncio.wait_for`）不丢消息，之后照常可用。连接结束时，handler 正在等消息或还有没读的消息，就由 `recv()` 得知；没有在读的 handler 被取消，与请求方断开时的请求 handler 相同；之后 `send()` 遇到已关闭的连接（`WebsocketClosed`）按请求方离开处理，不派发 `websocket.handler.exception`。原版以取消等待中的 `recv()` 表示对方关闭：`async for` 抛 `CancelledError`，关闭前已到的消息可能丢掉，不派发 `websocket.handler.after`，`asyncio.wait_for(ws.recv(), t)` 超时一次之后每次 `recv()` 都抛 `ServerError`。两种服务器相同。
 - `Connection` 头按选项列表解析，可以分在几个字段里：只有 `close` 选项才结束连接（HTTP/1.0 则是没有 `keep-alive` 选项时）。原版把整个值与 `keep-alive` 比较，`Connection: Upgrade`、`keep-alive, Upgrade`（Firefox 发的就是这个）、`TE` 都会让连接断开，有多个字段时只看最后一个。两种服务器相同。
+- `shared_ctx` 只能在 `main_process_start` 里设置：worker 进程（以及单进程运行开始服务之后）给它赋值会抛 `RuntimeError`，提示改用 `app.ctx`。原版有上锁的代码，但判断“是不是 worker”时 worker 还没设好，锁从未生效，worker 里放入的对象只留在那个 worker、没有任何提示。
 
 ## 经原生主机时
 

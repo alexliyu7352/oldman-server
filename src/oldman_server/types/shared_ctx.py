@@ -17,7 +17,9 @@ class SharedContext(SimpleNamespace):
     def __setattr__(self, name: str, value: Any) -> None:
         if self.is_locked:
             raise RuntimeError(
-                f"Cannot set {name} on locked SharedContext object"
+                f"Cannot set {name} on locked SharedContext object: shared_ctx "
+                "is set in main_process_start listeners, before the server "
+                "processes start; use app.ctx for an object of one process"
             )
         if not os.environ.get("OLDMAN_SERVER_WORKER_NAME"):
             to_check: Iterable[Any]
@@ -56,3 +58,8 @@ class SharedContext(SimpleNamespace):
 
     def lock(self) -> None:
         self._lock = True
+
+    def unlock(self) -> None:
+        """Open it again when a single-process run ends: the next run's
+        main_process_start sets it anew."""
+        super().__setattr__("_lock", False)

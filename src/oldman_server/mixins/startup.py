@@ -1198,6 +1198,12 @@ class StartupMixin(metaclass=AppMeta):
                 }
                 kwargs["server_info"][primary.name].append(server_info)
 
+            # As in a worker process: shared_ctx is set by main_process_start
+            # (run above when this process is also the main one), then
+            # locked while the server runs, the same code behaving alike in a
+            # single process and with workers.
+            for app in apps:
+                app.shared_ctx.lock()
             worker_serve(monitor_publisher=None, **kwargs)
         except BaseException:
             error_logger.exception(
@@ -1211,6 +1217,7 @@ class StartupMixin(metaclass=AppMeta):
                 app.state.server_info.clear()
                 app.router.reset()
                 app.signal_router.reset()
+                app.shared_ctx.unlock()
 
             if sock:
                 sock.close()

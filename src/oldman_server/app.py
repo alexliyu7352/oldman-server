@@ -2496,8 +2496,6 @@ class OldmanServer(
                         setattr(getattr(self, attr), key, value)
                 else:
                     setattr(self, attr, info)
-        if hasattr(self, "multiplexer"):
-            self.shared_ctx.lock()
         return self
 
     @property

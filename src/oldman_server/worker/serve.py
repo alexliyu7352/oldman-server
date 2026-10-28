@@ -97,6 +97,9 @@ def worker_serve(
                 a.multiplexer = WorkerMultiplexer(
                     monitor_publisher, worker_state
                 )
+                # shared_ctx holds what main_process_start put there (refresh
+                # above): set only there, before the workers start.
+                a.shared_ctx.lock()
 
         if app.debug:
             loop.set_debug(app.debug)
