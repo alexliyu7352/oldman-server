@@ -43,12 +43,8 @@ from .engine import (BodyError, CACHED, Config, Engine, ServerConfig, STREAM_DAT
                      STREAM_START)
 from oldman_server.request import form as _form
 
-try:  # websockets >= 11.0, as sanic.server.protocols.websocket_protocol
-    from websockets.protocol import State as _WSState
-    from websockets.server import ServerProtocol as _WSServerProtocol
-except ImportError:  # websockets < 11.0
-    from websockets.connection import State as _WSState
-    from websockets.server import ServerConnection as _WSServerProtocol
+from websockets.protocol import State as _WSState
+from websockets.server import ServerProtocol as _WSServerProtocol
 from websockets.typing import Subprotocol
 
 
@@ -721,7 +717,8 @@ class _BufferedExchange:
         _engine.open_tunnel(self.native.request_id, tunnel)
         headers = tuple((name.encode(), value.encode()) for name, value in resp.headers.items())
         body = resp.body + b"\r\n\r\n" if resp.body else b""
-        self.streaming, self.stage = "open", Stage.RESPONSE
+        # "tunnel": after the 101 the connection is the WebSocket's (finish).
+        self.streaming, self.stage = "tunnel", Stage.RESPONSE
         await _engine.stream_send(self.native.request_id, self.native.shard, STREAM_START, body,
                                   resp.status_code, headers, -1)
         # HttpProtocol.check_timeouts: no timeouts while a WebSocket is handled.
@@ -734,6 +731,22 @@ class _BufferedExchange:
         tunnel.opened()
         return websocket
 
+    def _end_tunnel(self):
+        """The request is done with a connection switched to a WebSocket: as
+        WebSocketProtocol.close does on the asyncio server, its end goes
+        through WebsocketImplProtocol (end_connection: the closing handshake,
+        then its auto-closer closes the tunnel), so the WebSocket's own tasks
+        end with it rather than waiting for a close that never comes."""
+        tunnel = _engine.tunnel(self.native.request_id) if _engine is not None else None
+        if tunnel is not None and tunnel.websocket is not None:
+            tunnel.websocket.end_connection(1001)
+        elif tunnel is not None:
+            tunnel.end()
+        else:  # the tunnel was never registered or is gone: end the stream
+            self.streaming, self.stage = "ended", Stage.IDLE
+            if _engine is not None:
+                _engine.stream_end(self.native.request_id, self.native.shard)
+
     def finish(self):
         if self.streaming is not None:
             # Http.http1_request_handler after the handler chain: a response
@@ -745,6 +758,8 @@ class _BufferedExchange:
                     _engine.stream_end(self.native.request_id, self.native.shard)
                 else:
                     self.abort()
+            elif self.streaming == "tunnel":
+                self._end_tunnel()
             if self.failure is not None:
                 raise self.failure
             return None

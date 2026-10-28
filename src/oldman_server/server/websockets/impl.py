@@ -9,15 +9,8 @@ from websockets.exceptions import (
     ConnectionClosedOK,
 )
 from websockets.frames import Frame, Opcode
-
-
-try:  # websockets >= 11.0
-    from websockets.protocol import Event, State  # type: ignore
-    from websockets.server import ServerProtocol  # type: ignore
-except ImportError:  # websockets < 11.0
-    from websockets.connection import Event, State  # type: ignore
-    from websockets.server import ServerConnection as ServerProtocol
-
+from websockets.protocol import Event, State
+from websockets.server import ServerProtocol
 from websockets.typing import Data
 
 from oldman_server.log import websockets_logger
@@ -56,6 +49,8 @@ class WebsocketImplProtocol:
     connection_lost_waiter: asyncio.Future | None
     keepalive_ping_task: asyncio.Task | None
     auto_closer_task: asyncio.Task | None
+    # The application handler's Task (OldmanServer._websocket_handler sets it).
+    handler_task: asyncio.Future | None
 
     def __init__(
         self,
@@ -85,6 +80,7 @@ class WebsocketImplProtocol:
         self.keepalive_ping_task = None
         self.auto_closer_task = None
         self.connection_lost_waiter = None
+        self.handler_task = None
 
     @property
     def subprotocol(self):
@@ -423,7 +419,9 @@ class WebsocketImplProtocol:
                         return
         except asyncio.CancelledError:
             ...
-        except BaseException:
+        except Exception:
+            # Not BaseException: GeneratorExit (the task destroyed with its
+            # loop) and KeyboardInterrupt go on.
             websockets_logger.exception("Error closing websocket connection")
         finally:
             await self._close_transport()
@@ -873,8 +871,18 @@ class WebsocketImplProtocol:
             self.ws_proto.state = CLOSED
 
         self.abort_pings()
-        if self.connection_lost_waiter:
+        # The transport is gone, so the data transfer phase is over, whoever
+        # closed it: the auto-closer finishes instead of waiting for an end
+        # (end_connection, an EOF) that can no longer come.
+        if self.data_finished_fut and not self.data_finished_fut.done():
+            self.data_finished_fut.cancel()
+            self.data_finished_fut = None
+        if self.connection_lost_waiter and not self.connection_lost_waiter.done():
             self.connection_lost_waiter.set_result(None)
+        # The peer left: a handler still running is cancelled, as a request
+        # handler is when its connection is lost.
+        if self.handler_task is not None and not self.handler_task.done():
+            self.handler_task.cancel()
 
     async def __aiter__(self):
         try:

@@ -614,6 +614,10 @@ class Engine:
         eof_received, connection_lost), from the next drained event on."""
         self._application_tunnels[request_id] = protocol
 
+    def tunnel(self, request_id):
+        """The protocol open_tunnel registered for the request, or None."""
+        return self._application_tunnels.get(request_id)
+
     def pause_tunnel(self, request_id, shard, paused):
         """Stop (or restart) the shard reading the tunnel's peer."""
         if request_id in self._application_tunnels:

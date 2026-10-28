@@ -154,7 +154,9 @@ def test_websocket_backpressure_pauses_reading_the_peer(monkeypatch):
 
     results = run("ws_pause", flood)
     assert results[0] == str(200 * 65536)
-    assert True in pauses and pauses[-1] is False
+    # Reading paused while the queue was full and resumed when the handler
+    # read again; the WebSocket's end (end_connection) pauses it for good.
+    assert True in pauses and False in pauses[pauses.index(True):]
 
 
 def test_a_late_tunnel_call_reaches_only_its_own_engine():

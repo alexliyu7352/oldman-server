@@ -1583,6 +1583,8 @@ class OldmanServer(
         # needs to be cancelled due to the server being stopped
         fut = ensure_future(handler(request, ws, *args, **kwargs))
         self.websocket_tasks.add(fut)
+        # Cancelled when the connection is lost (WebsocketImplProtocol).
+        ws.handler_task = fut
         cancelled = False
         try:
             await fut
