@@ -400,12 +400,15 @@ def test_static_content_range_invalid_unit(
         use_content_range=True,
     )
 
+    # A range unit the server does not know MUST be ignored (RFC 9110 14.2):
+    # the whole file.
     unit = "bit"
     headers = {"Range": f"{unit}=1-0"}
     request, response = app.test_client.get("/testing.file", headers=headers)
 
-    assert response.status == 416
-    assert f"{unit} is not a valid Range Type" in response.text
+    assert response.status == 200
+    assert "Content-Range" not in response.headers
+    assert response.body == get_file_content(static_file_directory, file_name)
 
 
 @pytest.mark.parametrize("file_name", ["test.file", "decode me.txt"])
@@ -784,3 +787,65 @@ def test_head_on_a_directory_sends_the_index_headers(app, tmp_path):
     assert head.body == b""
     assert head.headers["content-length"] == get.headers["content-length"] == "12"
     assert head.headers["content-type"] == get.headers["content-type"]
+
+
+@pytest.mark.parametrize("serving", ("file", "native", "stream"))
+def test_static_ranges_follow_rfc_9110(app, tmp_path, serving):
+    """Ranges evaluated against the file's length (RFC 9110 14.1.2): a last
+    position past the end is cut, a suffix longer than the file is the whole
+    file, a start at or past the end is 416; several ranges and unknown units
+    are ignored (the whole file)."""
+    size = {"file": 10, "native": 300 * 1024, "stream": 300 * 1024}[serving]
+    content = bytes(i % 251 for i in range(size))
+    (tmp_path / "data.bin").write_bytes(content)
+    app.static(
+        "/files",
+        tmp_path,
+        use_content_range=True,
+        stream_large_files=serving == "stream",
+    )
+
+    def get(value):
+        _, response = app.test_client.get("/files/data.bin", headers={"Range": value})
+        return response
+
+    last = size - 1
+    for value, start, end in (
+        ("bytes=3-4", 3, 4),
+        (f"bytes={last - 1}-{size + 50}", last - 1, last),
+        (f"bytes=-{size + 40}", 0, last),
+        ("bytes=-2", size - 2, last),
+        (f"bytes={size - 3}-", size - 3, last),
+    ):
+        response = get(value)
+        assert response.status == 206, value
+        assert response.headers["content-range"] == f"bytes {start}-{end}/{size}", value
+        assert response.body == content[start : end + 1], value
+
+    for value in (f"bytes={size}-{size + 10}", f"bytes={size + 40}-", "bytes=-0", "bytes=5-3"):
+        response = get(value)
+        assert response.status == 416, value
+        assert response.headers["content-range"] == f"bytes */{size}", value
+
+    for value in ("bytes=0-1,5-6", "items=0-1"):
+        response = get(value)
+        assert response.status == 200, value
+        assert "content-range" not in response.headers
+        assert response.body == content
+
+
+def test_static_if_range(app, tmp_path):
+    from email.utils import formatdate
+
+    path = tmp_path / "data.bin"
+    path.write_bytes(b"0123456789")
+    app.static("/files", tmp_path, use_content_range=True)
+    current = formatdate(path.stat().st_mtime, usegmt=True)
+    older = formatdate(path.stat().st_mtime - 60, usegmt=True)
+
+    for if_range, status in ((current, 206), (older, 200), ('"an-etag"', 200), ("nonsense", 200)):
+        _, response = app.test_client.get(
+            "/files/data.bin", headers={"Range": "bytes=2-3", "If-Range": if_range}
+        )
+        assert response.status == status, if_range
+        assert response.body == (b"23" if status == 206 else b"0123456789")
