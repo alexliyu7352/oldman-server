@@ -24,6 +24,8 @@ from oldman_server.worker import health
 
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions and signals")
+# The scenarios check that no process of the service is left, from /proc.
+reads_proc = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
 
 
 APP = textwrap.dedent(
@@ -111,6 +113,7 @@ def stop(process: subprocess.Popen, output: bytes, timeout=15) -> str:
     return text
 
 
+@reads_proc
 def test_a_worker_whose_loop_blocks_is_killed_and_replaced(tmp_path):
     marker = tmp_path / "blocked"
     process, port = start(
@@ -152,6 +155,7 @@ def test_a_worker_whose_loop_blocks_is_killed_and_replaced(tmp_path):
     assert process.returncode == 0, text
 
 
+@reads_proc
 def test_a_restarted_worker_is_watched_again(tmp_path):
     marker = tmp_path / "blocked"
     process, port = start(
@@ -174,6 +178,7 @@ def test_a_restarted_worker_is_watched_again(tmp_path):
     assert process.returncode == 0, text
 
 
+@reads_proc
 def test_a_worker_added_by_scaling_is_watched(tmp_path):
     marker = tmp_path / "blocked"
     process, port = start(
@@ -203,6 +208,7 @@ def test_a_worker_added_by_scaling_is_watched(tmp_path):
     assert process.returncode == 0, text
 
 
+@reads_proc
 def test_healthy_workers_are_left_alone_and_stop_quietly(tmp_path):
     process, port = start(tmp_path, "")
     try:
@@ -222,6 +228,7 @@ def test_healthy_workers_are_left_alone_and_stop_quietly(tmp_path):
     assert process.returncode == 0, text
 
 
+@reads_proc
 def test_a_stop_during_a_health_restart_ends_the_service(tmp_path):
     marker = tmp_path / "blocked"
     process, _ = start(
@@ -246,6 +253,7 @@ def test_a_stop_during_a_health_restart_ends_the_service(tmp_path):
     assert process.returncode == 0, text
 
 
+@reads_proc
 def test_off_by_default(tmp_path):
     process, port = start(
         tmp_path,
