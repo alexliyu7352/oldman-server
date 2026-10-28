@@ -66,7 +66,6 @@ from oldman_server.http import Stage
 from oldman_server.log import LOGGING_CONFIG_DEFAULTS, error_logger, logger
 from oldman_server.logging.deprecation import deprecation
 from oldman_server.middleware import Middleware, MiddlewareLocation
-from oldman_server.mixins.commands import CommandMixin
 from oldman_server.mixins.listeners import ListenerEvent
 from oldman_server.mixins.startup import StartupMixin
 from oldman_server.mixins.static import StaticHandleMixin
@@ -107,7 +106,6 @@ class OldmanServer(
     StaticHandleMixin,
     BaseApp,
     StartupMixin,
-    CommandMixin,
     metaclass=TouchUpMeta,
 ):
     """The main application instance
@@ -170,7 +168,6 @@ class OldmanServer(
         "_cors_table",
         "_delayed_tasks",
         "_fixed_cors",
-        "_future_commands",
         "_future_exceptions",
         "_future_listeners",
         "_future_middleware",

@@ -4,7 +4,6 @@ from typing import Any
 
 from oldman_server.base.meta import AppMeta
 from oldman_server.exceptions import OldmanServerException
-from oldman_server.mixins.commands import CommandMixin
 from oldman_server.mixins.exceptions import ExceptionMixin
 from oldman_server.mixins.listeners import ListenerMixin
 from oldman_server.mixins.middleware import MiddlewareMixin
@@ -23,7 +22,6 @@ class BaseApp(
     ListenerMixin,
     ExceptionMixin,
     SignalMixin,
-    CommandMixin,
     metaclass=AppMeta,
 ):
     __slots__ = ("name",)

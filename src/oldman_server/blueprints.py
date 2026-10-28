@@ -104,7 +104,6 @@ class Blueprint(BaseApp):
 
     __slots__ = (
         "_apps",
-        "_future_commands",
         "_future_routes",
         "_future_statics",
         "_future_middleware",
@@ -379,11 +378,6 @@ class Blueprint(BaseApp):
             registration = _Registration(app, dict(options))
             self._registrations.append(registration)
         self._apply(registration)
-
-        if self._future_commands:
-            raise OldmanServerException(
-                "Registering commands with blueprints is not supported."
-            )
 
     def _ensure_not_started(self) -> None:
         started = sorted(

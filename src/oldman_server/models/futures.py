@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, NamedTuple
 
 from oldman_server.handlers.directory import DirectoryHandler
 from oldman_server.models.handler_types import (
@@ -73,8 +73,3 @@ class FutureSignal(NamedTuple):
     condition: dict[str, str] | None
     exclusive: bool
     priority: int
-
-
-class FutureCommand(NamedTuple):
-    name: str
-    func: Callable

@@ -30,7 +30,7 @@
 
 ## 已移除
 
-- 命令行（`oldman-server` 命令与 `python -m oldman_server`，包括 `--simple` 静态文件服务器）：由 `app.run()` 或上层框架自己的命令启动，多进程加载应用照旧可用 `AppLoader`。
+- 命令行（`oldman-server` 命令与 `python -m oldman_server`，包括 `--simple` 静态文件服务器，以及只供命令行的 `sanic exec` 执行的 `@app.command()`）：由 `app.run()` 或上层框架自己的命令启动，多进程加载应用照旧可用 `AppLoader`。
 - 静态目录的列表页（`app.static(..., directory_view=True)` 与 `DirectoryHandler` 的 `directory_view`）：目录只按 `index` 回答索引文件。
 - 启动信息（MOTD 与标志；`run()` / `prepare()` 的 `motd`、`motd_display`，设置 `MOTD`、`MOTD_DISPLAY`）：主进程开始服务时改为一行 INFO 日志（`oldman_server.root`），写出应用名、地址、运行方式与 worker 数。
 - coffee 模式（`app.make_coffee()`、`prepare(coffee=...)`、`--coffee`，Sanic 标志的彩蛋）。

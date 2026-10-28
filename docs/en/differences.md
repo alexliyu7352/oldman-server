@@ -30,7 +30,7 @@ The framework layer comes from Sanic 25.12.1 and keeps most of its interface; fo
 
 ## Removed
 
-- The command line (the `oldman-server` command and `python -m oldman_server`, including the `--simple` static file server): start the application with `app.run()` or a higher-level framework's own command; `AppLoader` still loads the application in multiple processes.
+- The command line (the `oldman-server` command and `python -m oldman_server`, including the `--simple` static file server, and `@app.command()`, which only the command line's `exec` ran): start the application with `app.run()` or a higher-level framework's own command; `AppLoader` still loads the application in multiple processes.
 - The static directory listing page (`app.static(..., directory_view=True)` and `DirectoryHandler`'s `directory_view`): a directory answers only with its index file, per `index`.
 - The startup banner (the MOTD and the logo; the `motd` and `motd_display` arguments of `run()` / `prepare()`, the settings `MOTD` and `MOTD_DISPLAY`): when the main process starts serving, it logs one INFO line instead (`oldman_server.root`) with the application name, address, mode and number of workers.
 - Coffee mode (`app.make_coffee()`, `prepare(coffee=...)`, `--coffee`, an Easter egg in Sanic's logo).
