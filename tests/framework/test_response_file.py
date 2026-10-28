@@ -4,6 +4,7 @@ from logging import INFO
 import pytest
 
 from oldman_server.compat import Header
+from oldman_server.response import file_stream
 from oldman_server.response.convenience import guess_content_type, validate_file
 
 
@@ -91,3 +92,28 @@ def test_guess_content_type_with_pathlib():
 
     result = guess_content_type(Path("test.html"))
     assert result == "text/html; charset=utf-8"
+
+
+def test_a_file_stream_response_in_response_middleware(app, tmp_path):
+    # Before the stream starts, a file_stream() response has no body in
+    # memory and its headers are those it will send.
+    path = tmp_path / "data.bin"
+    path.write_bytes(b"z" * 10)
+    seen = {}
+
+    @app.get("/")
+    async def index(request):
+        return await file_stream(path)
+
+    @app.on_response
+    async def inspect(request, response):
+        seen["body"] = response.body
+        seen["headers"] = dict(response.processed_headers)
+        response.headers["x-seen"] = "1"
+
+    _, response = app.test_client.get("/")
+    assert response.status == 200
+    assert response.body == b"z" * 10
+    assert response.headers["x-seen"] == "1"
+    assert seen["body"] is None
+    assert seen["headers"][b"content-type"] == b"application/octet-stream"

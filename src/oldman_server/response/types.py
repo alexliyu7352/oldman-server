@@ -675,13 +675,17 @@ class ResponseStream:
             self._cookies = CookieJar(self.headers)
         return self._cookies
 
-    @property
-    def processed_headers(self):
-        return self.response.processed_headers
+    # Answered from this object's own status, headers and content type, not
+    # from the response stream() makes: response middleware reads them before
+    # that response exists. stream() passes the same values to respond(), so
+    # the headers are those sent.
+    _sanitize_header_value = staticmethod(BaseHTTPResponse._sanitize_header_value)
+    processed_headers = BaseHTTPResponse.processed_headers
 
     @property
     def body(self):
-        return self.response.body
+        """None: the content is produced while it is sent."""
+        return None
 
     def __call__(self, request: Request) -> ResponseStream:
         self.request = request
