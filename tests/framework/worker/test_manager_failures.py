@@ -109,6 +109,33 @@ def gone(pid: int, timeout=10) -> bool:
     return False
 
 
+def session_processes(session: int) -> list[int]:
+    """The live (not zombie) processes of a session: what of a service
+    started with start_new_session is still running."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        # pid (comm) state ppid pgrp session ...; comm may hold spaces.
+        fields = stat.rsplit(")", 1)[1].split()
+        if fields[0] != "Z" and int(fields[3]) == session:
+            found.append(int(entry.name))
+    return found
+
+
+def session_gone(session: int, timeout=10) -> bool:
+    deadline = time.monotonic() + timeout
+    while session_processes(session):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
 def describe(pid: int) -> str:
     """A surviving process's state, for the failure message."""
     try:
@@ -161,6 +188,92 @@ def test_a_shutdown_signal_while_workers_start_ends_the_service(tmp_path):
         process.wait(timeout=15)
     finally:
         finish(process)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+@pytest.mark.parametrize("zero_downtime", (False, True), ids=["restart", "zero-downtime"])
+def test_a_stop_signal_while_a_restart_is_handled_ends_the_service(tmp_path, zero_downtime):
+    # The stop signal reaches the main process while it handles a worker's
+    # restart message (sent by the process itself here, to fix the order).
+    # The process the restart starts is stopped with the others: nothing is
+    # left running, and the main process does not wait for it forever.
+    marker = tmp_path / "restarted"
+    process = start(
+        tmp_path,
+        f"""
+        import signal
+
+        from oldman_server.worker.manager import WorkerManager
+
+        _handle_message = WorkerManager._handle_message
+
+
+        def _stop_while_restarting(self, message):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return _handle_message(self, message)
+
+
+        WorkerManager._handle_message = _stop_while_restarting
+
+
+        @app.after_server_start
+        async def restart_once(app):
+            print("worker ready", flush=True)
+            if app.m.name.startswith("Oldman-Server-0") and not os.path.exists({str(marker)!r}):
+                open({str(marker)!r}, "w").close()
+                app.m.restart(zero_downtime={zero_downtime})
+        """,
+    )
+    try:
+        text = finish(process, timeout=30)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    assert marker.exists(), text
+    assert "main process stopped" in text, text
+    assert process.returncode == 0, text
+    left = session_processes(process.pid) if not session_gone(process.pid) else []
+    assert not left, [describe(pid) for pid in left]
+
+
+def test_a_worker_stopped_while_it_starts_stops_once_started(tmp_path):
+    # A stop signal during before_server_start stops the worker once its
+    # start is complete: the step is not interrupted, after_server_stop runs.
+    go = tmp_path / "go"
+    process = start(
+        tmp_path,
+        f"""
+        @app.before_server_start
+        async def wait_for_go(app):
+            print(f"worker starting {{os.getpid()}}", flush=True)
+            while not os.path.exists({str(go)!r}):
+                await asyncio.sleep(0.05)
+            print(f"worker started {{os.getpid()}}", flush=True)
+
+        @app.after_server_stop
+        async def stopped(app):
+            print(f"worker stopped {{os.getpid()}}", flush=True)
+        """,
+    )
+    try:
+        output = read_until(process, b"worker starting", count=2)
+        pids = [int(line.split()[-1]) for line in output.decode().splitlines()
+                if line.startswith("worker starting")]
+        os.kill(pids[0], signal.SIGTERM)
+        time.sleep(0.5)
+        assert not gone(pids[0], timeout=0), "the worker stopped in the middle of its start"
+        go.touch()
+        output += read_until(process, f"worker stopped {pids[0]}".encode())
+        assert process.poll() is None, output.decode(errors="replace")
+        os.kill(process.pid, signal.SIGTERM)
+        text = output.decode(errors="replace") + finish(process)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    assert f"worker started {pids[0]}" in text
+    assert "Traceback" not in text, text
+    assert text.count("worker stopped") == 2, text
+    assert process.returncode == 0, text
 
 
 def test_workers_end_when_the_main_process_is_killed(tmp_path):

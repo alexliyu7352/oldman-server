@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 
 from collections.abc import MutableMapping
+from contextlib import suppress
 from datetime import datetime, timezone
+from functools import partial
 from inspect import signature
 from multiprocessing.context import BaseContext
 from signal import SIGINT
 from threading import Thread
-from time import sleep
+from time import monotonic, sleep
 from typing import Any
 
 from oldman_server.log import Colors, logger
@@ -53,6 +55,11 @@ class WorkerProcess:
             self.worker_state[self.name] = {
                 "server": self.SERVER_LABEL in self.name
             }
+        # The processes zero-downtime restarts replaced, each kept until its
+        # replacement acknowledges; terminate() stops those still there.
+        self._previous: set[Any] = set()
+        # Those terminate() stopped: exit() waits for them too.
+        self._stopped_previous: list[Any] = []
         self.spawn()
 
     def set_state(self, state: ProcessState, force=False):
@@ -92,11 +99,14 @@ class WorkerProcess:
         self.set_state(ProcessState.JOINED)
         self._current_process.join()
 
-    def exit(self):
-        limit = 100
-        while self.is_alive() and limit > 0:
+    def exit(self, timeout: float = 10.0):
+        """Wait up to `timeout` seconds for the process (and the previous ones
+        terminate() stopped) to end, then drop its shared state."""
+        deadline = monotonic() + timeout
+        while (self.is_alive() or any(
+                previous.is_alive() for previous in self._stopped_previous)) \
+                and monotonic() < deadline:
             sleep(0.1)
-            limit -= 1
 
         if not self.is_alive():
             try:
@@ -112,6 +122,16 @@ class WorkerProcess:
                 logger.debug("Could not find worker state to delete.")
 
     def terminate(self):
+        """Stop the process (SIGINT: it stops gracefully), and any previous
+        process a zero-downtime restart still keeps."""
+        while self._previous:
+            try:
+                previous = self._previous.pop()
+            except KeyError:  # the restart's own thread took the last one
+                break
+            with suppress(AttributeError, ProcessLookupError):
+                previous.terminate()
+            self._stopped_previous.append(previous)
         if self.state is not ProcessState.TERMINATED:
             logger.debug(
                 f"{Colors.BLUE}Terminating a process: "
@@ -140,7 +160,8 @@ class WorkerProcess:
         if restart_order is RestartOrder.SHUTDOWN_FIRST:
             self._terminate_now()
         else:
-            self._old_process = self._current_process
+            previous = self._current_process
+            self._previous.add(previous)
         if self._add_config():
             self.kwargs.update(
                 {"config": {k.upper(): v for k, v in kwargs.items()}}
@@ -152,7 +173,7 @@ class WorkerProcess:
             raise RuntimeError("Restart failed")
 
         if restart_order is RestartOrder.STARTUP_FIRST:
-            self._terminate_soon()
+            self._terminate_soon(previous)
 
         self.worker_state[self.name] = {
             **self.worker_state[self.name],
@@ -197,7 +218,7 @@ class WorkerProcess:
         )
         self._current_process.terminate()
 
-    def _terminate_soon(self):
+    def _terminate_soon(self, previous):
         logger.debug(
             f"{Colors.BLUE}Begin restart termination: "
             f"{Colors.BOLD}{Colors.PINK}"
@@ -205,19 +226,25 @@ class WorkerProcess:
             self.name,
             self._current_process.pid,
         )
-        termination_thread = Thread(target=self._wait_to_terminate)
+        termination_thread = Thread(
+            target=partial(self._wait_to_terminate, previous)
+        )
         termination_thread.start()
 
-    def _wait_to_terminate(self):
+    def _wait_to_terminate(self, previous):
+        """Stop `previous` once its replacement acknowledges, unless
+        terminate() stopped it first (the manager is shutting down)."""
         logger.debug(
             f"{Colors.BLUE}Waiting for process to be acked: "
             f"{Colors.BOLD}{Colors.PINK}"
             f"%s {Colors.BLUE}[%s]{Colors.END}",
             self.name,
-            self._old_process.pid,
+            previous.pid,
         )
         misses = 0
         while self.state is not ProcessState.ACKED:
+            if previous not in self._previous:
+                return
             sleep(0.1)
             misses += 1
             if misses > self.THRESHOLD:
@@ -225,16 +252,18 @@ class WorkerProcess:
                     f"Worker {self.name} failed to come ack within "
                     f"{self.THRESHOLD / 10} seconds"
                 )
-        else:
-            logger.debug(
-                f"{Colors.BLUE}Process acked. Terminating: "
-                f"{Colors.BOLD}{Colors.PINK}"
-                f"%s {Colors.BLUE}[%s]{Colors.END}",
-                self.name,
-                self._old_process.pid,
-            )
-            self._old_process.terminate()
-        delattr(self, "_old_process")
+        try:
+            self._previous.remove(previous)
+        except KeyError:  # terminate() took it meanwhile
+            return
+        logger.debug(
+            f"{Colors.BLUE}Process acked. Terminating: "
+            f"{Colors.BOLD}{Colors.PINK}"
+            f"%s {Colors.BLUE}[%s]{Colors.END}",
+            self.name,
+            previous.pid,
+        )
+        previous.terminate()
 
     def _add_config(self) -> bool:
         sig = signature(self.target)

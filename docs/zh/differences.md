@@ -41,10 +41,11 @@
 oldman 原先为这些打的补丁，切换后可以删除。
 
 - worker 启动期间收到 SIGTERM 时，主进程结束服务，而不是一直等待 worker 确认（Sanic 25.12.1 会空转；oldman 的 `_wait_for_ack`）。
+- worker 重启（`app.m.restart()`、自动重载、扩缩，包括零停机重启）进行中收到停止信号时，主进程在处理完手上这一步之后停止全部进程，包括重启刚启动的新进程与零停机重启还保留着的旧进程，然后退出；停止开始之后不再启动新进程。原版只停止信号到达那一刻的进程，重启出来的 worker 没人叫停，主进程就一直等着它。
 - worker 在已确认启动之后、开始服务之前失败（`after_server_start`，或原生主机启动失败）时，主进程结束服务，而不是把这条消息当作要重启的进程名、留下没有 worker 的主进程（oldman 的 `_handle_message`）。只有启动阶段的失败才结束服务：已经服务过的 worker 在停止时（重启、缩减）出错只记日志；重启的 worker 在确认之前失败（如 auto-reload 读到有语法错误的文件）时记一条错误，其他 worker 照常服务（与原版相同）。服务器启动失败时 `app.run()` 抛出异常（原版只记日志、正常返回，退出码 0）。
 - multiprocessing 的启动方式已被设为本包需要的那一种时不再报错（oldman 的 `prepare_process_context` 直接设 `START_METHOD_SET`）。
 - 服务器监听器成对执行：`before_server_start` 失败时仍执行 `after_server_stop`；`after_server_start` 失败时照常停止服务器并执行 `before_server_stop`、`after_server_stop`；`before_server_stop` 失败时清理与 `after_server_stop` 仍执行；失败最后照样抛出。监听器抛出的 `RuntimeError` 也不再被当成事件循环提前停止而吞掉或再执行一次。（oldman 的 `_services_*_server_*` 里的 except 清理）
-- 服务进程的 SIGINT / SIGTERM 处理在开始应答之前就装好，并且是 Python 层的处理：启动期间收到的信号等启动完成再停止（第二个信号立即停止），停止阶段照常执行。原版用事件循环的 `add_signal_handler`，uvloop 会丢掉循环没在运行时（启动的各步骤之间）到达的信号，进程就停不下来；原生主机还会在注册之前就应答请求，这时的 SIGTERM 直接杀死进程、不执行停止监听器。`loop.add_signal_handler` 不再被调用。
+- 服务进程的 SIGINT / SIGTERM 处理在启动的各步骤（包括 `before_server_start`）之前就装好，并且是 Python 层的处理：启动期间收到的信号等启动完成再停止（第二个信号立即停止），停止阶段照常执行。原版用事件循环的 `add_signal_handler`，uvloop 会丢掉循环没在运行时（启动的各步骤之间）到达的信号，进程就停不下来；原生主机还会在注册之前就应答请求，这时的 SIGTERM 直接杀死进程、不执行停止监听器。`loop.add_signal_handler` 不再被调用。
 - worker 进程在主进程退出（包括被 SIGKILL）时收到 SIGTERM 而停止，不再成为无人管理、仍占着端口的孤儿进程（Linux；oldman 的 `_process_group` 检查仍可保留给其他子进程）。
 - worker manager 结束服务时（worker 启动失败、关机时再收到信号等）只杀 worker 进程：原版对 worker 所在的进程组 `killpg`，而 worker 与主进程同组，主进程也随之被 SIGKILL，`main_process_stop` 监听器、套接字与 unix socket 文件的清理都不执行。现在主进程照常收尾，以退出码 1 结束；自成进程组的 worker 仍连同其进程组一起杀掉。
 - `Authorization` 的认证方案取头部第一个词、不分大小写比较，不再按子字符串匹配：`request.token` 只认 `Bearer` / `Token`，其他方案（如 `Basic`）得到 None，不再返回整个头部；`request.credentials` 的 Basic 密码可以含冒号，非法 base64 视为没有凭据（oldman 的 `bearer_credential`、`basic_credentials`；只接受 Bearer 时用 `parse_credentials(header, ("Bearer",))` 并检查返回的方案）。不带方案的单个令牌仍按令牌处理；只有方案名、没有凭据（`Authorization: Bearer`）时没有令牌（`token` 为 None，原版是空字符串）；方案与凭据之间的任意空白（如 Tab）都算分隔。

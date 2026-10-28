@@ -410,6 +410,11 @@ def _serve_native(
         )
     pid = os.getpid()
     server_logger.info("Starting native worker [%s]", pid)
+    # Before the startup steps: a stop signal from then on stops the server
+    # once its start is complete, so after_server_stop runs whenever
+    # before_server_start did (without it, SIGINT interrupted a step anywhere
+    # and SIGTERM killed the process).
+    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     try:
         loop.run_until_complete(app._startup())
         _run_before_start(loop, app)
@@ -417,9 +422,6 @@ def _serve_native(
         close_sockets()
         raise
     app.ack()
-    # Before the engine opens, which answers requests at once: a stop signal
-    # from then on stops the server once it has started.
-    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     # A worker process: Python runs on its group's first CPU, apart from its
     # shards and the other workers.
     group = worker_group(app.config)
@@ -550,13 +552,12 @@ def _serve_http_1(
 
     pid = os.getpid()
     server_logger.info("Starting worker [%s]", pid)
+    # Before the startup steps, as in _serve_native.
+    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     loop.run_until_complete(app._startup())
     _run_before_start(loop, app)
     app.ack()
 
-    # Before the server listens: a stop signal from then on stops it once
-    # it has started.
-    stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     try:
         http_server = _run_starting(loop, server_coroutine, stop)
     except BaseException:

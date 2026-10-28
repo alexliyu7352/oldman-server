@@ -41,6 +41,15 @@ def manager() -> WorkerManager:
     return manager
 
 
+def stop_after(manager: WorkerManager) -> Mock:
+    """A Mock for one of the manager's methods that requests a shutdown, as a
+    stop signal arriving while it runs does: monitor() then shuts down."""
+    manager.shutdown = Mock(  # type: ignore
+        side_effect=lambda: setattr(manager, "_shutting_down", True)
+    )
+    return Mock(side_effect=lambda *_, **__: setattr(manager, "_stop_requested", True))
+
+
 def test_manager_no_workers():
     message = "Cannot serve with no workers"
     with pytest.raises(RuntimeError, match=message):
@@ -130,7 +139,9 @@ def test_shutdown_signal_send_kill(
     manager = WorkerManager(1, fake_serve, {}, context, (Mock(), Mock()), {})
     assert manager._shutting_down is False
     manager.shutdown_signal(SIGINT, None)
-    assert manager._shutting_down is True
+    # The signal only requests the shutdown: the main thread begins it.
+    process_os_mock.kill.assert_not_called()
+    assert manager._shutdown_if_requested() is True
     process_os_mock.kill.assert_called_once_with(1234, SIGINT)
     manager.shutdown_signal(SIGINT, None)
     manager_os_mock.getpgid.assert_called_once_with(1234)
@@ -187,11 +198,11 @@ def test_monitor_all(zero_downtime):
         if zero_downtime
         else "__ALL_PROCESSES__:"
     )
-    sub.recv.side_effect = [incoming, ""]
+    sub.recv.side_effect = [incoming]
     context = Mock()
     context.Process.side_effect = [p1, p2]
     manager = WorkerManager(2, fake_serve, {}, context, (Mock(), sub), {})
-    manager.restart = Mock()  # type: ignore
+    manager.restart = stop_after(manager)  # type: ignore
     manager.wait_for_ack = Mock()  # type: ignore
     manager.monitor()
 
@@ -217,11 +228,11 @@ def test_monitor_all_with_files(zero_downtime):
         if zero_downtime
         else "__ALL_PROCESSES__:foo,bar"
     )
-    sub.recv.side_effect = [incoming, ""]
+    sub.recv.side_effect = [incoming]
     context = Mock()
     context.Process.side_effect = [p1, p2]
     manager = WorkerManager(2, fake_serve, {}, context, (Mock(), sub), {})
-    manager.restart = Mock()  # type: ignore
+    manager.restart = stop_after(manager)  # type: ignore
     manager.wait_for_ack = Mock()  # type: ignore
     manager.monitor()
 
@@ -248,11 +259,11 @@ def test_monitor_one_process(zero_downtime):
         if zero_downtime
         else f"{p1.name}:foo,bar"
     )
-    sub.recv.side_effect = [incoming, ""]
+    sub.recv.side_effect = [incoming]
     context = Mock()
     context.Process.side_effect = [p1, p2]
     manager = WorkerManager(2, fake_serve, {}, context, (Mock(), sub), {})
-    manager.restart = Mock()  # type: ignore
+    manager.restart = stop_after(manager)  # type: ignore
     manager.wait_for_ack = Mock()  # type: ignore
     manager.monitor()
 
@@ -274,8 +285,74 @@ def test_shutdown_signal():
     manager.shutdown = Mock()  # type: ignore
 
     manager.shutdown_signal(SIGINT, None)
-    pub.send.assert_called_with(None)
+    # Only a request: no message, nothing stopped from the handler.
+    pub.send.assert_not_called()
+    manager.shutdown.assert_not_called()
+    manager._shutdown_if_requested()
     manager.shutdown.assert_called_once_with()
+
+
+@patch("oldman_server.worker.process.os")
+def test_a_stop_signal_while_a_restart_is_handled_stops_the_new_process(process_os_mock):
+    # The signal comes while the main thread restarts a worker: the process
+    # the restart starts is stopped too, and the messages after it (here a
+    # scale-up) create no process.
+    old, new = Mock(pid=1), Mock(pid=2)
+    context = Mock()
+    context.Process.side_effect = [old, new]
+    sub = Mock()
+    sub.recv.side_effect = ["Oldman-Server-0-0", "__SCALE__:3"]
+    manager = WorkerManager(1, fake_serve, {}, context, (Mock(), sub), {})
+    manager.wait_for_ack = Mock()  # type: ignore
+    restart = manager.restart
+
+    def restart_with_a_stop_signal(**kwargs):
+        manager.shutdown_signal(SIGTERM, None)
+        restart(**kwargs)
+
+    manager.restart = restart_with_a_stop_signal  # type: ignore
+
+    manager.monitor()
+
+    old.terminate.assert_called_once_with()  # by the restart
+    new.start.assert_called_once_with()
+    process_os_mock.kill.assert_called_once_with(2, SIGINT)  # by the shutdown
+    assert context.Process.call_count == 2  # no scale-up after the stop
+    assert manager.num_server == 1
+
+
+@patch("oldman_server.worker.process.os")
+def test_no_process_is_started_after_a_stop_signal(process_os_mock):
+    process = Mock(pid=None)
+    context = Mock()
+    context.Process.return_value = process
+    manager = WorkerManager(2, fake_serve, {}, context, (Mock(), Mock()), {})
+    manager.shutdown_signal(SIGTERM, None)
+    manager.start()
+    process.start.assert_not_called()
+
+
+@patch("oldman_server.worker.process.os")
+def test_shutdown_stops_a_zero_downtime_restart_s_previous_process(process_os_mock, monkeypatch):
+    # The restart keeps the previous process until the new one acknowledges;
+    # a shutdown meanwhile stops it, and the restart's thread then leaves it.
+    old, new = Mock(pid=1), Mock(pid=2)
+    context = Mock()
+    context.Process.side_effect = [old, new]
+    manager = WorkerManager(1, fake_serve, {}, context, (Mock(), Mock()), {})
+    waiting = []
+    monkeypatch.setattr(threading.Thread, "start", lambda thread: waiting.append(thread))
+    (process,) = manager.processes
+    process.restart(restart_order=RestartOrder.STARTUP_FIRST)
+    old.terminate.assert_not_called()
+
+    manager.shutdown()
+
+    old.terminate.assert_called_once_with()
+    process_os_mock.kill.assert_called_once_with(2, SIGINT)
+    (thread,) = waiting
+    thread.run()  # returns at once: the shutdown took the previous process
+    old.terminate.assert_called_once_with()
 
 
 class Slow:
@@ -317,7 +394,9 @@ def test_a_shutdown_signal_during_a_shared_state_call_leaves_it_alone(process_os
         finally:
             timer.join()
             signal.signal(SIGTERM, previous)
-        assert manager._shutting_down
+        # The handler only requested the shutdown; the main thread begins it.
+        process_os_mock.kill.assert_not_called()
+        assert manager._shutdown_if_requested()
         assert state[name]["state"] == "TERMINATED"
         process_os_mock.kill.assert_called_once_with(1234, SIGINT)
     finally:

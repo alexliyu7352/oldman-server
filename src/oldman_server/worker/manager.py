@@ -11,7 +11,7 @@ from multiprocessing.context import BaseContext
 from random import choice
 from signal import SIGINT, SIGTERM, Signals
 from signal import signal as signal_func
-from threading import Thread
+from time import monotonic
 from typing import Any, Callable
 
 from oldman_server.compat import OS_IS_WINDOWS
@@ -80,6 +80,9 @@ class WorkerManager:
         self.worker_state = worker_state
         self.worker_state[self.MAIN_NAME] = {"pid": self.pid}
         self._shutting_down = False
+        # Set by a stop signal; the main thread begins the shutdown at its
+        # next monitoring step (_shutdown_if_requested).
+        self._stop_requested = False
         self._serve = serve
         self._server_settings = server_settings
         self._server_count = count()
@@ -211,12 +214,14 @@ class WorkerManager:
         self.cleanup()
 
     def start(self):
-        """Start the worker processes."""
+        """Start the worker processes: none once a stop was requested."""
         for worker in self.workers:
             for process in worker.processes:
                 if not worker.auto_start:
                     process.set_state(ProcessState.NONE, True)
                     continue
+                if self._stop_requested:
+                    return
                 process.start()
 
     def join(self):
@@ -242,9 +247,11 @@ class WorkerManager:
                 process.terminate()
 
     def cleanup(self):
-        """Cleanup the worker processes."""
+        """Cleanup the worker processes, waiting up to 10 s in all for them
+        to end (a worker still starting stops once its start is complete)."""
+        deadline = monotonic() + 10
         for process in self.processes:
-            process.exit()
+            process.exit(max(0.0, deadline - monotonic()))
 
     def restart(
         self,
@@ -303,7 +310,7 @@ class WorkerManager:
             ServerKilled: Raised when a worker fails to come online.
         """
         self.wait_for_ack()
-        while True:
+        while not self._shutdown_if_requested():
             try:
                 cycle = self._poll_monitor()
                 if cycle is MonitorCycle.BREAK:
@@ -327,14 +334,10 @@ class WorkerManager:
             "https://sanic.dev/en/guide/deployment/manager.html#worker-ack."
         )
         while not self._all_workers_ack():
+            if self._shutdown_if_requested():
+                return
             if self.monitor_subscriber.poll(0.1):
                 monitor_msg = self.monitor_subscriber.recv()
-                if not monitor_msg:
-                    # The shutdown signal (shutdown_signal sends None): left
-                    # for monitor()'s loop, which stops on it. Waiting on
-                    # would put it back and read it again forever.
-                    self.monitor_publisher.send(monitor_msg)
-                    return
                 if monitor_msg not in ("__TERMINATE_EARLY__", "__STARTUP_FAILED__"):
                     self.monitor_publisher.send(monitor_msg)
                     continue
@@ -415,30 +418,40 @@ class WorkerManager:
         raise ServerKilled
 
     def shutdown_signal(self, signal, frame):
-        """Handle the shutdown signal."""
-        if self._shutting_down:
+        """Handle a stop signal: request the shutdown, which the main thread
+        begins at its next monitoring step. A second signal kills the
+        workers."""
+        if self._stop_requested or self._shutting_down:
             logger.info("Shutdown interrupted. Killing.")
             with suppress(ServerKilled):
                 self.kill()
             return
 
         logger.info("Received signal %s. Shutting down.", Signals(signal).name)
-        self.monitor_publisher.send(None)
-        # From another thread: this handler may have interrupted the main
-        # thread inside a call to the shared worker state, whose reply a call
-        # of its own on that thread's connection would take (the state's
-        # proxies keep a connection per thread). Waited for at most a second,
-        # in case it needs a lock the interrupted thread holds (logging's).
-        stopping = Thread(target=self.shutdown, name="shutdown", daemon=True)
-        stopping.start()
-        stopping.join(1)
+        # Only the request. Stopping the processes from here would stop those
+        # that exist now, while the main thread this interrupted may be
+        # creating one (a restart, scaling, a managed process) that nothing
+        # would stop, and that join() then waits for forever. It may also be
+        # inside a call to the shared worker state, whose reply a call of the
+        # handler's own would take.
+        self._stop_requested = True
+
+    def _shutdown_if_requested(self) -> bool:
+        """Whether the manager is shutting down, beginning the shutdown a stop
+        signal requested. Called on the main thread between messages: the
+        shutdown comes after any restart, scaling or new process it was in
+        the middle of, covers every process that exists, and none is created
+        after it."""
+        if self._stop_requested and not self._shutting_down:
+            self.shutdown()
+        return self._shutting_down
 
     def shutdown(self):
-        """Shutdown the worker manager."""
-        for process in self.processes:
-            if process.is_alive():
-                process.terminate()
+        """Shutdown the worker manager: stop every process, including one a
+        zero-downtime restart keeps until its replacement acknowledges."""
         self._shutting_down = True
+        for process in self.processes:
+            process.terminate()
 
     def remove_worker(self, worker: Worker) -> None:
         if worker.tracked:
@@ -501,9 +514,7 @@ class WorkerManager:
         if self.monitor_subscriber.poll(0.1):
             message = self.monitor_subscriber.recv()
             logger.debug(f"Monitor message: {message}", extra={"verbosity": 2})
-            if not message:
-                return MonitorCycle.BREAK
-            elif message == "__TERMINATE__":
+            if message == "__TERMINATE__":
                 self._handle_terminate()
                 return MonitorCycle.BREAK
             elif message == "__STARTUP_FAILED__":
