@@ -55,6 +55,11 @@ Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& 
 
 bool iequals(std::string_view a, std::string_view b);
 
+// The reason phrases of the status lines append_* write, by status (100 to
+// 999): oldman_server.helpers.STATUS_CODES, given once before the server
+// serves. Statuses not given get an empty phrase.
+void set_reason_phrases(const std::vector<std::pair<int, std::string>>& phrases);
+
 // RFC 9110: these statuses never carry content or Content-Length framing here.
 inline bool status_has_body(int status) {
     return status >= 200 && status != 204 && status != 304;

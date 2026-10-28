@@ -1,6 +1,7 @@
 #include "http1.hh"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <charconv>
 #include <limits>
@@ -26,34 +27,14 @@ std::string_view trim(std::string_view value) {
     return value;
 }
 
+// The reason phrases of the status lines this host writes, by status: the
+// table oldman_server.helpers.STATUS_CODES gives the server at startup
+// (ServerConfig::reason_phrases), the one the asyncio server writes too. A
+// status without one gets an empty phrase, which RFC 9112 allows.
+std::array<std::string, 1000> reason_phrases;
+
 std::string_view reason(int status) {
-    switch (status) {
-    case 101: return "Switching Protocols";
-    case 200: return "OK"; case 201: return "Created"; case 202: return "Accepted";
-    case 203: return "Non-Authoritative Information"; case 204: return "No Content";
-    case 205: return "Reset Content"; case 206: return "Partial Content";
-    case 300: return "Multiple Choices"; case 301: return "Moved Permanently"; case 302: return "Found";
-    case 303: return "See Other"; case 304: return "Not Modified"; case 307: return "Temporary Redirect";
-    case 308: return "Permanent Redirect";
-    case 400: return "Bad Request"; case 401: return "Unauthorized"; case 402: return "Payment Required";
-    case 403: return "Forbidden"; case 404: return "Not Found"; case 405: return "Method Not Allowed";
-    case 406: return "Not Acceptable"; case 407: return "Proxy Authentication Required";
-    case 408: return "Request Timeout"; case 409: return "Conflict"; case 410: return "Gone";
-    case 411: return "Length Required"; case 412: return "Precondition Failed";
-    case 413: return "Content Too Large"; case 414: return "URI Too Long";
-    case 415: return "Unsupported Media Type"; case 416: return "Range Not Satisfiable";
-    case 417: return "Expectation Failed"; case 418: return "I'm a teapot";
-    case 421: return "Misdirected Request"; case 422: return "Unprocessable Content";
-    case 423: return "Locked"; case 424: return "Failed Dependency"; case 425: return "Too Early";
-    case 426: return "Upgrade Required"; case 428: return "Precondition Required";
-    case 429: return "Too Many Requests"; case 431: return "Request Header Fields Too Large";
-    case 451: return "Unavailable For Legal Reasons";
-    case 500: return "Internal Server Error"; case 501: return "Not Implemented";
-    case 502: return "Bad Gateway"; case 503: return "Service Unavailable";
-    case 504: return "Gateway Timeout"; case 505: return "HTTP Version Not Supported";
-    case 507: return "Insufficient Storage"; case 511: return "Network Authentication Required";
-    default: return {};
-    }
+    return reason_phrases[static_cast<size_t>(status)];
 }
 
 void append_status_line(std::string& out, int status) {
@@ -78,6 +59,12 @@ void append_length(std::string& out, size_t size) {
 }
 
 }  // namespace
+
+void set_reason_phrases(const std::vector<std::pair<int, std::string>>& phrases) {
+    for (auto& phrase : reason_phrases) phrase.clear();
+    for (const auto& [status, phrase] : phrases)
+        if (status >= 100 && status <= 999) reason_phrases[static_cast<size_t>(status)] = phrase;
+}
 
 bool iequals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;

@@ -1067,6 +1067,7 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("keep_alive", &probe::ServerConfig::keep_alive)
         .def_readwrite("keep_alive_timeout_ms", &probe::ServerConfig::keep_alive_timeout_ms)
         .def_readwrite("write_timeout_ms", &probe::ServerConfig::write_timeout_ms)
+        .def_readwrite("reason_phrases", &probe::ServerConfig::reason_phrases)
         .def_readwrite("body_window_bytes", &probe::ServerConfig::body_window_bytes)
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
         .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors)

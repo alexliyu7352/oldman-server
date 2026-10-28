@@ -96,6 +96,9 @@ struct ServerConfig {
     // Answered by the host, without Python: complete GET and HEAD requests
     // for these paths (the request target up to any query string).
     std::map<std::string, StoredResponse, std::less<>> fixed_responses;
+    // The reason phrase of each status (oldman_server.helpers.STATUS_CODES):
+    // the status lines this server writes take theirs from it.
+    std::vector<std::pair<int, std::string>> reason_phrases;
     // Python may let a shard keep a complete response to a GET (a cached
     // decision) and answer requests for the same target with it until it
     // expires (see Service::stored_response).

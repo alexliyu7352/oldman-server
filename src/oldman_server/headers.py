@@ -550,7 +550,7 @@ def parse_host(host: str) -> tuple[str | None, int | None]:
 
 
 _HTTP1_STATUSLINES = [
-    b"HTTP/1.1 %d %b\r\n" % (status, STATUS_CODES.get(status, b"UNKNOWN"))
+    b"HTTP/1.1 %d %b\r\n" % (status, STATUS_CODES.get(status, b""))
     for status in range(1000)
 ]
 

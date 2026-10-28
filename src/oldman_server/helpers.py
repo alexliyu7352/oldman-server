@@ -34,6 +34,10 @@ def json_text(obj) -> str:
     """json_dumps as str, for text output (error pages, JSON log lines)."""
     return json_dumps(obj).decode()
 
+# The reason phrase of each status (RFC 9110 section 15, and the IANA
+# registry for the WebDAV and other extension codes). The one table both servers
+# write status lines from: the native host takes it at startup
+# (ServerConfig.reason_phrases). A status not here gets an empty phrase.
 STATUS_CODES: dict[int, bytes] = {
     100: b"Continue",
     101: b"Switching Protocols",
@@ -70,15 +74,17 @@ STATUS_CODES: dict[int, bytes] = {
     410: b"Gone",
     411: b"Length Required",
     412: b"Precondition Failed",
-    413: b"Request Entity Too Large",
-    414: b"Request-URI Too Long",
+    413: b"Content Too Large",
+    414: b"URI Too Long",
     415: b"Unsupported Media Type",
-    416: b"Requested Range Not Satisfiable",
+    416: b"Range Not Satisfiable",
     417: b"Expectation Failed",
     418: b"I'm a teapot",
-    422: b"Unprocessable Entity",
+    421: b"Misdirected Request",
+    422: b"Unprocessable Content",
     423: b"Locked",
     424: b"Failed Dependency",
+    425: b"Too Early",
     426: b"Upgrade Required",
     428: b"Precondition Required",
     429: b"Too Many Requests",

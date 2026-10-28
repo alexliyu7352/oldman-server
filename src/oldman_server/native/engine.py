@@ -15,6 +15,8 @@ import time
 import inspect
 from types import CoroutineType
 
+from oldman_server.helpers import STATUS_CODES
+
 from . import _native
 
 
@@ -109,6 +111,9 @@ class ServerConfig:
     cors_policies: tuple = ()
     cors_default: int = 0
     cors_route_policies: bool = False
+    # The reason phrase of each status: oldman_server.helpers.STATUS_CODES,
+    # the table the asyncio server writes status lines from too.
+    reason_phrases: tuple = tuple((status, phrase.decode()) for status, phrase in STATUS_CODES.items())
 
 
 # Python owns this extension object; its plain native data outlives the request

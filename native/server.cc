@@ -299,6 +299,8 @@ struct Shared {
     std::atomic<uint64_t> decision_return_batches{0}, decision_return_items{0}, decision_return_posts{0};
     Shared(ServerConfig c, unsigned n, std::function<void()> wake, bool same)
         : config(std::move(c)), shard_count(n), notify(std::move(wake)), same_thread(same) {
+        // Before any shard runs: the status lines take their phrases from it.
+        http1::set_reason_phrases(config.reason_phrases);
         for (unsigned i=0; i<n; ++i) {
             auto x = std::make_unique<Counts>();
             x->limit_count = config.max_requests / n + (i < config.max_requests % n);
