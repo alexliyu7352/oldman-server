@@ -165,12 +165,12 @@ def test_native_cache_answers_repeats_until_it_expires():
     results, seen = run("native", CACHED)
     bodies = [result[2] for result in results]
     # The repeat is answered from the cache (no middleware); another query, a
-    # request with Cookie, one after expiry reach the handler, a HEAD the
-    # application (a 405: the route has no HEAD); a response with Set-Cookie
-    # is never kept.
-    assert bodies == ["news 1 -", "news 1 -", "news 2 2", "news 3 -", "", "news 4 -",
+    # request with Cookie, one after expiry reach the handler; a HEAD reaches
+    # it too (answered by the GET route, HTTP_AUTO_HEAD), the cache answering
+    # and keeping GET only; a response with Set-Cookie is never kept.
+    assert bodies == ["news 1 -", "news 1 -", "news 2 2", "news 3 -", "", "news 5 -",
                       "cookie 1", "cookie 2"]
-    assert results[4][0] == "HTTP/1.1 405 Method Not Allowed"
+    assert results[4][0] == "HTTP/1.1 200 OK"
     assert results[1][1] == results[0][1]
     assert len([entry for entry in seen if entry[0] == "middleware"]) == 7
 

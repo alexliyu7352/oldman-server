@@ -65,38 +65,35 @@ def test_method_not_allowed():
 
     @app.get("/")
     async def test_get(request: Request):
-        return response.json({"hello": "world"})
+        return json({"hello": "world"})
 
+    # HEAD is answered by the GET route (HTTP_AUTO_HEAD); Allow lists the
+    # automatic HEAD and OPTIONS too.
     request, response = app.test_client.head("/")
-    assert set(response.headers["Allow"].split(", ")) == {
-        "GET",
-    }
+    assert response.status == 200
+    assert "Allow" not in response.headers
 
     request, response = app.test_client.post("/")
     assert set(response.headers["Allow"].split(", ")) == {
         "GET",
+        "HEAD",
+        "OPTIONS",
     }
 
     app.router.reset()
 
     @app.post("/")
     async def test_post(request: Request):
-        return response.json({"hello": "world"})
+        return json({"hello": "world"})
 
     # The 405 is the app's own error page, as in production (the test client
     # no longer answers HEAD, PATCH, PUT and DELETE 405s with an empty body).
-    request, response = app.test_client.head("/")
-    assert response.status == 405
-    assert set(response.headers["Allow"].split(", ")) == {
-        "GET",
-        "POST",
-    }
-    assert response.content == b""
-
     request, response = app.test_client.patch("/")
     assert response.status == 405
     assert set(response.headers["Allow"].split(", ")) == {
         "GET",
+        "HEAD",
+        "OPTIONS",
         "POST",
     }
     assert "Method Not Allowed" in response.text

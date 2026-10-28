@@ -281,7 +281,8 @@ def test_the_flat_path_answers_the_same_with_and_without_sanic_finish(receiver, 
         assert left == right, request
     statuses = [result[0] if result else None for result in natively[:len(FINISHING)]]
     # /large is over the adapter's 2048-byte limit: the error handler answers.
-    assert statuses == [200, 200, 200, 200, 500, 204, 200, 500, 200, 404, 405, 405]
+    # HEAD /text is answered by its GET route (HTTP_AUTO_HEAD).
+    assert statuses == [200, 200, 200, 200, 500, 204, 200, 500, 200, 404, 405, 200]
     if middleware:  # it ran, on the route it applies to
         name = b"x-bp" if middleware == "route" else b"x-left"
         assert dict(natively[0][2]).get(name) and (middleware == "route") != bool(dict(natively[1][2]).get(name))

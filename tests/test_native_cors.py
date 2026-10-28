@@ -113,8 +113,10 @@ def test_the_host_answers_a_default_policy_preflight_itself():
         ["Vary", "Access-Control-Request-Headers"],
         ["Connection", "keep-alive"]], ""]
     # A preflight from another origin is an ordinary OPTIONS request: Python
-    # routes it (405: no OPTIONS route), with the default policy's Vary.
-    assert refused[0] == "HTTP/1.1 405 Method Not Allowed"
+    # answers it (204 and Allow: HTTP_AUTO_OPTIONS), with the default policy's
+    # Vary.
+    assert refused[0] == "HTTP/1.1 204 No Content"
+    assert header(refused, "allow") == ["OPTIONS, POST"]
     assert header(refused, "access-control-allow-origin") == []
     assert header(refused, "vary") == ["Origin"]
     assert seen == [["OPTIONS", "/items"]]

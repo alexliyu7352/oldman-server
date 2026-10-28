@@ -34,6 +34,15 @@ Each has a default in `DEFAULT_CONFIG`, so `app.config.NATIVE_*` can always be r
 | `NATIVE_REACTOR_BACKEND` | The shards' I/O: `epoll` (default; an empty string is the same) or `io_uring`. io_uring uses a second runtime in the wheel, built for io_uring (`liboldman_native_uring.so`, loaded only when used); when the system does not allow io_uring (the default seccomp profile of containers, `kernel.io_uring_disabled`, Linux before 5.10, a kernel that cannot allocate memory for the ring), epoll is used instead and a warning is logged. Both work in same-thread mode. Other values fail at startup (the former `linux-aio` has been removed) |
 | `NATIVE_WORKER_LISTEN` | An extra address each serving process listens on, with `{n}` replaced by the worker number (0 for a single process; n workers are numbered 0 to n−1, and a new worker after scaling down and up again takes the freed number, so each address and CPU group stays the same): a unix socket path (`"/run/app/{n}.sock"`, optionally with a `unix:` prefix, at most 63 bytes) or `host:port` (`"127.0.0.1:81{n:02d}"`, i.e. 8100, 8101, …). It lets a front proxy balance requests across the workers (see [Deployment](deployment.md)); the run's own address keeps serving. Not set by default |
 
+## Automatic HEAD and OPTIONS
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `HTTP_AUTO_HEAD` | `True` | When a route group has GET but no HEAD, a HEAD request is answered by that GET route (the same handler and middleware), without a body |
+| `HTTP_AUTO_OPTIONS` | `True` | When a path has routes but no OPTIONS, an OPTIONS request gets 204 with `Allow` (the path's methods, sorted), passing only through the application-level middleware |
+
+Neither registers routes of its own: routes registered for HEAD or OPTIONS take precedence, WebSocket routes have neither, and a CORS preflight from an allowed origin is answered before routing (see the next section). A 405's `Allow` lists the automatic HEAD and OPTIONS too. Set to `False`, only the registered methods are answered and the rest get 405.
+
 ## CORS
 
 Cross-origin resource sharing is collected at startup: the settings below are the application's default policy, and a route, static route, fixed response, blueprint, blueprint registration or blueprint group can set its own with `cors=` (`False` for none; `CORS(...)` (`from oldman_server import CORS`) takes the fields it leaves out from these settings). Once the route table is final, every policy is compiled into one table for the server, which appends the headers to every response it writes, according to the request's `Origin`: responses of handlers and error handlers, fixed responses, native cache hits and the overload 503 alike, without middleware and without running Python per request.

@@ -53,6 +53,7 @@ from oldman_server.cors import CORS, CorsTable
 from oldman_server.cors import compile as cors_compile
 from oldman_server.exceptions import (
     BadRequest,
+    MethodNotAllowed,
     OldmanServerException,
     ServerError,
     URLBuildError,
@@ -1206,6 +1207,10 @@ class OldmanServer(
         Raises:
             ServerError: response 500.
         """
+        if getattr(exception, "answer_options", False):
+            # Not an error: an OPTIONS request for a path with no OPTIONS
+            # route (HTTP_AUTO_OPTIONS, Router._automatic).
+            return await self._answer_options(request, exception, run_middleware)
         response = None
         if not getattr(exception, "__dispatched__", False):
             ...  # DO NOT REMOVE THIS LINE. IT IS NEEDED FOR TOUCHUP.
@@ -1329,6 +1334,54 @@ class OldmanServer(
                     "request": request,
                     "response": resp,
                 },
+            )
+            await response.eof()
+        else:
+            raise ServerError(
+                f"Invalid response type {response!r} (need HTTPResponse)"
+            )
+
+    async def _answer_options(
+        self,
+        request: Request,
+        exception: MethodNotAllowed,
+        run_middleware: bool,
+    ) -> None:
+        """204 with the path's Allow for an OPTIONS request no route has,
+        handled as a 405 is (the application's request and response
+        middleware, no handler) but without the error handler or the
+        exception signals."""
+        response = None
+        if run_middleware:
+            try:
+                response = await self._run_request_middleware(
+                    request, self.request_middleware
+                )
+            except Exception as e:
+                return await self.handle_exception(request, e, False)
+        if not response:
+            response = HTTPResponse(
+                status=204, headers={"Allow": ", ".join(exception.allowed_methods)}
+            )
+        try:
+            response = await request.respond(response)
+        except Exception as e:
+            return await self.handle_exception(request, e, False)
+        if isinstance(response, BaseHTTPResponse):
+            await self.dispatch(
+                "http.lifecycle.response",
+                inline=True,
+                context={"request": request, "response": response},
+                fail_not_found=False,
+            )
+            await response.send(end_stream=True)
+        elif isinstance(response, ResponseStream):
+            resp = await response(request)
+            await self.dispatch(
+                "http.lifecycle.response",
+                inline=True,
+                context={"request": request, "response": resp},
+                fail_not_found=False,
             )
             await response.eof()
         else:

@@ -34,6 +34,15 @@ Sanic 的设置照常生效，原生主机按下表执行：
 | `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前、内核分不出 ring 的内存），改用 epoll 并记一条警告。同线程模式两种都能用。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
 | `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀，最长 63 字节）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见[部署](deployment.md)）；运行本身的地址照常服务。默认不设 |
 
+## 自动 HEAD 与 OPTIONS
+
+| 设置 | 默认 | 含义 |
+|---|---|---|
+| `HTTP_AUTO_HEAD` | `True` | 路由组有 GET 而没有 HEAD 时，HEAD 请求由 GET 的那条路由回答（同样的 handler 与中间件），不送响应体 |
+| `HTTP_AUTO_OPTIONS` | `True` | 路径有路由而没有 OPTIONS 时，OPTIONS 请求得到 204 与 `Allow`（这条路径的方法，排好序），只经过应用级的中间件 |
+
+两者都不另外登记路由：显式登记的 HEAD、OPTIONS 路由优先，WebSocket 路由两者都没有，来源匹配的 CORS 预检在路由之前先回答（见下一节）。405 的 `Allow` 同样列出自动的 HEAD 与 OPTIONS。设为 `False` 则只回答登记了的方法，其余回 405。
+
 ## CORS
 
 跨域资源共享在启动时汇总：下面的设置是应用的默认策略，路由、静态文件、固定响应、蓝图、蓝图的注册与蓝图组可以用 `cors=` 设自己的（`False` 为不做；`CORS(...)`（`from oldman_server import CORS`）没给的字段取这些设置的值）。路由表定下之后，所有策略合成一张表交给服务器，服务器写出每个响应时按请求的 `Origin` 附加头：handler 与错误处理器的响应、固定响应、原生缓存命中、过载的 503 都有，不经过中间件，也不在每个请求上运行 Python。

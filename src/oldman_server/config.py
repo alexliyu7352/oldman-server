@@ -45,6 +45,10 @@ DEFAULT_CONFIG = {
     "FORWARDED_SECRET": None,  # nosec B105
     "GRACEFUL_SHUTDOWN_TIMEOUT": 15.0,
     "GRACEFUL_TCP_CLOSE_TIMEOUT": 5.0,
+    # HEAD answered by a path's GET route, OPTIONS by 204 and Allow, where no
+    # route has the method (Router._automatic).
+    "HTTP_AUTO_HEAD": True,
+    "HTTP_AUTO_OPTIONS": True,
     "KEEP_ALIVE_TIMEOUT": 120,
     "KEEP_ALIVE": True,
     "LOCALHOST": "localhost",
@@ -164,6 +168,8 @@ class Config(dict, metaclass=DescriptorMeta):
     FORWARDED_SECRET: str | None
     GRACEFUL_SHUTDOWN_TIMEOUT: float
     GRACEFUL_TCP_CLOSE_TIMEOUT: float
+    HTTP_AUTO_HEAD: bool
+    HTTP_AUTO_OPTIONS: bool
     KEEP_ALIVE_TIMEOUT: int
     KEEP_ALIVE: bool
     LOCALHOST: str

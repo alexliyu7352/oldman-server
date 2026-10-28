@@ -37,22 +37,84 @@ class Router(BaseRouter):
     def _get(
         self, path: str, method: str, host: str | None
     ) -> tuple[Route, RouteHandler, dict[str, Any]]:
+        extra = {"host": host} if host else None
         try:
-            return self.resolve(
-                path=path,
-                method=method,
-                extra={"host": host} if host else None,
-            )
+            return self.resolve(path=path, method=method, extra=extra)
         except RoutingNotFound as e:
-            raise NotFound(f"Requested URL {e.path} not found") from None
+            # A group whose routes require a host checks the method with the
+            # host, so a method it lacks reads as no route at all.
+            config = self.ctx.app.config
+            automatic = (method == "HEAD" and config.HTTP_AUTO_HEAD) or (
+                method == "OPTIONS" and config.HTTP_AUTO_OPTIONS
+            )
+            allowed = self._methods_at(path, extra) if automatic else None
+            if not allowed:
+                raise NotFound(f"Requested URL {e.path} not found") from None
         except NoMethod as e:
-            raise MethodNotAllowed(
-                f"Method {method} not allowed for URL {path}",
-                method=method,
-                allowed_methods=tuple(e.allowed_methods)
-                if e.allowed_methods
-                else None,
-            ) from None
+            # A dynamic group of several routes does not say which methods
+            # it has.
+            allowed = frozenset(map(str, e.allowed_methods or ())) or (
+                self._methods_at(path, extra)
+            )
+        # HEAD and OPTIONS are methods of the same resource (RFC 9110 9.3.2,
+        # 9.3.7), not routes of their own: only here, where the method was not
+        # found, do they come in, so other requests route as before.
+        return self._automatic(path, method, extra, allowed)
+
+    def _automatic(
+        self,
+        path: str,
+        method: str,
+        extra: dict[str, str] | None,
+        allowed: frozenset[str],
+    ) -> tuple[Route, RouteHandler, dict[str, Any]]:
+        """The GET route itself for a HEAD request (HTTP_AUTO_HEAD); otherwise
+        MethodNotAllowed, its Allow listing the automatic HEAD and OPTIONS
+        too, marked for OldmanServer.handle_exception to answer an OPTIONS
+        request with 204 and that Allow (HTTP_AUTO_OPTIONS)."""
+        config = self.ctx.app.config
+        get = None
+        websocket = False
+        if "GET" in allowed:
+            try:
+                get = self.resolve(path=path, method="GET", extra=extra)
+            except (RoutingNotFound, NoMethod):
+                pass  # the GET route of another host
+            else:
+                # A WebSocket route has no HEAD, nor an automatic OPTIONS.
+                websocket = hasattr(get[1], "is_websocket")
+        auto_head = get is not None and not websocket and config.HTTP_AUTO_HEAD
+        if auto_head and method == "HEAD":
+            return get
+        auto_options = config.HTTP_AUTO_OPTIONS and bool(
+            allowed - {"GET"} if websocket else allowed
+        )
+        methods = set(allowed)
+        if auto_head:
+            methods.add("HEAD")
+        if auto_options:
+            methods.add("OPTIONS")
+        error = MethodNotAllowed(
+            f"Method {method} not allowed for URL {path}",
+            method=method,
+            allowed_methods=tuple(sorted(methods)) if methods else None,
+        )
+        error.answer_options = auto_options and method == "OPTIONS"
+        raise error
+
+    def _methods_at(
+        self, path: str, extra: dict[str, str] | None
+    ) -> frozenset[str]:
+        """The methods a request for `path` (and host) resolves with: only
+        on the way to an error, when routing did not say."""
+        methods = []
+        for candidate in self.ALLOWED_METHODS:
+            try:
+                self.resolve(path=path, method=candidate, extra=extra)
+            except (RoutingNotFound, NoMethod):
+                continue
+            methods.append(str(candidate))
+        return frozenset(methods)
 
     @lru_cache(maxsize=ROUTER_CACHE_SIZE)
     def get(  # type: ignore
