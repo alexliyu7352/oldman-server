@@ -583,7 +583,10 @@ def test_a_directory_is_answered_by_the_directory_handler(app, static_file_direc
     assert response.text == error_text
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="chmod(0) leaves a file readable on Windows and to root",
+)
 def test_an_unreadable_file_is_forbidden(app, tmp_path, caplog):
     secret = tmp_path / "secret.txt"
     secret.write_text("secret")
