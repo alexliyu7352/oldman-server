@@ -34,6 +34,37 @@ Sanic 的设置照常生效，原生主机按下表执行：
 | `NATIVE_REACTOR_BACKEND` | shard 的 I/O：`epoll`（默认，空字符串相同）或 `io_uring`。io_uring 用 wheel 里另一份按 io_uring 构建的运行时（`liboldman_native_uring.so`，用到时才载入）；系统不允许 io_uring 时（容器默认的 seccomp 配置、`kernel.io_uring_disabled`、Linux 5.10 以前、内核分不出 ring 的内存），改用 epoll 并记一条警告。同线程模式两种都能用。其他取值启动时报错（原来的 `linux-aio` 已去掉） |
 | `NATIVE_WORKER_LISTEN` | 每个服务进程另外监听的地址，`{n}` 换成 worker 编号（单进程为 0；n 个 worker 的编号是 0 到 n−1，缩减后再扩容的新 worker 取空出的编号，所以各地址与 CPU 组不变）：unix socket 路径（`"/run/app/{n}.sock"`，也可加 `unix:` 前缀，最长 63 字节）或 `host:port`（`"127.0.0.1:81{n:02d}"` 即 8100、8101……）。供前端代理按请求均衡各 worker（见[部署](deployment.md)）；运行本身的地址照常服务。默认不设 |
 
+## CORS
+
+跨域资源共享在启动时汇总：下面的设置是应用的默认策略，路由、静态文件、固定响应、蓝图、蓝图的注册与蓝图组可以用 `cors=` 设自己的（`False` 为不做；`CORS(...)`（`from oldman_server import CORS`）没给的字段取这些设置的值）。路由表定下之后，所有策略合成一张表交给服务器，服务器写出每个响应时按请求的 `Origin` 附加头：handler 与错误处理器的响应、固定响应、原生缓存命中、过载的 503 都有，不经过中间件，也不在每个请求上运行 Python。
+
+| 设置 | 默认 | 含义 |
+|---|---|---|
+| `CORS_ORIGINS` | 不设（关闭） | `"*"`，或允许的来源（列表，或逗号分隔的字符串，如 `"https://a.example, https://*.b.example"`；`https://*.b.example` 匹配 b.example 的任意子域，不含它本身） |
+| `CORS_ALLOW_CREDENTIALS` | `False` | 发 `Access-Control-Allow-Credentials: true`。这时任何 CORS 头都不发 `*`：来源与 `CORS_EXPOSE_HEADERS`、`CORS_ALLOW_METHODS` 要写出名字（`*` 在启动时报错），`CORS_ALLOW_HEADERS` 的 `*` 按回显处理 |
+| `CORS_ALLOW_METHODS` | `GET, HEAD, POST, PUT, PATCH, DELETE` | 预检回答的 `Access-Control-Allow-Methods` |
+| `CORS_ALLOW_HEADERS` | 不设 | 预检回答的 `Access-Control-Allow-Headers`；不设时回显请求的 `Access-Control-Request-Headers` |
+| `CORS_EXPOSE_HEADERS` | 不设 | `Access-Control-Expose-Headers` |
+| `CORS_MAX_AGE` | `600` | 预检回答的 `Access-Control-Max-Age`（秒），`0` 不发 |
+
+- 允许的来源得到回显的 `Access-Control-Allow-Origin`，不允许的不得到；按来源回显的策略在每个响应上都加 `Vary: Origin`（请求没带 `Origin` 也加，共享缓存因此按来源分开保存）。`"*"` 在每个响应上都发 `Access-Control-Allow-Origin: *`，不加 `Vary`。
+- 预检（`OPTIONS` 带 `Origin` 与 `Access-Control-Request-Method`）来自允许的来源时，在路由之前回答 204，不运行中间件与 handler。只有默认策略时对任何路径都这样回答；有路由级策略时按 `Access-Control-Request-Method` 会到达的路由取策略。来源不允许、或路由不做 CORS 时，按普通的 `OPTIONS` 请求处理。
+- 自己写 CORS 头的路由设 `cors=False`，服务器就不再附加。
+- 设置不合法（凭据与 `"*"`、来源格式不对）在应用启动时报 `ValueError`；WebSocket 路由不接受 `cors=`。
+
+```python
+from oldman_server import CORS, OldmanServer
+from oldman_server.response import json
+
+app = OldmanServer("api")
+app.config.CORS_ORIGINS = "https://app.example"
+
+
+@app.get("/reports", cors=CORS(credentials=True))
+async def reports(request):
+    return json([])
+```
+
 ## 内存分配器
 
 Python 与原生主机的内存分配大多经过 glibc 的 malloc，换成 tcmalloc 后，在性能对照用的机器上，服务端每请求 CPU 少约 7–11%（小 JSON 单进程 23.1 → 20.6 µs；jemalloc、mimalloc 介于两者之间，见[性能对照](benchmarks.md#内存分配器)）。用 `LD_PRELOAD` 载入即可，worker 进程随之继承：

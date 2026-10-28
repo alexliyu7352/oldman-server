@@ -51,7 +51,7 @@ if __name__ == "__main__":
 
 Routing, middleware, blueprints and signals work as in Sanic; see the [Sanic documentation](https://sanic.dev/). The names differ: the application class is `OldmanServer`, the environment prefix for settings is `OLDMAN_SERVER_`, and the loggers are `oldman_server.*`. The other differences are listed in [Differences from Sanic](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/differences.md).
 
-This package is only the server and the core framework on the request path. Templates, CORS, automatic HEAD / OPTIONS, OpenAPI, dependency injection and worker health monitoring (which Sanic gets from sanic-ext) are not included; a framework on top, such as oldman, or the application provides them.
+This package is only the server and the core framework on the request path. CORS is built in and applied by the server itself, configured at startup ([Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md#cors)). Templates, automatic HEAD / OPTIONS, OpenAPI, dependency injection and worker health monitoring (which Sanic gets from sanic-ext) are not included; a framework on top, such as oldman, or the application provides them.
 
 ## Documentation
 

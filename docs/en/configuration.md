@@ -34,6 +34,37 @@ Each has a default in `DEFAULT_CONFIG`, so `app.config.NATIVE_*` can always be r
 | `NATIVE_REACTOR_BACKEND` | The shards' I/O: `epoll` (default; an empty string is the same) or `io_uring`. io_uring uses a second runtime in the wheel, built for io_uring (`liboldman_native_uring.so`, loaded only when used); when the system does not allow io_uring (the default seccomp profile of containers, `kernel.io_uring_disabled`, Linux before 5.10, a kernel that cannot allocate memory for the ring), epoll is used instead and a warning is logged. Both work in same-thread mode. Other values fail at startup (the former `linux-aio` has been removed) |
 | `NATIVE_WORKER_LISTEN` | An extra address each serving process listens on, with `{n}` replaced by the worker number (0 for a single process; n workers are numbered 0 to n−1, and a new worker after scaling down and up again takes the freed number, so each address and CPU group stays the same): a unix socket path (`"/run/app/{n}.sock"`, optionally with a `unix:` prefix, at most 63 bytes) or `host:port` (`"127.0.0.1:81{n:02d}"`, i.e. 8100, 8101, …). It lets a front proxy balance requests across the workers (see [Deployment](deployment.md)); the run's own address keeps serving. Not set by default |
 
+## CORS
+
+Cross-origin resource sharing is collected at startup: the settings below are the application's default policy, and a route, static route, fixed response, blueprint, blueprint registration or blueprint group can set its own with `cors=` (`False` for none; `CORS(...)` (`from oldman_server import CORS`) takes the fields it leaves out from these settings). Once the route table is final, every policy is compiled into one table for the server, which appends the headers to every response it writes, according to the request's `Origin`: responses of handlers and error handlers, fixed responses, native cache hits and the overload 503 alike, without middleware and without running Python per request.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `CORS_ORIGINS` | Not set (off) | `"*"`, or the allowed origins (a list, or a comma-separated string such as `"https://a.example, https://*.b.example"`; `https://*.b.example` matches any subdomain of b.example, not b.example itself) |
+| `CORS_ALLOW_CREDENTIALS` | `False` | Sends `Access-Control-Allow-Credentials: true`. No CORS header then carries `*`: origins, `CORS_EXPOSE_HEADERS` and `CORS_ALLOW_METHODS` must name names (`*` fails at startup), and a `*` in `CORS_ALLOW_HEADERS` is echoed instead |
+| `CORS_ALLOW_METHODS` | `GET, HEAD, POST, PUT, PATCH, DELETE` | A preflight answer's `Access-Control-Allow-Methods` |
+| `CORS_ALLOW_HEADERS` | Not set | A preflight answer's `Access-Control-Allow-Headers`; not set, the request's `Access-Control-Request-Headers` are echoed |
+| `CORS_EXPOSE_HEADERS` | Not set | `Access-Control-Expose-Headers` |
+| `CORS_MAX_AGE` | `600` | A preflight answer's `Access-Control-Max-Age` in seconds; `0` sends none |
+
+- An allowed origin gets `Access-Control-Allow-Origin` echoed back, any other gets none; a policy that echoes origins adds `Vary: Origin` to every response (also without an `Origin` in the request, so that shared caches keep one answer per origin). `"*"` sends `Access-Control-Allow-Origin: *` on every response, without `Vary`.
+- A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) from an allowed origin is answered with 204 before routing, without middleware or handler. With the default policy only, that is so for any path; with route policies, the route that `Access-Control-Request-Method` would reach decides. From an origin that is not allowed, or for a route without CORS, it is an ordinary `OPTIONS` request.
+- A route that writes its own CORS headers sets `cors=False`, and the server adds none.
+- Invalid settings (credentials with `"*"`, a malformed origin) raise `ValueError` when the application starts; WebSocket routes take no `cors=`.
+
+```python
+from oldman_server import CORS, OldmanServer
+from oldman_server.response import json
+
+app = OldmanServer("api")
+app.config.CORS_ORIGINS = "https://app.example"
+
+
+@app.get("/reports", cors=CORS(credentials=True))
+async def reports(request):
+    return json([])
+```
+
 ## Memory allocator
 
 Most memory allocation in Python and the native host goes through glibc's malloc. With tcmalloc instead, on the machine used for the benchmarks, the server's CPU per request is about 7–11% lower (small JSON, single process, 23.1 → 20.6 µs; jemalloc and mimalloc fall between the two; see [Benchmarks](benchmarks.md#memory-allocator)). Load it with `LD_PRELOAD`; worker processes inherit it:

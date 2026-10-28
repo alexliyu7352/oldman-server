@@ -70,3 +70,7 @@ TLS 由前端代理（如 nginx）终止，本包不提供 TLS 与 HTTP/3（见[
 ### 原生微缓存
 
 `@native_cache(seconds)`（`from oldman_server.native import native_cache`，加在 handler 上、路由装饰器之下）。这个 handler 对 GET 的完整 200 响应，没有 Set-Cookie、Vary，Cache-Control 也允许共享缓存保存（没有 private、no-store、no-cache）时，原生主机保存 `seconds` 秒，期间同一请求目标（路径加查询字符串）的 GET 直接由它回答：不进 Python，所以中间件（包括认证）、信号、handler 都不运行，请求头也不看；带 Cookie 或 Authorization 的请求既不从缓存回答，响应也不保存。只适合公开内容。每个 shard（同线程模式即每个 worker 进程）各有一份，最多 1024 条、每条 1 MiB。asyncio 服务器忽略它。
+
+### CORS
+
+开了 CORS（[配置](configuration.md#cors)）时，原生主机写出的每个响应都按策略与请求的 `Origin` 附加 CORS 头，包括上面两种不经 Python 的回答与过载时它自己回的 503：固定响应用它自己的策略（`add_fixed_response(..., cors=...)`，不设即默认）；缓存保存的是不带 CORS 头的响应，命中时按这次请求的 `Origin` 附加，所以不同来源从同一条缓存各得到自己的 `Access-Control-Allow-Origin`，按来源回显的 `Vary: Origin` 也不妨碍缓存。只有默认策略时，来自允许来源的预检由原生主机在路由之前直接回答 204，不进 Python（计入 `stored_responses`）；有路由级策略时交给 Python，在路由之前按路由取策略回答。

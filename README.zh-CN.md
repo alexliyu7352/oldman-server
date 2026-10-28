@@ -51,7 +51,7 @@ if __name__ == "__main__":
 
 路由、中间件、蓝图、信号等用法与 Sanic 相同，见 [Sanic 的文档](https://sanic.dev/)。名称不同：应用类是 `OldmanServer`，配置环境变量前缀是 `OLDMAN_SERVER_`，日志名是 `oldman_server.*`；其他差异见[与 Sanic 的差异](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/differences.md)。
 
-本包只是服务器与请求路径上的核心框架：模板、CORS、自动 HEAD / OPTIONS、OpenAPI、依赖注入、worker 存活监视这类配套（Sanic 由 sanic-ext 提供）不在包里，由上层框架（如 oldman）或应用自己提供。
+本包只是服务器与请求路径上的核心框架。CORS 内置，在启动时配置、由服务器自己附加（见[配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md#cors)）；模板、自动 HEAD / OPTIONS、OpenAPI、依赖注入、worker 存活监视这类配套（Sanic 由 sanic-ext 提供）不在包里，由上层框架（如 oldman）或应用自己提供。
 
 ## 文档
 
