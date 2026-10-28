@@ -393,3 +393,36 @@ def test_invalid_def(handler):
 
     with pytest.raises(InvalidUsage):
         router.finalize()
+
+
+def test_ext_constraints_take_part_in_matching():
+    # A segment that does not meet a route's ext constraints is not that
+    # route: the router goes on to the others, and a miss names the path.
+    router = Router()
+    router.add("/docs/<file:ext=pdf>", Mock(return_value="pdf"))
+    router.add("/docs/<file:ext=txt|md>", Mock(return_value="text"))
+    router.add("/docs/<name>", Mock(return_value="name"))
+    router.add("/num/<file=int:ext>", Mock(return_value="int"))
+    router.add("/num/<file:ext>", Mock(return_value="any"))
+    router.finalize()
+
+    route, _, params = router.get("/docs/a.pdf", "BASE")
+    assert route.handler() == "pdf" and params == {"file": "a", "ext": "pdf"}
+    route, _, params = router.get("/docs/a.md", "BASE")
+    assert route.handler() == "text" and params == {"file": "a", "ext": "md"}
+    route, _, params = router.get("/docs/a.zip", "BASE")
+    assert route.handler() == "name" and params == {"name": "a.zip"}
+    route, _, params = router.get("/num/12.txt", "BASE")
+    assert route.handler() == "int" and params == {"file": 12, "ext": "txt"}
+    route, _, params = router.get("/num/ab.txt", "BASE")
+    assert route.handler() == "any" and params == {"file": "ab", "ext": "txt"}
+
+
+def test_ext_miss_names_the_path():
+    router = Router()
+    router.add("/images/<file:ext=png>", Mock())
+    router.finalize()
+
+    with pytest.raises(NotFound) as error:
+        router.get("/images/cat.jpg", "BASE")
+    assert error.value.path == "/images/cat.jpg"

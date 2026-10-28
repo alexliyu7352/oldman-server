@@ -307,7 +307,7 @@ class Route:
         include param keys since they have no impact on routing.
         """
         return tuple(
-            f"<__dynamic__:{self._params[idx].label}>"
+            f"<__dynamic__:{self._params[idx].segment_label}>"
             if idx in self._params
             else segment
             for idx, segment in enumerate(self.parts)

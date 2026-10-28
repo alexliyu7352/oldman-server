@@ -1290,3 +1290,35 @@ def test_unquote_is_the_route_own(app: OldmanServer):
     assert response.json == ["cat", "png"]
     _, response = app.test_client.get("/docs/my%20doc.txt")
     assert response.json == ["my doc", "txt"]
+
+
+def test_ext_constraints_select_the_route(app: OldmanServer):
+    """Routes that differ only in their ext constraints coexist; a segment
+    that meets none of them goes on to the other routes, and a 404 names the
+    requested path."""
+
+    @app.get("/docs/<file:ext=pdf>")
+    async def pdf(request, file, ext):
+        return text(f"pdf {file}")
+
+    @app.get("/docs/<file:ext=txt|md>")
+    async def plain(request, file, ext):
+        return text(f"text {file}.{ext}")
+
+    @app.get("/docs/<name>")
+    async def other(request, name):
+        return text(f"name {name}")
+
+    @app.get("/images/<file=int:ext=png>")
+    async def image(request, file, ext):
+        return json([file, ext])
+
+    for path, expected in (("/docs/a.pdf", "pdf a"), ("/docs/a.md", "text a.md"),
+                           ("/docs/a.zip", "name a.zip")):
+        _, response = app.test_client.get(path)
+        assert response.text == expected, path
+    _, response = app.test_client.get("/images/7.png")
+    assert response.json == [7, "png"]
+    _, response = app.test_client.get("/images/cat.png")
+    assert response.status == 404
+    assert "/images/cat.png" in response.text

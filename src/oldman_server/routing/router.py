@@ -400,6 +400,9 @@ class BaseRouter(ABC):
     def _render(
         self, do_compile: bool = True, do_optimize: bool = False
     ) -> None:
+        # The checks of constrained ext parameters the source calls
+        # (Node._ext_checks), collected as the tree renders.
+        self.ext_matchers: t.List[t.Callable[[t.Tuple[str, ...]], bool]] = []
         # Initial boilerplate for the function source
         src = [
             Line("def find_route(path, method, router, basket, extra):", 0),

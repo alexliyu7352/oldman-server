@@ -6,7 +6,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Pattern, Tuple, Type
 
-from oldman_server.routing.exceptions import InvalidUsage, NotFound
+from oldman_server.routing.exceptions import InvalidUsage
 
 
 def parse_date(d) -> date:
@@ -69,6 +69,12 @@ class ParamInfo:
         self.priority = priority
         self.ctx = SimpleNamespace()
 
+    @property
+    def segment_label(self) -> str:
+        """The label in the route's segments, which group routes: routes
+        whose segments are equal are the same route."""
+        return self.label
+
     def process(
         self,
         params: t.Dict[str, t.Any],
@@ -118,17 +124,43 @@ class ExtParamInfo(ParamInfo):
                 if not REGEX_ALLOWED_EXTENSION.match(extension):
                     raise InvalidUsage(f"Invalid extension: {extension}")
 
-    def process(self, params, value):
+    @property
+    def constrained(self) -> bool:
+        """Whether the declaration limits the extension or the filename's
+        type (<file=int:ext=jpg|png>), which then takes part in matching."""
+        return bool(self.ctx.allowed or self.ctx.cast)
+
+    @property
+    def segment_label(self) -> str:
+        # Routes that differ only in these limits are different routes.
+        if not self.constrained:
+            return self.label
+        cast = self.ctx.cast.__name__ if self.ctx.cast else ""
+        return f"{self.label}[{cast}]={'|'.join(self.ctx.allowed)}"
+
+    def _split(self, value):
         stop = -1 * (self.ctx.allowed_sub_count + 1)
-        filename = ".".join(value[:stop])
-        ext = ".".join(value[stop:])
-        if self.ctx.allowed and ext not in self.ctx.allowed:
-            raise NotFound(f"Invalid extension: {ext}")
+        return ".".join(value[:stop]), ".".join(value[stop:])
+
+    def matches(self, value) -> bool:
+        """Whether a segment split by ext() meets the declaration: the
+        generated matcher asks before it returns the route, so a segment
+        that does not goes on to the other routes."""
+        filename, ext = self._split(value)
+        if not filename or (self.ctx.allowed and ext not in self.ctx.allowed):
+            return False
         if self.ctx.cast:
             try:
-                filename = self.ctx.cast(filename)
+                self.ctx.cast(filename)
             except ValueError:
-                raise NotFound(f"Invalid filename: {filename}")
+                return False
+        return True
+
+    def process(self, params, value):
+        # The route was chosen only if matches() held for the value.
+        filename, ext = self._split(value)
+        if self.ctx.cast:
+            filename = self.ctx.cast(filename)
         params[self.name] = filename
         params["ext"] = ext
 

@@ -4,7 +4,7 @@ from logging import getLogger
 
 from .group import RouteGroup
 from .line import Line
-from .patterns import REGEX_PARAM_NAME, REGEX_PARAM_NAME_EXT
+from .patterns import REGEX_PARAM_NAME, REGEX_PARAM_NAME_EXT, ExtParamInfo
 
 
 logger = getLogger("oldman_server.root")
@@ -219,6 +219,19 @@ class Node:
             for group in sorted(self.groups, key=self._group_sorting):
                 group_bump = 0
 
+                # An ext parameter that limits the extension or the filename's
+                # type: a segment that does not meet it is not this route, so
+                # the matcher goes on to the next one instead of returning.
+                ext_checks = self._ext_checks(group)
+                if ext_checks:
+                    location.append(
+                        Line(
+                            f"if {' and '.join(ext_checks)}:",
+                            return_indent + group_bump,
+                        )
+                    )
+                    group_bump += 1
+
                 # If the route had some requirements, let's make sure we check
                 # them in the source
                 if group.requirements:
@@ -253,6 +266,21 @@ class Node:
 
     def add_child(self, child: "Node") -> None:
         self._children[child.part] = child
+
+    def _ext_checks(self, group) -> t.List[str]:
+        """The conditions the generated source tests for the group's
+        constrained ext parameters (ExtParamInfo.matches, through
+        router.ext_matchers)."""
+        checks = []
+        for idx, param in group.params.items():
+            if isinstance(param, ExtParamInfo) and param.constrained:
+                matchers = self.router.ext_matchers
+                checks.append(
+                    f"router.ext_matchers[{len(matchers)}]"
+                    f"(basket['__matches__'][{idx}])"
+                )
+                matchers.append(param.matches)
+        return checks
 
     def _inject_param_check(self, location, indent, idx):
         """
@@ -410,7 +438,13 @@ class Node:
             return type_ * -1
 
         segments = tuple(map(get_type, item.parts))
-        return segments
+        # Of groups that match the same segments, one whose ext parameters
+        # limit what they take is tried before one that takes any.
+        constrained = any(
+            isinstance(param, ExtParamInfo) and param.constrained
+            for param in item.params.values()
+        )
+        return (*segments, 0 if constrained else 1)
 
     @property
     def depth(self):
