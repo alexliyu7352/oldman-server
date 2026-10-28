@@ -166,3 +166,101 @@ def test_signal_server_lifecycle_exception(app: OldmanServer):
 
     assert isinstance(trigger, ServerError)
     assert str(trigger) == "test_before_server_start"
+
+
+def _custom_handler(signum, frame):  # pragma: no cover - never signalled
+    pass
+
+
+@pytest.fixture
+def custom_sigterm():
+    """A SIGTERM handler of the program's own, in place before a run."""
+    previous = signal.signal(signal.SIGTERM, _custom_handler)
+    yield
+    signal.signal(signal.SIGTERM, previous)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows: the Ctrl+C workaround")
+@pytest.mark.parametrize("register_sys_signals", (True, False))
+def test_a_run_hands_the_signal_handlers_back(app, custom_sigterm, register_sys_signals):
+    """A run installs its own SIGINT and SIGTERM handling (and ignores both
+    while it stops); when app.run() returns, the handlers in place before it
+    are back, those of the program's own included."""
+
+    @app.route("/hello")
+    async def hello_route(request):
+        return HTTPResponse()
+
+    app.listener("after_server_start")(stop)
+    before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+
+    app.run(HOST, PORT, single_process=True, register_sys_signals=register_sys_signals)
+
+    assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
+    assert before[1] is _custom_handler
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows: the Ctrl+C workaround")
+def test_a_test_client_call_hands_the_signal_handlers_back(app, custom_sigterm):
+    @app.route("/hello")
+    async def hello_route(request):
+        return HTTPResponse()
+
+    before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+    _, response = app.test_client.get("/hello")
+    assert response.status == 200
+    assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
+
+
+AFTER_A_RUN = """
+import os
+import signal
+import sys
+
+from oldman_server import OldmanServer
+from oldman_server.response import text
+
+app = OldmanServer("AfterARun")
+
+
+@app.get("/")
+async def index(request):
+    return text("ok")
+
+
+@app.after_server_start
+async def stop(app):
+    app.stop()
+
+
+if __name__ == "__main__":
+    workers = sys.argv[1]
+    options = {{"single_process": True}} if workers == "single" else {{"workers": int(workers)}}
+    app.run(port={port}, access_log=False, **options)
+    print("RUN ENDED", flush=True)
+    # The handler in place before the run is the default: SIGTERM ends the
+    # process (a run that kept its own ignored it, or sent it to a manager
+    # that no longer ran).
+    os.kill(os.getpid(), signal.SIGTERM)
+    print("STILL RUNNING", flush=True)
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.parametrize("workers", ("single", "1", "2"))
+def test_a_sigterm_after_a_run_ends_the_process(tmp_path, port, workers):
+    import subprocess
+    import sys
+
+    script = tmp_path / "after_a_run.py"
+    script.write_text(AFTER_A_RUN.format(port=port))
+    completed = subprocess.run(
+        [sys.executable, str(script), workers],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "RUN ENDED" in completed.stdout, completed.stdout + completed.stderr
+    assert "STILL RUNNING" not in completed.stdout
+    assert completed.returncode == -signal.SIGTERM, completed.stdout + completed.stderr

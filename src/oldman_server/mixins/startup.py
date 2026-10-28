@@ -14,7 +14,7 @@ from asyncio import (
 )
 from collections.abc import Mapping
 from contextlib import suppress
-from functools import partial
+from functools import partial, wraps
 from multiprocessing import (
     Pipe,
     get_context,
@@ -23,7 +23,10 @@ from multiprocessing import (
 )
 from multiprocessing.context import BaseContext
 from pathlib import Path
+from signal import SIGINT, SIGTERM, getsignal
+from signal import signal as signal_func
 import socket as socket_module
+import threading
 
 from socket import SHUT_RDWR, socket
 from time import sleep
@@ -87,6 +90,36 @@ def _main_process_stop(app: OldmanServer) -> list:
     """The main_process_stop listeners in the reverse of their registration,
     as every stop event runs: what was set up first is released last."""
     return list(reversed(app.listeners.get("main_process_stop", ())))
+
+
+def _restores_signal_handlers(serve):
+    """A run (serve, serve_single) hands SIGINT and SIGTERM back as it found
+    them when it ends, however it ends.
+
+    While it runs they are the run's: the server's stop (_setup_system_signals
+    in server.runners), ignored during the stop phases, or the worker
+    manager's shutdown. A process that goes on after app.run() returns (a
+    test session, a program that serves again, one with handlers of its own)
+    otherwise kept them: a later SIGTERM was ignored, or went to a manager
+    that no longer ran, and Ctrl+C did nothing. Only the main thread can set
+    a handler, and one not set from Python (getsignal None) cannot be put
+    back."""
+
+    @wraps(serve)
+    def run(*args, **kwargs):
+        saved = (
+            [(number, getsignal(number)) for number in (SIGINT, SIGTERM)]
+            if threading.current_thread() is threading.main_thread()
+            else []
+        )
+        try:
+            return serve(*args, **kwargs)
+        finally:
+            for number, handler in saved:
+                if handler is not None:
+                    signal_func(number, handler)
+
+    return run
 
 
 class StartupMixin(metaclass=AppMeta):
@@ -822,6 +855,7 @@ class StartupMixin(metaclass=AppMeta):
         return get_context()
 
     @classmethod
+    @_restores_signal_handlers
     def serve(
         cls,
         primary: OldmanServer | None = None,
@@ -1088,6 +1122,7 @@ class StartupMixin(metaclass=AppMeta):
             return []
 
     @classmethod
+    @_restores_signal_handlers
     def serve_single(cls, primary: OldmanServer | None = None) -> None:
         """Serve a single process of a Sanic application.
 
