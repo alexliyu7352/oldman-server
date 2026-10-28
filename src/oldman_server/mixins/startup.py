@@ -62,6 +62,7 @@ from oldman_server.server.socket import (
     remove_unix_socket,
     unix_socket_mode,
 )
+from oldman_server.worker import health as worker_health
 from oldman_server.worker.loader import AppLoader
 from oldman_server.worker.manager import WorkerManager
 from oldman_server.worker.multiplexer import WorkerMultiplexer
@@ -901,6 +902,10 @@ class StartupMixin(metaclass=AppMeta):
                 "need to run app.prepare(...)?"
             ) from None
 
+        # WORKER_HEALTH_TIMEOUT: refused here if malformed, before anything
+        # starts.
+        health_timeout = worker_health.timeout(primary.config)
+
         socks = []
         try:
             sync_manager = start_shared_state()
@@ -965,11 +970,18 @@ class StartupMixin(metaclass=AppMeta):
             kwargs["app_name"] = app.name
             kwargs["app_loader"] = app_loader
             kwargs["server_info"] = {}
+            health_slots = (
+                worker_health.table(cls._get_context())
+                if health_timeout
+                else None
+            )
             kwargs["passthru"] = {
                 "auto_reload": app.auto_reload,
                 "state": {
                     "verbosity": app.state.verbosity,
                     "mode": app.state.mode,
+                    "worker_health": health_slots,
+                    "worker_health_timeout": health_timeout,
                     **cls._native_worker_state(app),
                 },
                 "config": {
@@ -1003,6 +1015,11 @@ class StartupMixin(metaclass=AppMeta):
                     float(each.config.GRACEFUL_SHUTDOWN_TIMEOUT)
                     for each in (primary, *apps)
                 ) + 5,
+                health=(
+                    worker_health.Watch(health_slots, health_timeout)
+                    if health_slots is not None
+                    else None
+                ),
             )
             if cls.should_auto_reload():
                 reload_dirs: set[Path] = primary.state.reload_dirs.union(

@@ -43,6 +43,14 @@ Sanic 的设置照常生效，原生主机按下表执行：
 
 两者都不另外登记路由：显式登记的 HEAD、OPTIONS 路由优先，WebSocket 路由两者都没有，来源匹配的 CORS 预检在路由之前先回答（见下一节）。405 的 `Allow` 同样列出自动的 HEAD 与 OPTIONS。设为 `False` 则只回答登记了的方法，其余回 405。
 
+## worker 存活监视
+
+| 设置 | 默认 | 含义 |
+|---|---|---|
+| `WORKER_HEALTH_TIMEOUT` | 不设（不监视） | 秒数，至少 1：worker 的事件循环这么久没有心跳，worker manager 就重启它；不设或 `0` 不监视 |
+
+每个 worker 在自己的事件循环上每 `WORKER_HEALTH_TIMEOUT` ÷ 4 秒（至少 0.5 秒）把单调时钟写进主进程分配的共享内存。执行不让出的代码（同步的 IO、死循环、长时间的计算）阻塞事件循环时，心跳停止。worker manager 发现某个已确认启动的 worker 超过期限没有心跳，在 `oldman_server.root` 记一条 WARNING（worker 名与多久没有心跳），先让它把各线程的调用栈写到它自己的 stderr（faulthandler，信号 SIGUSR2），约 0.2 秒后以 SIGKILL 结束它，再经与 `app.m.restart()` 相同的路径启动替换的进程。不是优雅停止：它的事件循环已经阻塞超过期限，上面的请求都已停住，而有自己 shard 线程的 worker 还会继续接受连接却不再回答，所以立即结束它。扩容、重启后的 worker 确认启动之后自动受监视；启动中、重启中的 worker 不检查；服务开始停止之后不再重启任何进程。只监视 worker manager 管理的服务 worker：单进程运行没有 worker manager，不监视；`app.manager.manage()` 启动的进程也不在其内。原生主机与 asyncio 服务器的 worker 相同。
+
 ## CORS
 
 跨域资源共享在启动时汇总：下面的设置是应用的默认策略，路由、静态文件、固定响应、蓝图、蓝图的注册与蓝图组可以用 `cors=` 设自己的（`False` 为不做；`CORS(...)`（`from oldman_server import CORS`）没给的字段取这些设置的值）。路由表定下之后，所有策略合成一张表交给服务器，服务器写出每个响应时按请求的 `Origin` 附加头：handler 与错误处理器的响应、固定响应、原生缓存命中、过载的 503 都有，不经过中间件，也不在每个请求上运行 Python。

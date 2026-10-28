@@ -8,6 +8,8 @@
 
 多 worker 的服务在 unit 里设 `KillMode=mixed`：停止时 SIGTERM 只发给主进程，由主进程按顺序停止各 worker、等它们收尾后退出；主进程退出之后（或 `TimeoutStopSec` 到期时），systemd 再以 SIGKILL 结束剩下的进程。默认的 `control-group` 同时向每个进程发 SIGTERM：worker 照样只停止一次、照常收尾，但 `app.manager.manage()` 启动的进程等也同时各自停止，不再由主进程按顺序安排。`TimeoutStopSec`（默认 90 秒）要大于主进程强制结束 worker 的期限，即 2 × `GRACEFUL_SHUTDOWN_TIMEOUT` + 5 秒。
 
+要让事件循环被阻塞而不再应答的 worker 自动重启，设 `WORKER_HEALTH_TIMEOUT`（见[配置](configuration.md#worker-存活监视)）。
+
 ## 放在 nginx 之后
 
 多 worker 放在 nginx（或 OpenResty）之后时，推荐让每个 worker 另外监听自己的地址，由 nginx 按请求均衡：

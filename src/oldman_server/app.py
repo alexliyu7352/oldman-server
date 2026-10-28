@@ -86,6 +86,7 @@ from oldman_server.server.websockets.impl import ConnectionClosed
 from oldman_server.signals import Event, Signal, SignalRouter
 from oldman_server.touchup import TouchUp, TouchUpMeta
 from oldman_server.types.shared_ctx import SharedContext
+from oldman_server.worker.health import timeout as worker_health_timeout
 from oldman_server.worker.manager import WorkerManager
 
 
@@ -2362,6 +2363,7 @@ class OldmanServer(
         trusted = self.config.TRUSTED_PROXIES
         if trusted is not None:  # a malformed entry fails here, not per request
             trusted_networks(trusted_sources(trusted))
+        worker_health_timeout(self.config)  # malformed: fails here as well
 
         if self.state.is_debug and self.config.TOUCHUP is not True:
             self.config.TOUCHUP = False

@@ -43,6 +43,14 @@ Each has a default in `DEFAULT_CONFIG`, so `app.config.NATIVE_*` can always be r
 
 Neither registers routes of its own: routes registered for HEAD or OPTIONS take precedence, WebSocket routes have neither, and a CORS preflight from an allowed origin is answered before routing (see the next section). A 405's `Allow` lists the automatic HEAD and OPTIONS too. Set to `False`, only the registered methods are answered and the rest get 405.
 
+## Worker health
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `WORKER_HEALTH_TIMEOUT` | Unset (not watched) | Seconds, at least 1: when a worker's event loop gives no heartbeat for this long, the worker manager restarts it; unset or `0` watches none |
+
+Every worker writes the monotonic clock to shared memory the main process allocates, from its own event loop, every `WORKER_HEALTH_TIMEOUT` ÷ 4 seconds (at least 0.5 s). Code that does not yield (blocking I/O, an endless loop, a long computation) blocks the event loop and stops the heartbeat. When the worker manager finds an acknowledged worker silent past the timeout, it logs one WARNING in `oldman_server.root` (the worker's name and how long it has been silent) and has it write the stacks of its threads to its own stderr (faulthandler, signal SIGUSR2), kills it with SIGKILL about 0.2 s later, and starts its replacement through the same path as `app.m.restart()`. This is not a graceful stop: its event loop has been blocked longer than the timeout, every request on it is stalled, and a worker with shard threads of its own would keep accepting connections it never answers, so it is ended at once. Workers added by scaling and restarted workers are watched once they acknowledge their start; workers starting or restarting are not checked; nothing is restarted once the service has begun to stop. Only the server workers the worker manager runs are watched: a single-process run has no worker manager and is not watched, and processes started with `app.manager.manage()` are not included. Native host and asyncio server workers alike.
+
 ## CORS
 
 Cross-origin resource sharing is collected at startup: the settings below are the application's default policy, and a route, static route, fixed response, blueprint, blueprint registration or blueprint group can set its own with `cors=` (`False` for none; `CORS(...)` (`from oldman_server import CORS`) takes the fields it leaves out from these settings). Once the route table is final, every policy is compiled into one table for the server, which appends the headers to every response it writes, according to the request's `Origin`: responses of handlers and error handlers, fixed responses, native cache hits and the overload 503 alike, without middleware and without running Python per request.

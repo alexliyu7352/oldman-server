@@ -12,7 +12,7 @@ from random import choice
 from signal import SIGINT, SIGTERM, Signals
 from signal import signal as signal_func
 from time import monotonic, sleep
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from oldman_server.compat import OS_IS_WINDOWS
 from oldman_server.exceptions import ServerKilled
@@ -20,6 +20,9 @@ from oldman_server.log import error_logger, logger
 from oldman_server.worker.constants import RestartOrder
 from oldman_server.worker.process import ProcessState, Worker, WorkerProcess
 from oldman_server.worker.restarter import Restarter
+
+if TYPE_CHECKING:
+    from oldman_server.worker.health import Watch
 
 
 SIGKILL: int
@@ -71,6 +74,7 @@ class WorkerManager:
         monitor_pubsub: tuple[Connection[Any, Any], Connection[Any, Any]],
         worker_state: MutableMapping[str, Any],
         stop_timeout: float = 35.0,
+        health: Watch | None = None,
     ):
         self.num_server = number
         # How long cleanup() waits for the processes to stop before killing
@@ -90,6 +94,9 @@ class WorkerManager:
         self._stop_requested = False
         self._serve = serve
         self._server_settings = server_settings
+        # WORKER_HEALTH_TIMEOUT (oldman_server.worker.health): the heartbeat
+        # table the server workers write; None when it is off.
+        self.health = health
         self._server_count = count()
 
         if number == 0:
@@ -336,6 +343,7 @@ class WorkerManager:
                 elif cycle is MonitorCycle.CONTINUE:
                     continue
                 self._sync_states()
+                self._check_health()
                 self._cleanup_non_tracked_workers()
             except InterruptedError:
                 if not OS_IS_WINDOWS:
@@ -525,6 +533,46 @@ class WorkerManager:
                 state = "FAILED" if process.exitcode else "COMPLETED"
             if state and process.state.name != state:
                 process.set_state(ProcessState[state], True)
+
+    def _check_health(self) -> None:
+        """Kill every acknowledged server worker whose event loop has been
+        silent past WORKER_HEALTH_TIMEOUT, after it has written its threads'
+        stacks to its stderr, and start its replacement through the restart
+        path of app.m.restart(). Not a graceful stop: its loop has been blocked
+        longer than the timeout, every request on it is stalled, and with
+        shard threads of its own it would keep taking connections that it
+        never answers. Workers still starting or restarting are not checked,
+        and nothing is restarted once the shutdown has begun."""
+        watch = self.health
+        if watch is None or self._stop_requested or self._shutting_down:
+            return
+        now = monotonic()
+        for worker in list(self.transient.values()):
+            slot = worker.slot
+            if slot is None or slot >= len(watch.slots):
+                continue
+            for process in list(worker.processes):
+                if process.state is not ProcessState.ACKED or not process.is_alive():
+                    continue
+                silent = watch.silent_for(process.pid, slot, now)
+                if silent <= watch.seconds:
+                    continue
+                pid = process.pid
+                logger.warning(
+                    "%s [%s] has not answered for %.1fs (WORKER_HEALTH_TIMEOUT "
+                    "is %ss): killing it and starting a replacement",
+                    process.name, pid, silent, watch.seconds,
+                )
+                watch.forget(pid)
+                dumped = watch.dump_stack(pid)
+                process.kill_now()
+                logger.warning(
+                    "%s [%s] killed%s",
+                    process.name, pid,
+                    "; the stacks of its threads were written to its stderr"
+                    if dumped else "",
+                )
+                self.restart(process_names=[process.name])
 
     def _cleanup_non_tracked_workers(self) -> None:
         to_remove = [

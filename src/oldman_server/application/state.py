@@ -42,6 +42,10 @@ class ApplicationState:
     # Worker processes: the shared-memory table with which those sharing one
     # listening socket take turns accepting (oldman_server.native.accept).
     native_accept_counts: Any = field(default=None, repr=False)
+    # Server worker processes watched by WORKER_HEALTH_TIMEOUT: the heartbeat
+    # table in shared memory and the timeout (oldman_server.worker.health).
+    worker_health: Any = field(default=None, repr=False)
+    worker_health_timeout: float | None = field(default=None)
     fast: bool = field(default=False)
     host: str = field(default="")
     port: int = field(default=0)

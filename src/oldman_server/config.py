@@ -89,6 +89,10 @@ DEFAULT_CONFIG = {
     "WEBSOCKET_MAX_SIZE": 2**20,  # 1 MiB
     "WEBSOCKET_PING_INTERVAL": 20,
     "WEBSOCKET_PING_TIMEOUT": 20,
+    # Seconds a server worker may go without a heartbeat from its event loop
+    # before the worker manager restarts it (oldman_server.worker.health);
+    # None or 0: not watched.
+    "WORKER_HEALTH_TIMEOUT": None,
 }
 
 
@@ -204,6 +208,7 @@ class Config(dict, metaclass=DescriptorMeta):
     WEBSOCKET_MAX_SIZE: int
     WEBSOCKET_PING_INTERVAL: int
     WEBSOCKET_PING_TIMEOUT: int
+    WORKER_HEALTH_TIMEOUT: int | float | None
 
     def __init__(
         self,

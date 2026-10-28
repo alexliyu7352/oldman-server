@@ -20,6 +20,8 @@ def mock_app():
     app.state.workers = 1
     # serve() gives the worker manager its stop timeout from it.
     app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 15.0
+    # serve() reads WORKER_HEALTH_TIMEOUT to decide on the heartbeat table.
+    app.config.WORKER_HEALTH_TIMEOUT = None
     app.listeners = {"main_process_ready": []}
     app.state.server_info = [server_info]
     return app

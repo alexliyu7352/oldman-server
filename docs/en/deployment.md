@@ -8,6 +8,8 @@ This package serves plain HTTP/1.1 only, and a front proxy terminates TLS; proce
 
 For a service with several workers, set `KillMode=mixed` in the unit: a stop then sends SIGTERM to the main process only, which stops the workers in order, waits for them to finish and exits; once it has exited (or when `TimeoutStopSec` expires), systemd ends the processes left with SIGKILL. The default `control-group` sends SIGTERM to every process at once: the workers still stop once and finish as usual, but processes started with `app.manager.manage()` and the like also stop on their own at the same time, outside the main process's order. `TimeoutStopSec` (90 s by default) must be longer than the time after which the main process kills workers, 2 × `GRACEFUL_SHUTDOWN_TIMEOUT` + 5 s.
 
+To have a worker whose event loop is blocked and no longer answering restarted automatically, set `WORKER_HEALTH_TIMEOUT` (see [Configuration](configuration.md#worker-health)).
+
 ## Behind nginx
 
 With multiple workers behind nginx (or OpenResty), have each worker listen on an extra address of its own and let nginx balance the requests:

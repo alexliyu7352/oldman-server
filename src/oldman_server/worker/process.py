@@ -121,6 +121,16 @@ class WorkerProcess:
                 if process.is_alive():
                     os.kill(process.pid, SIGKILL)
 
+    def kill_now(self, timeout: float = 5.0) -> None:
+        """SIGKILL the current process and reap it (a worker the manager gave
+        up on): its restart then starts the replacement without stopping it
+        first."""
+        with suppress(AttributeError, ProcessLookupError, TypeError):
+            if self._current_process.is_alive():
+                os.kill(self._current_process.pid, SIGKILL)
+        with suppress(AssertionError, AttributeError):
+            self._current_process.join(timeout)
+
     def exit(self, timeout: float = 10.0):
         """Wait up to `timeout` seconds for the process (and the previous ones
         terminate() stopped) to end, then drop its shared state."""
@@ -179,6 +189,13 @@ class WorkerProcess:
         self.set_state(ProcessState.RESTARTING, force=True)
         if restart_order is RestartOrder.SHUTDOWN_FIRST:
             self._terminate_now()
+            # Kept until it ends: the shutdown waits for it and kills it if
+            # it does not stop (stopped(), kill()).
+            self._stopped_previous = [
+                process for process in self._stopped_previous if process.is_alive()
+            ]
+            if self._current_process.pid is not None:
+                self._stopped_previous.append(self._current_process)
         else:
             previous = self._current_process
             self._previous.add(previous)

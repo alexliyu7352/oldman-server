@@ -25,6 +25,7 @@ from oldman_server.logging.setup import setup_logging
 from oldman_server.models.server_types import Signal
 from oldman_server.native import native_server
 from oldman_server.native.accept import turn as accept_turn
+from oldman_server.worker.health import Heartbeat
 from oldman_server.native.cpus import worker_group
 from oldman_server.native.listen import worker_address
 from oldman_server.server.async_server import AsyncioServer
@@ -373,7 +374,7 @@ async def _after_start(app):
 
 
 def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid,
-                        stop=None):
+                        stop=None, heartbeat=None):
     """Start (after_server_start: `start()` gives its coroutine), serve until
     stopped, then stop: before_server_stop, the server's cleanup,
     after_server_stop.
@@ -427,6 +428,9 @@ def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid
         except BaseException as error:
             errors.append(error)
 
+    if heartbeat is not None:
+        # Through the stop as well: a worker draining its requests is alive.
+        heartbeat.stop()
     remove_unix_socket(unix)
     loop.close()
     server_logger.info("Worker complete [%s]", pid)
@@ -538,6 +542,7 @@ def _serve_native(
         server_logger.info("Worker complete [%s]", pid)
         return
     app.ack()
+    heartbeat = Heartbeat.start(loop, app)
     # A worker process: Python runs on its group's first CPU, apart from its
     # shards and the other workers.
     group = worker_group(app.config)
@@ -549,6 +554,8 @@ def _serve_native(
         close_sockets()
         error_logger.exception("Unable to start server", exc_info=True)
         _release_unstarted(loop, app)
+        if heartbeat is not None:
+            heartbeat.stop()
         raise  # a failed start: app.run() raises, a worker reports it
 
     def _cleanup():
@@ -578,6 +585,7 @@ def _serve_native(
         bound_unix,
         pid,
         stop,
+        heartbeat,
     )
 
 
@@ -675,12 +683,15 @@ def _serve_http_1(
         server_logger.info("Worker complete [%s]", pid)
         return
     app.ack()
+    heartbeat = Heartbeat.start(loop, app)
 
     try:
         http_server = _run_starting(loop, server_coroutine, stop)
     except BaseException:
         error_logger.exception("Unable to start server", exc_info=True)
         _release_unstarted(loop, app)
+        if heartbeat is not None:
+            heartbeat.stop()
         raise  # a failed start: app.run() raises, a worker reports it
 
     def _cleanup():
@@ -730,6 +741,7 @@ def _serve_http_1(
         unix,
         pid,
         stop,
+        heartbeat,
     )
 
 
