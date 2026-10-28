@@ -16,7 +16,6 @@ from collections.abc import Mapping
 from contextlib import suppress
 from functools import partial
 from multiprocessing import (
-    Manager,
     Pipe,
     get_context,
     get_start_method,
@@ -68,6 +67,7 @@ from oldman_server.worker.manager import WorkerManager
 from oldman_server.worker.multiplexer import WorkerMultiplexer
 from oldman_server.worker.reloader import Reloader
 from oldman_server.worker.serve import worker_serve
+from oldman_server.worker.state import start_shared_state
 
 
 if TYPE_CHECKING:
@@ -885,7 +885,7 @@ class StartupMixin(metaclass=AppMeta):
 
         socks = []
         try:
-            sync_manager = Manager()
+            sync_manager = start_shared_state()
         except EOFError:
             message = (
                 "The server could not start: worker process failed.\n\n"
@@ -978,6 +978,13 @@ class StartupMixin(metaclass=AppMeta):
                 cls._get_context(),
                 (monitor_pub, monitor_sub),
                 worker_state,
+                # As long as a worker's graceful stop can take: its requests,
+                # then its background tasks, each up to
+                # GRACEFUL_SHUTDOWN_TIMEOUT, and its stop listeners.
+                stop_timeout=2 * max(
+                    float(each.config.GRACEFUL_SHUTDOWN_TIMEOUT)
+                    for each in (primary, *apps)
+                ) + 5,
             )
             if cls.should_auto_reload():
                 reload_dirs: set[Path] = primary.state.reload_dirs.union(

@@ -1,8 +1,52 @@
 from __future__ import annotations
 
+import os
+import sys
+
 from collections.abc import ItemsView, Iterator, KeysView, Mapping, ValuesView
 from collections.abc import Mapping as MappingType
+from multiprocessing.managers import SyncManager
+from signal import SIG_IGN, SIGINT, SIGTERM, signal
 from typing import Any
+
+
+# prctl(2) option: the signal this process gets when its parent dies.
+PR_SET_PDEATHSIG = 1
+
+
+def start_shared_state() -> SyncManager:
+    """Start the process that holds the workers' shared state (the worker
+    manager's and the workers' state dict)."""
+    manager = SyncManager()
+    manager.start(_shared_state_process)
+    return manager
+
+
+def _shared_state_process() -> None:
+    """In the shared state's process: the main process stops it (shutdown()),
+    once the service has stopped; a stop signal meant for the service does
+    not. Ctrl+C reaches every process of the group and a systemd stop
+    (KillMode=control-group) every process of the unit: ended by it, this
+    process took the state with it while the main process and the workers
+    were still stopping, and each of their state calls failed. It ends with
+    the main process all the same (Linux), not left behind if that is
+    killed."""
+    signal(SIGINT, SIG_IGN)
+    signal(SIGTERM, SIG_IGN)
+    if not sys.platform.startswith("linux"):
+        return
+    import ctypes
+    import multiprocessing
+
+    from signal import SIGKILL
+
+    parent = multiprocessing.parent_process()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if parent is None or libc.prctl(PR_SET_PDEATHSIG, SIGKILL) != 0:
+        return
+    if os.getppid() != parent.pid:
+        # The parent died before the request took effect.
+        os._exit(1)
 
 
 class WorkerState(Mapping):

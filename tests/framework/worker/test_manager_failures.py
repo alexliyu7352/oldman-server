@@ -173,9 +173,14 @@ def test_a_worker_failing_after_it_acknowledged_ends_the_service(tmp_path):
 
 
 def test_a_shutdown_signal_while_workers_start_ends_the_service(tmp_path):
+    # The workers stop once their start is complete, which takes too long
+    # here: the main process kills them after its stop timeout (2 x
+    # GRACEFUL_SHUTDOWN_TIMEOUT + 5 s) instead of waiting for them.
     process = start(
         tmp_path,
         """
+        app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 0.5
+
         @app.before_server_start
         async def slow(app):
             print("worker starting", flush=True)
@@ -183,11 +188,13 @@ def test_a_shutdown_signal_while_workers_start_ends_the_service(tmp_path):
         """,
     )
     try:
-        read_until(process, b"worker starting")
+        read_until(process, b"worker starting", count=2)
         os.kill(process.pid, signal.SIGTERM)
         process.wait(timeout=15)
     finally:
-        finish(process)
+        text = finish(process)
+    assert "did not stop within 6.0s of the shutdown: killing it" in text, text
+    assert process.returncode == 0, text
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
@@ -274,6 +281,116 @@ def test_a_worker_stopped_while_it_starts_stops_once_started(tmp_path):
     assert "Traceback" not in text, text
     assert text.count("worker stopped") == 2, text
     assert process.returncode == 0, text
+
+
+@pytest.mark.parametrize("sequence", ["ctrl-c", "systemd"])
+def test_one_stop_reaching_a_starting_worker_twice_stops_it_once(tmp_path, sequence):
+    # Ctrl+C sends SIGINT to the whole process group, a systemd stop
+    # (KillMode=control-group) SIGTERM to every process; the main process
+    # then stops each worker as well. A worker counts that as one stop: it
+    # finishes starting, runs after_server_stop, and logs no error.
+    go = tmp_path / "go"
+    process = start(
+        tmp_path,
+        f"""
+        @app.before_server_start
+        async def wait_for_go(app):
+            print(f"worker starting {{os.getpid()}}", flush=True)
+            while not os.path.exists({str(go)!r}):
+                await asyncio.sleep(0.05)
+
+        @app.after_server_stop
+        async def stopped(app):
+            print(f"worker stopped {{os.getpid()}}", flush=True)
+        """,
+    )
+    try:
+        output = read_until(process, b"worker starting", count=2)
+        pids = [int(line.split()[-1]) for line in output.decode().splitlines()
+                if line.startswith("worker starting")]
+        signum = signal.SIGINT if sequence == "ctrl-c" else signal.SIGTERM
+        os.killpg(process.pid, signum)
+        time.sleep(0.5)  # the main process signals the workers meanwhile
+        for pid in pids:
+            os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+        assert not any(gone(pid, timeout=0) for pid in pids), "a worker stopped in the middle of its start"
+        go.touch()
+        text = output.decode(errors="replace") + finish(process)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    for pid in pids:
+        assert f"worker stopped {pid}" in text, text
+    assert "Traceback" not in text, text
+    assert "killing it" not in text, text
+    assert process.returncode == 0, text
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_worker_stuck_starting_is_killed_after_the_stop_timeout(tmp_path):
+    # A systemd stop (SIGTERM to every process) while a worker never
+    # finishes before_server_start: the main process kills it after its
+    # stop timeout, and nothing of the service is left.
+    process = start(
+        tmp_path,
+        """
+        app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 0.5
+
+        @app.before_server_start
+        async def stuck(app):
+            print("worker starting", flush=True)
+            await asyncio.Event().wait()
+        """,
+    )
+    try:
+        read_until(process, b"worker starting", count=2)
+        os.killpg(process.pid, signal.SIGTERM)
+        text = finish(process, timeout=20)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    assert text.count("killing it") == 2, text
+    assert process.returncode == 0, text
+    assert session_gone(process.pid), [describe(pid) for pid in session_processes(process.pid)]
+
+
+def test_a_single_process_stops_at_once_on_a_second_signal(tmp_path):
+    # Without a main process to escalate, a second signal during startup
+    # stops the process at once; after_server_stop still runs.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    (tmp_path / "app.py").write_text(APP + textwrap.dedent(
+        f"""
+        @app.before_server_start
+        async def stuck(app):
+            print("starting", flush=True)
+            await asyncio.Event().wait()
+
+        @app.after_server_stop
+        async def stopped(app):
+            print("stopped", flush=True)
+
+        if __name__ == "__main__":
+            app.run(host="127.0.0.1", port={port}, single_process=True, access_log=False)
+        """
+    ))
+    process = subprocess.Popen(
+        [sys.executable, "app.py"], cwd=tmp_path,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    try:
+        output = read_until(process, b"starting")
+        os.kill(process.pid, signal.SIGINT)
+        time.sleep(0.5)
+        assert process.poll() is None, "the first signal stopped the start"
+        os.kill(process.pid, signal.SIGINT)
+        text = output.decode(errors="replace") + finish(process, timeout=10)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+    assert "stopped" in text, text
 
 
 def test_workers_end_when_the_main_process_is_killed(tmp_path):

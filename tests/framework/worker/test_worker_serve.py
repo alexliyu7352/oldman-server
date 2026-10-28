@@ -18,6 +18,8 @@ def mock_app():
     server_info = Mock()
     server_info.settings = {"app": app}
     app.state.workers = 1
+    # serve() gives the worker manager its stop timeout from it.
+    app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 15.0
     app.listeners = {"main_process_ready": []}
     app.state.server_info = [server_info]
     return app

@@ -13,8 +13,16 @@ from threading import Thread
 from time import monotonic, sleep
 from typing import Any
 
+from oldman_server.compat import OS_IS_WINDOWS
 from oldman_server.log import Colors, logger
 from oldman_server.worker.constants import ProcessState, RestartOrder
+
+
+SIGKILL: int
+if not OS_IS_WINDOWS:
+    from signal import SIGKILL
+else:
+    SIGKILL = SIGINT  # os.kill terminates the process there
 
 
 def get_now():
@@ -99,13 +107,25 @@ class WorkerProcess:
         self.set_state(ProcessState.JOINED)
         self._current_process.join()
 
+    def stopped(self) -> bool:
+        """Whether the process, and the previous ones terminate() stopped,
+        have ended."""
+        return not self.is_alive() and not any(
+            previous.is_alive() for previous in self._stopped_previous
+        )
+
+    def kill(self):
+        """SIGKILL the process and the previous ones terminate() stopped."""
+        for process in (self._current_process, *self._stopped_previous):
+            with suppress(AttributeError, ProcessLookupError, TypeError):
+                if process.is_alive():
+                    os.kill(process.pid, SIGKILL)
+
     def exit(self, timeout: float = 10.0):
         """Wait up to `timeout` seconds for the process (and the previous ones
         terminate() stopped) to end, then drop its shared state."""
         deadline = monotonic() + timeout
-        while (self.is_alive() or any(
-                previous.is_alive() for previous in self._stopped_previous)) \
-                and monotonic() < deadline:
+        while not self.stopped() and monotonic() < deadline:
             sleep(0.1)
 
         if not self.is_alive():

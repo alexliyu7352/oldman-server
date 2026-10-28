@@ -11,7 +11,7 @@ from multiprocessing.context import BaseContext
 from random import choice
 from signal import SIGINT, SIGTERM, Signals
 from signal import signal as signal_func
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Callable
 
 from oldman_server.compat import OS_IS_WINDOWS
@@ -70,8 +70,13 @@ class WorkerManager:
         context: BaseContext,
         monitor_pubsub: tuple[Connection[Any, Any], Connection[Any, Any]],
         worker_state: MutableMapping[str, Any],
+        stop_timeout: float = 35.0,
     ):
         self.num_server = number
+        # How long cleanup() waits for the processes to stop before killing
+        # those still running: as long as a worker's graceful stop can take
+        # (serve() passes it from GRACEFUL_SHUTDOWN_TIMEOUT).
+        self.stop_timeout = stop_timeout
         self.context = context
         self.transient: dict[str, Worker] = {}
         self.durable: dict[str, Worker] = {}
@@ -247,11 +252,24 @@ class WorkerManager:
                 process.terminate()
 
     def cleanup(self):
-        """Cleanup the worker processes, waiting up to 10 s in all for them
-        to end (a worker still starting stops once its start is complete)."""
-        deadline = monotonic() + 10
-        for process in self.processes:
-            process.exit(max(0.0, deadline - monotonic()))
+        """Wait up to stop_timeout in all for the processes to end, kill
+        those still running (a worker stuck in its startup: a worker stops
+        once its start is complete), then drop their state."""
+        processes = list(self.processes)
+        deadline = monotonic() + self.stop_timeout
+        while monotonic() < deadline and not all(
+            process.stopped() for process in processes
+        ):
+            sleep(0.1)
+        for process in processes:
+            if not process.stopped():
+                error_logger.warning(
+                    "%s [%s] did not stop within %ss of the shutdown: killing it",
+                    process.name, process.pid, self.stop_timeout,
+                )
+                process.kill()
+        for process in processes:
+            process.exit(1.0)
 
     def restart(
         self,

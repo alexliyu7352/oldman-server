@@ -150,15 +150,25 @@ class _Stop:
     signal that arrives while it is not running (between the startup steps'
     run_until_complete calls and run_forever), and the process then never
     stopped. A signal during startup is kept until the start is complete (a
-    loop stopped in the middle of a startup step fails that step); a second
-    one stops at once.
+    loop stopped in the middle of a startup step fails that step).
+
+    A later signal stops at once only in a process of its own (`escalates`).
+    One user action reaches a worker the main process manages twice: Ctrl+C
+    sends SIGINT to the whole process group, a systemd stop SIGTERM to every
+    process of the unit, and the main process then stops each worker too.
+    There the main process escalates (its own second signal, or its stop
+    timeout, kills the workers), and a worker stops once.
     """
 
-    def __init__(self, app: OldmanServer, loop: asyncio.AbstractEventLoop):
+    def __init__(self, app: OldmanServer, loop: asyncio.AbstractEventLoop,
+                 escalates: bool = True):
         self.app, self.loop = app, loop
+        self.escalates = escalates
         self.requested = self.serving = False
 
     def __call__(self, signum=None, frame=None) -> None:
+        if self.requested and not self.escalates:
+            return
         if self.serving or self.requested:
             self.loop.call_soon_threadsafe(
                 partial(self.app.stop, terminate=False)
@@ -172,7 +182,7 @@ def _setup_system_signals(
     register_sys_signals: bool,
     loop: asyncio.AbstractEventLoop,
 ) -> _Stop:  # no cov
-    stop = _Stop(app, loop)
+    stop = _Stop(app, loop, escalates=not run_multiple)
     os.environ["OLDMAN_SERVER_WORKER_PROCESS"] = "true"
     # Register signals for graceful termination
     if OS_IS_WINDOWS:
