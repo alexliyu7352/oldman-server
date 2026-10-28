@@ -1,4 +1,5 @@
 import typing
+from asyncio import get_running_loop
 from functools import partial
 from ipaddress import IPv6Address, ip_address
 from json import JSONDecodeError
@@ -291,3 +292,187 @@ class TestClient:
     ) -> typing.Tuple[typing.Optional[Request], WebsocketProxy]:
         kwargs["mimic"] = mimic
         return self._sanic_endpoint_test("websocket", *args, **kwargs)
+
+
+class AsyncTestClient:
+    """A test client to await inside a running event loop: async tests
+    (IsolatedAsyncioTestCase, pytest-asyncio), where app.test_client, which
+    runs its own loop, cannot be called.
+
+    It serves the app with this package's own server (the native host or the
+    asyncio server, as NATIVE_SERVER says) in the current loop, on a local
+    socket, and sends real HTTP requests with httpx; it does not call the app
+    directly. Outside ``async with`` every call starts the server, makes one
+    request and stops it, as app.test_client does; inside, one server serves
+    the whole block and the server listeners run once:
+
+        async with app.async_test_client as client:
+            request, response = await client.get("/")
+
+    The methods, their arguments and return values are those of
+    app.test_client, awaited. port=None binds a port the system picks.
+    """
+
+    __test__ = False
+
+    def __init__(
+        self,
+        app: OldmanServer,
+        *,
+        host: str = HOST,
+        port: typing.Optional[int] = None,
+        server_kwargs: typing.Optional[typing.Dict[str, typing.Any]] = None,
+        client_kwargs: typing.Optional[typing.Dict[str, typing.Any]] = None,
+    ) -> None:
+        OldmanServer.test_mode = True
+        self.app = app
+        self.host = host
+        # The configured port, apart from the port the server uses (port).
+        self._port = port
+        self.port = port
+        self._server_kwargs = server_kwargs or {}
+        self._client_kwargs = client_kwargs or {}
+        self._server = None
+        self._session: typing.Optional[httpx.AsyncClient] = None
+        self._url_host = host
+        self._settings: typing.Dict[str, typing.Any] = {}
+        # The stop events _stop() owes the listeners that ran.
+        self._stops: typing.List[str] = []
+
+    async def __aenter__(self) -> "AsyncTestClient":
+        await self._start()
+        return self
+
+    async def __aexit__(self, *_) -> None:
+        await self._stop()
+
+    async def _start(self) -> None:
+        if self._server is not None:
+            raise RuntimeError("The async test client's server is already running")
+        app = self.app
+        sock, self._url_host, self.port = bind_test_socket(self.host, self._port)
+        # The settings create_server() writes from its arguments are this
+        # run's only (see TestClient).
+        self._settings = {key: app.config.get(key) for key in RUN_CONFIG_KEYS}
+        app.router.reset()
+        app.signal_router.reset()
+        loop = get_running_loop()
+        try:
+            await app._startup()
+            # The server listeners pair up as in a run of the app:
+            # after_server_stop once before_server_start ran, before_server_stop
+            # once after_server_start did.
+            self._stops = ["after"]
+            await app._server_event("init", "before", loop=loop)
+            self._server = await app.create_server(
+                sock=sock, return_asyncio_server=True, **self._server_kwargs
+            )
+            self._stops = ["before", "after"]
+            await app._server_event("init", "after", loop=loop)
+            self._session = httpx.AsyncClient(verify=False, **self._client_kwargs)
+        except BaseException:
+            if self._server is None:
+                sock.close()
+            await self._stop()
+            raise
+
+    async def _stop(self) -> None:
+        app = self.app
+        loop = get_running_loop()
+        stops, self._stops = self._stops, []
+        try:
+            if "before" in stops:
+                await app._server_event("shutdown", "before", loop=loop)
+        finally:
+            try:
+                if self._session is not None:
+                    await self._session.aclose()
+                    self._session = None
+                if self._server is not None:
+                    self._server.close()
+                    await self._server.wait_closed()
+                    self._server = None
+            finally:
+                try:
+                    if "after" in stops:
+                        await app._server_event("shutdown", "after", loop=loop)
+                finally:
+                    for key, value in self._settings.items():
+                        setattr(app.config, key, value)
+                    self._settings = {}
+
+    async def _endpoint(
+        self,
+        method: str,
+        uri: str = "/",
+        *request_args,
+        gather_request: bool = True,
+        **request_kwargs,
+    ) -> typing.Tuple[typing.Optional[Request], typing.Any]:
+        if method != "websocket":
+            # A mistake in the options raises before a server starts.
+            follow_redirects(request_kwargs)
+        if self._server is None:
+            async with self:
+                return await self._endpoint(
+                    method, uri, *request_args, gather_request=gather_request,
+                    **request_kwargs,
+                )
+        results: list = [None, None]
+        url = endpoint_url(uri, method, self._url_host, self.port)
+        app = self.app
+        if gather_request:
+            collect = partial(TestClient._collect_request, results)
+            app.request_middleware.appendleft(collect)  # type: ignore
+            for route in app.router.routes:
+                route.extra.request_middleware.appendleft(collect)
+        try:
+            results[-1] = await send_request(
+                self._session, method, url, *request_args, **request_kwargs
+            )
+        finally:
+            if gather_request:
+                for middleware in (
+                    app.request_middleware,
+                    *(route.extra.request_middleware for route in app.router.routes),
+                ):
+                    try:
+                        middleware.remove(collect)  # type: ignore
+                    except ValueError:
+                        pass
+        return _endpoint_result(results, gather_request)
+
+    async def request(self, *args, **kwargs) -> Result:
+        return await self._endpoint("request", *args, **kwargs)
+
+    async def get(self, *args, **kwargs) -> Result:
+        return await self._endpoint("get", *args, **kwargs)
+
+    async def post(self, *args, **kwargs) -> Result:
+        return await self._endpoint("post", *args, **kwargs)
+
+    async def put(self, *args, **kwargs) -> Result:
+        return await self._endpoint("put", *args, **kwargs)
+
+    async def delete(self, *args, **kwargs) -> Result:
+        return await self._endpoint("delete", *args, **kwargs)
+
+    async def patch(self, *args, **kwargs) -> Result:
+        return await self._endpoint("patch", *args, **kwargs)
+
+    async def options(self, *args, **kwargs) -> Result:
+        return await self._endpoint("options", *args, **kwargs)
+
+    async def head(self, *args, **kwargs) -> Result:
+        return await self._endpoint("head", *args, **kwargs)
+
+    async def websocket(
+        self,
+        *args,
+        mimic: typing.Optional[
+            typing.Callable[..., typing.Coroutine[None, None, typing.Any]]
+        ] = None,
+        **kwargs,
+    ) -> typing.Tuple[typing.Optional[Request], WebsocketProxy]:
+        kwargs["mimic"] = mimic
+        return await self._endpoint("websocket", *args, **kwargs)

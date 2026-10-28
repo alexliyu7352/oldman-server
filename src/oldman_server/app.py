@@ -89,7 +89,7 @@ from oldman_server.worker.manager import WorkerManager
 
 
 if TYPE_CHECKING:
-    from oldman_server.testing.testing import TestClient
+    from oldman_server.testing.testing import AsyncTestClient, TestClient
 
 
 if OS_IS_WINDOWS:  # no cov
@@ -177,6 +177,7 @@ class OldmanServer(
         "_manager",
         "_state",
         "_task_registry",
+        "_async_test_client",
         "_test_client",
         "_test_manager",
         "blueprints",
@@ -317,6 +318,7 @@ class OldmanServer(
         self._manager: WorkerManager | None = None
         self._state: ApplicationState = ApplicationState(app=self)
         self._task_registry: dict[str, Task | None] = {}
+        self._async_test_client: Any = None
         self._test_client: Any = None
         self._test_manager: Any = None
         self.auto_reload = False
@@ -1576,6 +1578,23 @@ class OldmanServer(
 
         self._test_client = TestClient(self)
         return self._test_client
+
+    @property
+    def async_test_client(self) -> AsyncTestClient:
+        """A test client to await inside a running event loop (async tests),
+        where test_client, which runs its own loop, cannot be called. It
+        serves the app with this package's own server in the current loop and
+        sends real HTTP requests with httpx; see
+        oldman_server.testing.AsyncTestClient.
+
+        Returns:
+            AsyncTestClient: oldman_server.testing's async client.
+        """
+        if self._async_test_client is None:
+            from oldman_server.testing.testing import AsyncTestClient
+
+            self._async_test_client = AsyncTestClient(self)
+        return self._async_test_client
 
     # -------------------------------------------------------------------- #
     # Execution
