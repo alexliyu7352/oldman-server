@@ -5,6 +5,7 @@ from email.utils import formatdate
 from functools import partial, wraps
 from os import PathLike, path
 from pathlib import Path, PurePath
+from typing import Any
 from urllib.parse import unquote
 
 from sanic_routing.route import Route
@@ -48,6 +49,7 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
         directory_handler: DirectoryHandler | None = None,
         follow_external_symlink_files: bool = False,
         follow_external_symlink_dirs: bool = False,
+        cors: Any = None,
     ):
         """Register a root to serve files from. The input can either be a file or a directory.
 
@@ -97,6 +99,9 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
             follow_external_symlink_dirs (bool, optional): Whether to serve
                 files from directories that are symlinks pointing outside
                 the static root. Defaults to `False` for security.
+            cors (Optional[Union[bool, CORS]]): The CORS policy of these
+                files (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
 
         Returns:
             List[sanic.router.Route]: Routes registered on the router.
@@ -161,6 +166,7 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
             directory_handler,
             follow_external_symlink_files,
             follow_external_symlink_dirs,
+            cors,
         )
         self._future_statics.add(static)
 
@@ -247,6 +253,7 @@ class StaticHandleMixin(metaclass=AppMeta):
             host=static.host,
             strict_slashes=static.strict_slashes,
             static=True,
+            cors=static.cors,
         )(_handler)
 
         return route

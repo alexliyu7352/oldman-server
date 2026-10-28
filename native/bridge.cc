@@ -1010,9 +1010,12 @@ int inline_call(const probe::ServerConfig& config, probe::RequestEvent& event,
             auto* kind = PyTuple_GET_ITEM(answer, 3);
             auto* value = PyTuple_GET_ITEM(answer, 4);
             valid = PyLong_CheckExact(kind) && PyLong_CheckExact(value);
-            if (valid && py::cast<int>(py::handle(kind)) == probe::DecisionKind::cached)
+            // The kind's high bits: the response's CORS policy (RequestDecision::cors).
+            const int raw = valid ? py::cast<int>(py::handle(kind)) : 0;
+            decision.cors = valid && raw >= 0 ? static_cast<unsigned>(raw >> 8) : 0;
+            if (valid && (raw & 0xff) == probe::DecisionKind::cached)
                 decision.cache_ms = py::cast<uint32_t>(py::handle(value));
-            else if (valid && py::cast<int>(py::handle(kind)) == probe::DecisionKind::complete)
+            else if (valid && (raw & 0xff) == probe::DecisionKind::complete)
                 decision.content_length = py::cast<int64_t>(py::handle(value));
             else
                 valid = false;
@@ -1068,6 +1071,39 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("request_timeout_ms", &probe::ServerConfig::request_timeout_ms)
         .def_readwrite("framework_errors", &probe::ServerConfig::framework_errors)
         .def_readwrite("response_cache", &probe::ServerConfig::response_cache)
+        .def_readwrite("cors_default", &probe::ServerConfig::cors_default)
+        .def_readwrite("cors_route_policies", &probe::ServerConfig::cors_route_policies)
+        // oldman_server.cors's table: (any_origin, (origin, ...), ((scheme, suffix), ...),
+        // tail lines, vary, preflight lines, reflect_headers) for each policy.
+        .def_property("cors_policies",
+            [](const probe::ServerConfig& c) {
+                py::list out;
+                for (const auto& p : c.cors_policies)
+                    out.append(py::make_tuple(p.any_origin, py::tuple(py::cast(std::vector<std::string>(
+                                                  p.origins.begin(), p.origins.end()))),
+                                              py::tuple(py::cast(p.wildcards)), p.tail, p.vary, p.preflight,
+                                              p.reflect_headers));
+                return py::tuple(out);
+            },
+            [](probe::ServerConfig& c, py::iterable items) {
+                std::vector<probe::CorsPolicy> policies;
+                for (auto item : items) {
+                    auto [any_origin, origins, wildcards, tail, vary, preflight, reflect] =
+                        item.cast<std::tuple<bool, std::vector<std::string>,
+                                             std::vector<std::pair<std::string, std::string>>,
+                                             std::string, bool, std::string, bool>>();
+                    probe::CorsPolicy policy;
+                    policy.any_origin = any_origin;
+                    policy.origins.insert(origins.begin(), origins.end());
+                    policy.wildcards = std::move(wildcards);
+                    policy.tail = std::move(tail);
+                    policy.vary = vary;
+                    policy.preflight = std::move(preflight);
+                    policy.reflect_headers = reflect;
+                    policies.push_back(std::move(policy));
+                }
+                c.cors_policies = std::move(policies);
+            })
         // The same-thread mode's direct call (inline_call): the Engine, its plain
         // function handler and stats dict, and the connections dict
         // drain_requests_owned registers connections in. Python keeps them
@@ -1084,7 +1120,8 @@ PYBIND11_MODULE(_native, m) {
             c.inline_connections = connections.is_none() ? nullptr : connections.ptr();
             c.inline_bytes_headers = bytes_headers;
         })
-        // (path, status, body bytes, ((name, value), ...)) for each path.
+        // (path, status, body bytes, ((name, value), ...)[, cors]) for each path;
+        // cors: its CORS policy, as RequestDecision::cors.
         .def_property("fixed_responses",
             [](const probe::ServerConfig& c) {
                 py::list out;
@@ -1096,12 +1133,15 @@ PYBIND11_MODULE(_native, m) {
             [](probe::ServerConfig& c, py::iterable items) {
                 std::map<std::string, probe::StoredResponse, std::less<>> fixed;
                 for (auto item : items) {
+                    auto fields = py::reinterpret_borrow<py::tuple>(item);
+                    const unsigned cors = fields.size() > 4 ? fields[4].cast<unsigned>() : 0;
                     auto [path, status, body, headers] =
-                        item.cast<std::tuple<std::string, int, py::bytes, std::vector<std::pair<std::string, std::string>>>>();
+                        py::tuple(fields[py::slice(0, 4, 1)])
+                            .cast<std::tuple<std::string, int, py::bytes, std::vector<std::pair<std::string, std::string>>>>();
                     if (!probe::valid_http_response(status, headers, true))
                         throw py::value_error("invalid fixed response for " + path);
                     fixed.insert_or_assign(std::move(path),
-                                           probe::StoredResponse{status, std::string(body), std::move(headers)});
+                                           probe::StoredResponse{status, std::string(body), std::move(headers), cors});
                 }
                 c.fixed_responses = std::move(fixed);
             });
@@ -1227,9 +1267,15 @@ PYBIND11_MODULE(_native, m) {
                         "HTTP response must contain id, shard, status, body, headers[, kind[, length]]");
                 probe::RequestDecision decision{response_id(item[0]), response_shard(item[1]), 500, {}, true, {}};
                 int kind = probe::DecisionKind::complete;
+                unsigned cors = 0;
                 if (size >= 6) {
                     if (!PyLong_CheckExact(item[5].ptr())) throw py::type_error("decision kind must be int");
                     kind = py::cast<int>(item[5]);
+                    // The high bits: the response's CORS policy (RequestDecision::cors).
+                    if (kind >= 0) {
+                        cors = static_cast<unsigned>(kind >> 8);
+                        kind &= 0xff;
+                    }
                     if (kind < probe::DecisionKind::complete || kind > probe::DecisionKind::cached)
                         throw py::value_error("unknown decision kind");
                 }
@@ -1272,6 +1318,7 @@ PYBIND11_MODULE(_native, m) {
                     if (kind == probe::DecisionKind::stream_start)
                         decision.retire = false;  // complete 500 plus a terminal event for Python
                 }
+                decision.cors = cors;
                 owned.push_back(std::move(decision));
             }
             // Framing errors abort the entire batch; invalid user fields instead

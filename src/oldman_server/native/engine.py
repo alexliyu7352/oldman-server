@@ -102,6 +102,13 @@ class ServerConfig:
     fixed_responses: tuple = ()
     # A shard may keep a complete response sent as CACHED (see that).
     response_cache: bool = False
+    # CORS (oldman_server.cors.CorsTable.native): the policies (index 0 none),
+    # the default's index, and whether a route has its own (then only Python
+    # answers preflights). A decision names its policy in its kind's high bits
+    # (kind | cors << 8; 0 the default, n policy n - 1). Empty: off.
+    cors_policies: tuple = ()
+    cors_default: int = 0
+    cors_route_policies: bool = False
 
 
 # Python owns this extension object; its plain native data outlives the request
@@ -574,8 +581,9 @@ class Engine:
         stream = self._application_streams.get(request_id)
         if stream is None:
             stream = self._application_streams[request_id] = _ApplicationStream()
+        # A start's kind may carry its CORS policy in the high bits.
         self._queue_stream_item((request_id, shard, status, body, headers, kind, length)
-                                if kind == STREAM_START else (request_id, shard, 0, body, (), kind))
+                                if kind & 0xff == STREAM_START else (request_id, shard, 0, body, (), kind))
         stream.unacked += len(body)
         if kind == STREAM_END:
             del self._application_streams[request_id]

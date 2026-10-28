@@ -7,6 +7,7 @@ from oldman_server.app import OldmanServer
 from oldman_server.blueprints import Blueprint
 from oldman_server.config import Config
 from oldman_server.constants import HTTPMethod
+from oldman_server.cors import CORS
 from oldman_server.exceptions import (
     BadRequest,
     ExpectationFailed,
@@ -51,6 +52,7 @@ __all__ = (
     "__version__",
     # Common objects
     "OldmanServer",
+    "CORS",
     "Config",
     "Blueprint",
     "HTTPMethod",

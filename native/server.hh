@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -26,6 +27,21 @@ struct StoredResponse {
     int status = 200;
     std::string body;
     std::vector<std::pair<std::string, std::string>> headers;
+    unsigned cors = 0;  // its CORS policy, as RequestDecision::cors
+};
+// One CORS policy of the table oldman_server.cors compiles at startup; the
+// header lines are encoded there. The host appends them to every response it
+// writes under the policy: Access-Control-Allow-Origin for a request from an
+// allowed origin, and Vary: Origin.
+struct CorsPolicy {
+    bool any_origin = false;  // "*": the header on every response, no Vary
+    std::set<std::string, std::less<>> origins;
+    // Origins of any subdomain: (scheme with "://", host suffix from its dot).
+    std::vector<std::pair<std::string, std::string>> wildcards;
+    std::string tail;          // lines after Allow-Origin: Allow-Credentials, Expose-Headers
+    bool vary = false;         // an echoed origin: Vary: Origin on every response
+    std::string preflight;     // a preflight's Allow-Methods, Allow-Headers and Max-Age lines
+    bool reflect_headers = false;  // Allow-Headers echoes Access-Control-Request-Headers
 };
 struct ServerConfig {
     unsigned http_port = 0;
@@ -84,6 +100,14 @@ struct ServerConfig {
     // decision) and answer requests for the same target with it until it
     // expires (see Service::stored_response).
     bool response_cache = false;
+    // CORS (oldman_server.cors), off when empty: the policies (index 0 none),
+    // the index of the one a response gets when its decision names none (cors
+    // 0: before routing, an error, the overload 503), and whether any route has
+    // a policy of its own, so that only Python, which routes, can answer a
+    // preflight; otherwise the host answers it.
+    std::vector<CorsPolicy> cors_policies;
+    unsigned cors_default = 0;
+    bool cors_route_policies = false;
     // Same-thread mode only: the direct call to Python (see InlineCall) and
     // what it needs, set by the Python bridge, whose objects these are (the
     // Python side keeps them alive while the server runs): the Engine, its
@@ -153,6 +177,9 @@ struct RequestDecision {
     int kind = DecisionKind::complete;
     int64_t content_length = -1;  // stream_start: application Content-Length, or -1
     uint32_t cache_ms = 0;  // a complete response the shard may keep this long
+    // CORS: 0 the default policy, n policy n - 1 (1 none). Python sends it in
+    // the decision kind's high bits (kind | cors << 8).
+    unsigned cors = 0;
 };
 // upgrade: the status of a framework host stream start, where a 101 begins a tunnel.
 bool valid_http_response(int status,

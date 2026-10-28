@@ -15,6 +15,7 @@ from sanic_routing.route import Route
 
 from oldman_server.base.meta import AppMeta
 from oldman_server.constants import HTTP_METHODS
+from oldman_server.cors import CORS
 from oldman_server.errorpages import RESPONSE_MAPPING
 from oldman_server.mixins.base import BaseMixin
 from oldman_server.models.futures import FutureRoute, FutureStatic
@@ -52,6 +53,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         static: bool = False,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteWrapper:
         """Decorate a function to be registered as a route.
@@ -77,6 +79,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                  value; default: `"/v"`.
             error_format (Optional[str]): Error format for the route.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             ctx_kwargs (Any): Keyword arguments that begin with a `ctx_*`
                 prefix will be appended to the route context (`route.ctx`).
 
@@ -114,6 +119,14 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             methods = frozenset({"GET"})
 
         route_context = self._build_route_context(ctx_kwargs)
+        if cors is not None:
+            if websocket:
+                raise TypeError(
+                    "A WebSocket route takes no cors=: browsers do not apply CORS "
+                    "to WebSocket; check the Origin header to limit who connects"
+                )
+            if cors is not False and not isinstance(cors, CORS):
+                raise TypeError(f"cors= takes None, False or CORS(...), not {cors!r}")
 
         def decorator(handler):
             nonlocal uri
@@ -174,6 +187,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 version_prefix,
                 error_format,
                 route_context,
+                cors,
             )
             overwrite = getattr(self, "_allow_route_overwrite", False)
             if overwrite:
@@ -222,6 +236,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         stream: bool = False,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         unquote: bool = False,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
@@ -238,6 +253,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             stream (bool): Boolean specifying if the handler is a stream handler.
             version_prefix (str): URL path that should be before the version value; default: ``/v``.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             unquote (bool): Boolean specifying if the handler requires unquoting.
             ctx_kwargs (Any): Keyword arguments that begin with a `ctx_*` prefix will be appended to the route context (``route.ctx``). See below for examples.
 
@@ -300,6 +318,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             name=name,
             version_prefix=version_prefix,
             error_format=error_format,
+            cors=cors,
             unquote=unquote,
             **ctx_kwargs,
         )(handler)
@@ -316,6 +335,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         ignore_body: bool = True,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
         """Decorate a function handler to create a route definition using the **GET** HTTP method.
@@ -336,6 +356,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                 value. Defaults to `"/v"`.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             **ctx_kwargs (Any): Keyword arguments that begin with a
                 `ctx_* prefix` will be appended to the route
                 context (`route.ctx`).
@@ -355,6 +378,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 ignore_body=ignore_body,
                 version_prefix=version_prefix,
                 error_format=error_format,
+                cors=cors,
                 **ctx_kwargs,
             ),
         )
@@ -369,6 +393,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         name: str | None = None,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
         """Decorate a function handler to create a route definition using the **POST** HTTP method.
@@ -387,6 +412,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                 value. Defaults to `"/v"`.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             **ctx_kwargs (Any): Keyword arguments that begin with a
                 `ctx_*` prefix will be appended to the route
                 context (`route.ctx`).
@@ -406,6 +434,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 name=name,
                 version_prefix=version_prefix,
                 error_format=error_format,
+                cors=cors,
                 **ctx_kwargs,
             ),
         )
@@ -420,6 +449,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         name: str | None = None,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
         """Decorate a function handler to create a route definition using the **PUT** HTTP method.
@@ -438,6 +468,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                 value. Defaults to `"/v"`.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             **ctx_kwargs (Any): Keyword arguments that begin with a
                 `ctx_*` prefix will be appended to the route
                 context (`route.ctx`).
@@ -457,6 +490,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 name=name,
                 version_prefix=version_prefix,
                 error_format=error_format,
+                cors=cors,
                 **ctx_kwargs,
             ),
         )
@@ -471,6 +505,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         ignore_body: bool = True,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
         """Decorate a function handler to create a route definition using the **HEAD** HTTP method.
@@ -491,6 +526,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                 value. Defaults to `"/v"`.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             **ctx_kwargs (Any): Keyword arguments that begin with a
                 `ctx_*` prefix will be appended to the route
                 context (`route.ctx`).
@@ -510,6 +548,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 ignore_body=ignore_body,
                 version_prefix=version_prefix,
                 error_format=error_format,
+                cors=cors,
                 **ctx_kwargs,
             ),
         )
@@ -524,6 +563,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         ignore_body: bool = True,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
         """Decorate a function handler to create a route definition using the **OPTIONS** HTTP method.
@@ -544,6 +584,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                 value. Defaults to `"/v"`.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             **ctx_kwargs (Any): Keyword arguments that begin with a
                 `ctx_*` prefix will be appended to the route
                 context (`route.ctx`).
@@ -563,6 +606,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 ignore_body=ignore_body,
                 version_prefix=version_prefix,
                 error_format=error_format,
+                cors=cors,
                 **ctx_kwargs,
             ),
         )
@@ -577,6 +621,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         name: str | None = None,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
         """Decorate a function handler to create a route definition using the **PATCH** HTTP method.
@@ -595,6 +640,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                 value. Defaults to `"/v"`.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             **ctx_kwargs (Any): Keyword arguments that begin with a
                 `ctx_*` prefix will be appended to the route
                 context (`route.ctx`).
@@ -614,6 +662,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 name=name,
                 version_prefix=version_prefix,
                 error_format=error_format,
+                cors=cors,
                 **ctx_kwargs,
             ),
         )
@@ -628,6 +677,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
         ignore_body: bool = False,
         version_prefix: str = "/v",
         error_format: str | None = None,
+        cors: Any = None,
         **ctx_kwargs: Any,
     ) -> RouteHandler:
         """Decorate a function handler to create a route definition using the **DELETE** HTTP method.
@@ -646,6 +696,9 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             version_prefix (str): URL path that should be before the version
                 value. Defaults to `"/v"`.
             error_format (Optional[str]): Custom error format string.
+            cors (Optional[Union[bool, CORS]]): The route's CORS policy
+                (oldman_server.cors): None takes the blueprint's or the
+                application's, False none. Defaults to `None`.
             **ctx_kwargs (Any): Keyword arguments that begin with a `ctx_*`
                 prefix will be appended to the route context (`route.ctx`).
 
@@ -664,6 +717,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
                 ignore_body=ignore_body,
                 version_prefix=version_prefix,
                 error_format=error_format,
+                cors=cors,
                 **ctx_kwargs,
             ),
         )

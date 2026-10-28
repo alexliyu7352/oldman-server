@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from oldman_server.handlers.directory import DirectoryHandler
 from oldman_server.models.handler_types import (
@@ -29,6 +29,8 @@ class FutureRoute(NamedTuple):
     version_prefix: str
     error_format: str | None
     route_context: HashableDict
+    # The route's CORS policy (oldman_server.cors): None inherits, False none.
+    cors: Any = None
 
 
 class FutureListener(NamedTuple):
@@ -62,6 +64,7 @@ class FutureStatic(NamedTuple):
     directory_handler: DirectoryHandler
     follow_external_symlink_files: bool
     follow_external_symlink_dirs: bool
+    cors: Any = None  # as FutureRoute.cors
 
 
 class FutureSignal(NamedTuple):

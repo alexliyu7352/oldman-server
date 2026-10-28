@@ -49,6 +49,8 @@ from oldman_server.blueprint_group import BlueprintGroup
 from oldman_server.blueprints import Blueprint
 from oldman_server.compat import OS_IS_WINDOWS, enable_windows_color_support
 from oldman_server.config import ENV_PREFIX, Config
+from oldman_server.cors import CORS, CorsTable
+from oldman_server.cors import compile as cors_compile
 from oldman_server.exceptions import (
     BadRequest,
     OldmanServerException,
@@ -162,7 +164,9 @@ class OldmanServer(
     )
     __slots__ = (
         "_blueprint_order",
+        "_cors_table",
         "_delayed_tasks",
+        "_fixed_cors",
         "_future_commands",
         "_future_exceptions",
         "_future_listeners",
@@ -321,6 +325,10 @@ class OldmanServer(
         self.ctx: ctx_type = cast(ctx_type, ctx or SimpleNamespace())
         self.error_handler: ErrorHandler = error_handler or ErrorHandler()
         self.fixed_responses: dict[str, tuple[int, bytes, tuple[tuple[str, str], ...]]] = {}
+        # CORS (oldman_server.cors): the fixed responses' cors= options, and
+        # the table finalize() compiles (None: CORS off).
+        self._fixed_cors: dict[str, Any] = {}
+        self._cors_table: CorsTable | None = None
         self.listeners: dict[str, list[ListenerType[Any]]] = defaultdict(list)
         self.named_request_middleware: dict[str, deque[Middleware]] = {}
         self.named_response_middleware: dict[str, deque[Middleware]] = {}
@@ -454,6 +462,7 @@ class OldmanServer(
         status: int = 200,
         content_type: str = "text/plain; charset=utf-8",
         headers: dict[str, str] | None = None,
+        cors: Any = None,
     ) -> None:
         """Answer GET and HEAD requests for `path` with this response, before
         anything else: no path rewriting, routing, middleware, signal, handler
@@ -480,7 +489,13 @@ class OldmanServer(
         for name, value in fields:
             if any(c in f"{name}{value}" for c in "\r\n\x00") or not name or ":" in name:
                 raise ValueError(f"Invalid fixed response header: {name!r}")
+        if cors is not None and cors is not False and not isinstance(cors, CORS):
+            raise TypeError(f"cors= takes None, False or CORS(...), not {cors!r}")
         self.fixed_responses[path] = (status, bytes(body), tuple(fields))
+        if cors is None:
+            self._fixed_cors.pop(path, None)
+        else:
+            self._fixed_cors[path] = cors
 
     def register_middleware(
         self,
@@ -877,6 +892,7 @@ class OldmanServer(
         strict_slashes: bool | None = None,
         version_prefix: str | None = None,
         name_prefix: str | None = None,
+        cors: Any = None,
     ) -> None:
         """Register a blueprint on the application.
 
@@ -889,6 +905,7 @@ class OldmanServer(
             strict_slashes (Optional[bool]): Enforce the trailing slashes. Defaults to `None`.
             version_prefix (Optional[str]): Prefix for version. Defaults to `None`.
             name_prefix (Optional[str]): Prefix for the blueprint name. Defaults to `None`.
+            cors (Optional[Union[bool, CORS]]): The CORS policy of its routes that set none themselves (oldman_server.cors). Defaults to `None`.
 
         Example:
             ```python
@@ -913,6 +930,8 @@ class OldmanServer(
             options["version_prefix"] = version_prefix
         if name_prefix is not None:
             options["name_prefix"] = name_prefix
+        if cors is not None:
+            options["cors"] = cors
         if isinstance(blueprint, (Iterable, BlueprintGroup)):
             for item in blueprint:
                 params: dict[str, Any] = {**options}
@@ -933,6 +952,15 @@ class OldmanServer(
                             params[_attr] = getattr(
                                 blueprint, _attr
                             ) or options.get(_attr)
+                    # False (no CORS) is a value here, unlike above.
+                    if item.cors is None:
+                        group_cors = (
+                            blueprint.cors
+                            if blueprint.cors is not None
+                            else options.get("cors")
+                        )
+                        if group_cors is not None:
+                            params["cors"] = group_cors
                     if item.version_prefix == "/v":
                         if blueprint.version_prefix == "/v":
                             params["version_prefix"] = options.get(
@@ -1344,6 +1372,15 @@ class OldmanServer(
             )
             if self.path_rewriters:
                 self._rewrite_request_path(request)
+            # A CORS preflight is answered here, before routing: no middleware
+            # or handler (oldman_server.cors).
+            cors = self._cors_table
+            if (
+                cors is not None
+                and request.method == "OPTIONS"
+                and await cors.preflight(self, request)
+            ):
+                return
             # Fetch handler from router
             route, handler, kwargs = self.router.get(
                 request.path,
@@ -2205,6 +2242,8 @@ class OldmanServer(
             if not OldmanServer.test_mode:
                 raise e
         self.finalize_middleware()
+        # Every route's CORS policy, collected now the routes are final.
+        self._cors_table = cors_compile(self)
 
     def signalize(self, allow_fail_builtin: bool = True) -> None:
         """Finalize the signal handling configuration for the Sanic application.

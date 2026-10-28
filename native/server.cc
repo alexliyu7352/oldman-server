@@ -244,7 +244,8 @@ WheelEntry::~WheelEntry() {
 struct alignas(64) Counts {
     std::atomic<uint64_t> active_requests{0}, reserved_bytes{0}, peak_requests{0}, peak_bytes{0};
     std::atomic<uint64_t> accepted{0}, rejected{0}, responses{0}, errors{0}, pending_decisions{0};
-    // Of responses: written without Python (a fixed or cached one).
+    // Of responses: written without Python (a fixed or cached one, or a CORS
+    // preflight's answer).
     std::atomic<uint64_t> stored_responses{0};
     std::atomic<uint64_t> decisions{0}, decision_timeouts{0}, decision_wait_ns{0};
     std::atomic<uint64_t> python_terminal_events{0};
@@ -356,6 +357,7 @@ struct Decision {
     int reject_status = 503;  // the answer when code is 3 (not answered by Python)
     bool timed_out = false;   // answered after the response deadline was reported
     uint32_t cache_ms = 0;    // a complete response the shard may keep this long
+    unsigned cors = 0;        // its CORS policy (RequestDecision::cors)
 };
 struct Waiter {
     explicit Waiter(asio::io_context& io) : decided(io), more(io), resumed(io) {}
@@ -540,6 +542,9 @@ class Service {
         WheelEntry write_timer;
         bool idle = false;  // waiting for a request, nothing of it received
         bool body_arriving = false;  // forward_body reads the connection
+        // The Origin of the request being answered (with CORS on only): the
+        // policy of each of its responses is applied for it.
+        std::string origin;
         // Shutting the input ends a pending read (it returns EOF).
         void shut_input() {
             shut_here = true;
@@ -644,6 +649,57 @@ class Service {
     std::map<uint64_t, BodyFlow*> body_flows;  // by request id
     http1::DateLine date_line;
     std::string probe_lines;  // configured diagnostic header lines, fixed per shard
+    std::string cors_lines;   // probe_lines plus one response's CORS lines
+
+    // CORS (ServerConfig::cors_policies): the policy of a response whose
+    // decision names `code` (0 the default; none when CORS is off).
+    const CorsPolicy* cors_policy(unsigned code) const {
+        const auto& policies = shared.config.cors_policies;
+        const size_t index = code ? code - 1 : shared.config.cors_default;
+        return index < policies.size() ? &policies[index] : nullptr;
+    }
+    static bool cors_allows(const CorsPolicy& policy, std::string_view origin) {
+        if (origin.empty()) return false;
+        if (policy.any_origin || policy.origins.contains(origin)) return true;
+        for (const auto& [scheme, suffix] : policy.wildcards) {
+            if (origin.size() <= scheme.size() + suffix.size() || !origin.starts_with(scheme) ||
+                !origin.ends_with(suffix))
+                continue;
+            // The subdomain itself: host characters only (the value is echoed).
+            const auto label = origin.substr(scheme.size(), origin.size() - scheme.size() - suffix.size());
+            if (std::ranges::all_of(label, [](char c) {
+                    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.';
+                }))
+                return true;
+        }
+        return false;
+    }
+    // A response's CORS lines: "*" on every response; an allowed origin
+    // echoed, with Vary: Origin on every response of such a policy (a cache
+    // then keeps one answer per origin).
+    static void append_cors(std::string& out, const CorsPolicy& policy, std::string_view origin) {
+        if (policy.any_origin) {
+            out.append("Access-Control-Allow-Origin: *\r\n");
+            out.append(policy.tail);
+            return;
+        }
+        if (cors_allows(policy, origin)) {
+            out.append("Access-Control-Allow-Origin: ");
+            out.append(origin);
+            out.append("\r\n");
+            out.append(policy.tail);
+        }
+        if (policy.vary) out.append("Vary: Origin\r\n");
+    }
+    // The extra header lines of a response under CORS policy `code` to a
+    // request from `origin`: the diagnostic lines alone when CORS is off.
+    std::string_view extra_lines(unsigned code, std::string_view origin) {
+        const auto* policy = cors_policy(code);
+        if (!policy) return probe_lines;
+        cors_lines.assign(probe_lines);
+        append_cors(cors_lines, *policy, origin);
+        return cors_lines;
+    }
 
     std::string_view date() {
         return shared.config.generate_date_header ? date_line.get() : std::string_view{};
@@ -710,7 +766,8 @@ class Service {
             if (cached_responses.size() >= cached_entries) cached_responses.clear();
         }
         cached_responses.insert_or_assign(
-            std::move(target), CachedResponse{now + answer.cache_ms, {answer.code, answer.body, answer.headers}});
+            std::move(target),
+            CachedResponse{now + answer.cache_ms, {answer.code, answer.body, answer.headers, answer.cors}});
     }
     // What the peer sent next, appended to `buffer`: false at its end (EOF,
     // or this side shut the input). A failure (a reset) throws.
@@ -985,6 +1042,9 @@ public:
         unsigned sequence = 0;
         std::string buffer, output;
         size_t consumed = 0;
+        // CORS: a preflight's Access-Control-Request-Method and -Headers.
+        const bool cors_on = !config.cors_policies.empty();
+        std::string cors_method, cors_request_headers;
         connection.buffer = &buffer;
         connection.consumed = &consumed;
         // Keep-alive idle and request-receive deadlines: the timer shuts the input
@@ -1044,6 +1104,8 @@ public:
                 // pipelines requests and does not read their responses holds
                 // no more than that, until the write deadline.
                 if (output.size() >= 65536) co_await flush_output(connection, output);
+                // Until this request's head is parsed, nothing is known of its origin.
+                if (cors_on) connection.origin.clear();
                 http1::Head head;
                 // No field count of its own: the size limit bounds the head, as in Sanic.
                 const auto parsed = http1::parse_head(std::string_view(buffer).substr(consumed),
@@ -1057,7 +1119,7 @@ public:
                     continue;
                 }
                 if (parsed != http1::Parse::complete && !config.framework_errors) {
-                    http1::append_error(output, head.error_status, true, date(), probe_lines);
+                    http1::append_error(output, head.error_status, true, date(), extra_lines(0, {}));
                     break;
                 }
                 if (parsed != http1::Parse::complete) {
@@ -1078,6 +1140,16 @@ public:
                                        {}, client, server, connection_key, ++sequence, unix_socket};
                 input.headers.reserve(head.headers.size());
                 for (const auto& [name, value] : head.headers) input.headers.emplace_back(name, value);
+                if (cors_on) {
+                    cors_method.clear();
+                    cors_request_headers.clear();
+                    for (const auto& [name, value] : head.headers) {
+                        if (http1::iequals(name, "origin")) connection.origin.assign(value);
+                        else if (http1::iequals(name, "access-control-request-method")) cors_method.assign(value);
+                        else if (http1::iequals(name, "access-control-request-headers"))
+                            cors_request_headers.assign(value);
+                    }
+                }
                 const bool head_request = method == "HEAD";
                 const bool http11 = head.version == "HTTP/1.1";
                 bool close = !head.keep_alive || !config.keep_alive;
@@ -1093,7 +1165,7 @@ public:
                 const bool framework_errors = config.framework_errors;
                 if (!chunked && length > config.max_body_bytes) {
                     if (!framework_errors) {
-                        http1::append_error(output, 413, true, date(), probe_lines);
+                        http1::append_error(output, 413, true, date(), extra_lines(0, connection.origin));
                         break;
                     }
                     // Python checks the size as the handler reads (Http.read: a
@@ -1122,7 +1194,7 @@ public:
                     if (state == http1::Chunked::incomplete) break;  // peer closed or deadline
                     if (state != http1::Chunked::complete) {
                         http1::append_error(output, state == http1::Chunked::too_large ? 413 : 400,
-                                            true, date(), probe_lines);
+                                            true, date(), extra_lines(0, connection.origin));
                         break;
                     }
                     complete = true;
@@ -1143,6 +1215,31 @@ public:
                 consumed = start;
                 request_started = monotonic_ms();  // for a pipelined successor
                 if (complete && body.empty()) {
+                    // A CORS preflight, answered here when only the default
+                    // policy applies (no route has its own): from an allowed
+                    // origin; any other goes on as an ordinary OPTIONS request.
+                    if (cors_on && !config.cors_route_policies && method == "OPTIONS" &&
+                        !cors_method.empty()) {
+                        const auto* policy = cors_policy(0);
+                        if (policy && cors_allows(*policy, connection.origin)) {
+                            --sequence;  // not a request Python sees
+                            if (draining && buffer.size() == consumed) close = true;
+                            ++counts.responses;
+                            ++counts.stored_responses;
+                            cors_lines.assign(probe_lines);
+                            append_cors(cors_lines, *policy, connection.origin);
+                            cors_lines.append(policy->preflight);
+                            if (policy->reflect_headers && !cors_request_headers.empty()) {
+                                cors_lines.append("Access-Control-Allow-Headers: ");
+                                cors_lines.append(cors_request_headers);
+                                cors_lines.append("\r\nVary: Access-Control-Request-Headers\r\n");
+                            }
+                            static const std::vector<std::pair<std::string, std::string>> none;
+                            http1::append_response(output, 204, {}, none, false, close, date(), cors_lines);
+                            keep = !close && !connection.peer_gone;
+                            continue;
+                        }
+                    }
                     if (const auto* stored = stored_response(method, input)) {
                         // Not a request Python sees: their sequence numbers count those.
                         --sequence;
@@ -1151,7 +1248,8 @@ public:
                         ++counts.stored_responses;
                         counts.response_bytes += head_request ? 0 : stored->body.size();
                         http1::append_response(output, stored->status, stored->body, stored->headers,
-                                               head_request, close, date(), probe_lines);
+                                               head_request, close, date(),
+                                               extra_lines(stored->cors, connection.origin));
                         keep = !close && !connection.peer_gone;
                         continue;
                     }
@@ -1171,7 +1269,8 @@ public:
                         ++counts.responses;
                         if (answer->cache_ms && !cache_target.empty() && cacheable(*answer))
                             keep_response(std::move(cache_target), *answer);
-                        if (!append_complete(*answer, head_request, close, output))
+                        if (!append_complete(*answer, head_request, close, output,
+                                             extra_lines(answer->cors, connection.origin)))
                             co_await write_large_body(connection, *answer, output);
                         keep = !close && !connection.peer_gone;
                         continue;
@@ -1349,7 +1448,7 @@ public:
                 co_await respond_application(connection, "NONE", std::move(input), {}, false, true, close,
                                              output, 0, "error:408:Request Timeout", 408);
             } else if (expired == Wait::request) {
-                http1::append_error(output, 408, true, date(), probe_lines);
+                http1::append_error(output, 408, true, date(), extra_lines(0, connection.origin));
             }
             co_await flush_output(connection, output);
         } catch (...) { if (!closing) ++counts.errors; }
@@ -1404,7 +1503,7 @@ public:
         Defer announced_anyway{[&]() noexcept { announce(); }};
         auto reject = [&](int status) {
             terminal_status = status;
-            http1::append_error(output, status, close, date(), probe_lines);
+            http1::append_error(output, status, close, date(), extra_lines(0, connection.origin));
             ++counts.responses;
         };
         // A request Python already has (inline_pending) is answered by it, admitted or not.
@@ -1486,29 +1585,32 @@ public:
         }
         if (answer->cache_ms && !cache_target.empty() && cacheable(*answer))
             keep_response(std::move(cache_target), *answer);
-        if (!append_complete(*answer, head_request, close, output))
+        if (!append_complete(*answer, head_request, close, output,
+                             extra_lines(answer->cors, connection.origin)))
             co_await write_large_body(connection, *answer, output);
     }
-    // A complete answer appended to `output`; false for a large body, whose head
-    // only is appended (write_large_body writes the rest).
-    bool append_complete(const Decision& answer, bool head_request, bool close, std::string& output) {
+    // A complete answer appended to `output`, with the header lines `extra`;
+    // false for a large body, whose head only is appended (write_large_body
+    // writes the rest).
+    bool append_complete(const Decision& answer, bool head_request, bool close, std::string& output,
+                         std::string_view extra) {
         const bool write_body = !head_request && http1::status_has_body(answer.code);
         counts.response_bytes += write_body ? answer.body.size() : 0;
         if (head_request && answer.content_length >= 0) {
             // Sanic keeps a HEAD response's own Content-Length (the GET size).
             http1::append_head(output, answer.code, answer.content_length, answer.headers, close,
-                               date(), probe_lines);
+                               date(), extra);
             return true;
         }
         if (!write_body || answer.body.size() < 16384) {
             http1::append_response(output, answer.code, answer.body, answer.headers, head_request,
-                                   close, date(), probe_lines);
+                                   close, date(), extra);
             return true;
         }
         // Large bodies go to the socket as their own buffer instead of being
         // copied behind the head.
         http1::append_head(output, answer.code, answer.body.size(), answer.headers, close,
-                           date(), probe_lines);
+                           date(), extra);
         return false;
     }
     asio::awaitable<void> write_large_body(AppConnection& connection, const Decision& answer,
@@ -1555,7 +1657,8 @@ public:
                 framing_line = std::format("Content-Length: {}\r\n", start.content_length);
             else if (has_body && framing == Framing::chunked)
                 framing_line = "Transfer-Encoding: chunked\r\n";
-            http1::append_stream_head(output, start.code, start.headers, close, date(), probe_lines,
+            http1::append_stream_head(output, start.code, start.headers, close, date(),
+                                      extra_lines(start.cors, connection.origin),
                                       framing_line);
         }
         auto publish = [&](std::string data, const char* parameter) {
@@ -1841,6 +1944,7 @@ public:
         answer.emplace(Decision{decision.code, std::move(decision.body), id, decision.retire,
                                 std::move(decision.headers), decision.kind, decision.content_length});
         answer->cache_ms = decision.cache_ms;
+        answer->cors = decision.cors;
         return 1;
     }
     void ask(uint64_t id, const std::string& method, size_t bytes, const std::string* copied,
@@ -1995,7 +2099,8 @@ public:
     }
     void resolve(uint64_t id, int code, std::string body, bool retire = false,
                  std::vector<std::pair<std::string, std::string>> headers = {},
-                 int kind = DecisionKind::complete, int64_t content_length = -1, uint32_t cache_ms = 0) {
+                 int kind = DecisionKind::complete, int64_t content_length = -1, uint32_t cache_ms = 0,
+                 unsigned cors = 0) {
         if (kind == DecisionKind::body_read) {
             if (auto flow = body_flows.find(id); flow != body_flows.end()) {
                 auto& unread = flow->second->unread;
@@ -2025,6 +2130,7 @@ public:
         waiter.replied = true;
         Decision decision{code, std::move(body), 0, retire, std::move(headers), kind, content_length};
         decision.cache_ms = cache_ms;
+        decision.cors = cors;
         settle(waiter, std::move(decision));
     }
     // The framework host's listeners accept no more connections (again: a
@@ -2220,7 +2326,7 @@ void NetworkServer::resolve_batch(std::vector<RequestDecision> decisions) {
             for (auto& decision : batch) {
                 service->resolve(decision.id, decision.code, std::move(decision.body), decision.retire,
                                  std::move(decision.headers), decision.kind, decision.content_length,
-                                 decision.cache_ms);
+                                 decision.cache_ms, decision.cors);
             }
         });
         p->shared.decision_return_items.fetch_add(count, std::memory_order_relaxed);

@@ -361,6 +361,20 @@ class Http(Stream, metaclass=TouchUpMeta):
         if not isinstance(status, int) or status < 200:
             raise RuntimeError(f"Invalid response status {status!r}")
 
+        cors = self.protocol.app._cors_table
+        if cors is not None:
+            # As the native host appends them (oldman_server.cors): the fixed
+            # response's or the route's policy, else the default.
+            request = self.request
+            if self.fixed is not None:
+                code = cors.fixed.get(self.url.split("?", 1)[0], 0)
+            else:
+                route = request.route if request is not None else None
+                code = getattr(route.extra, "cors_code", 0) if route is not None else 0
+            origin = request.headers.get("origin") if request is not None else None
+            for name, value in cors.response_headers(code, origin):
+                headers.add(name, value)
+
         if not has_message_body(status):
             # Header-only response status
             self.response_func = None

@@ -97,6 +97,9 @@ class Blueprint(BaseApp):
         version (Optional[Union[int, str, float]]): Version number of the API implemented by this blueprint.
         strict_slashes (Optional[bool]): Whether or not the URL should end with a slash.
         version_prefix (str): Prefix for the version. Default is "/v".
+        cors (Optional[Union[bool, CORS]]): The CORS policy of its routes
+            (oldman_server.cors) that set none themselves: None takes the
+            application's, False none.
     """  # noqa: E501
 
     __slots__ = (
@@ -111,6 +114,7 @@ class Blueprint(BaseApp):
         "_allow_route_overwrite",
         "_registrations",
         "copied_from",
+        "cors",
         "ctx",
         "exceptions",
         "host",
@@ -133,6 +137,7 @@ class Blueprint(BaseApp):
         version: int | str | float | None = None,
         strict_slashes: bool | None = None,
         version_prefix: str = "/v",
+        cors: Any = None,
     ):
         super().__init__(name=name)
         self.reset()
@@ -148,6 +153,7 @@ class Blueprint(BaseApp):
         )
         self.version = version
         self.version_prefix = version_prefix
+        self.cors = cors
 
     def __repr__(self) -> str:
         args = ", ".join(
@@ -291,6 +297,7 @@ class Blueprint(BaseApp):
         strict_slashes: bool | None = None,
         version_prefix: str = "/v",
         name_prefix: str | None = "",
+        cors: Any = None,
     ) -> BlueprintGroup:
         """Group multiple blueprints (or other blueprint groups) together.
 
@@ -314,6 +321,8 @@ class Blueprint(BaseApp):
                 URL. Default is "/v".
             name_prefix (Optional[str]): Prefix to be used for the name of
                 the blueprints in the group. Default is an empty string.
+            cors (Optional[Union[bool, CORS]]): The CORS policy of the routes
+                of its blueprints that set none themselves (oldman_server.cors).
 
         Returns:
             BlueprintGroup: A group of blueprints.
@@ -342,6 +351,7 @@ class Blueprint(BaseApp):
             strict_slashes=strict_slashes,
             version_prefix=version_prefix,
             name_prefix=name_prefix,
+            cors=cors,
         )
         for bp in chain(blueprints):
             bps.append(bp)
@@ -402,6 +412,7 @@ class Blueprint(BaseApp):
         opt_strict_slashes = options.get("strict_slashes", None)
         opt_version_prefix = options.get("version_prefix", self.version_prefix)
         opt_name_prefix = options.get("name_prefix", None)
+        opt_cors = options.get("cors", None)
         error_format = options.get(
             "error_format", app.config.FALLBACK_ERROR_FORMAT
         )
@@ -438,6 +449,7 @@ class Blueprint(BaseApp):
             strict_slashes = self._extract_value(
                 future.strict_slashes, opt_strict_slashes, self.strict_slashes
             )
+            cors = self._extract_value(future.cors, opt_cors, self.cors)
 
             name = future.name
             if opt_name_prefix:
@@ -464,6 +476,7 @@ class Blueprint(BaseApp):
                 version_prefix,
                 route_error_format,
                 future.route_context,
+                cors,
             )
 
             # Another registration with other options may have added the
@@ -496,7 +509,11 @@ class Blueprint(BaseApp):
             applied.add(future)
             # Prepend the blueprint URI prefix if available
             uri = self._setup_uri(future.uri, url_prefix)
-            apply_route = FutureStatic(uri, *future[1:])
+            apply_route = FutureStatic(
+                uri,
+                *future[1:-1],
+                self._extract_value(future.cors, opt_cors, self.cors),
+            )
 
             if any(apply_route in r.applied_routes for r in same_app):
                 continue
@@ -729,6 +746,7 @@ class BlueprintGroup(bpg_base):
         "_strict_slashes",
         "_version_prefix",
         "_name_prefix",
+        "_cors",
     )
 
     def __init__(
@@ -738,6 +756,7 @@ class BlueprintGroup(bpg_base):
         strict_slashes: bool | None = None,
         version_prefix: str = "/v",
         name_prefix: str | None = "",
+        cors: Any = None,
     ):
         self._blueprints: list[Blueprint] = []
         self._url_prefix = url_prefix
@@ -745,6 +764,13 @@ class BlueprintGroup(bpg_base):
         self._version_prefix = version_prefix
         self._strict_slashes = strict_slashes
         self._name_prefix = name_prefix
+        self._cors = cors
+
+    @property
+    def cors(self) -> Any:
+        """The CORS policy of the group's routes that set none themselves
+        (oldman_server.cors): None takes the application's, False none."""
+        return self._cors
 
     @property
     def url_prefix(self) -> int | str | float | None:

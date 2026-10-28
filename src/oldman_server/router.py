@@ -123,6 +123,7 @@ class Router(BaseRouter):
         version_prefix: str = "/v",
         overwrite: bool = False,
         error_format: str | None = None,
+        cors: Any = None,
     ) -> Route | list[Route]:
         """Add a handler to the router
 
@@ -185,6 +186,8 @@ class Router(BaseRouter):
             route.extra.hosts = hosts
             route.extra.static = static
             route.extra.error_format = error_format
+            # Its CORS policy option (oldman_server.cors resolves it at finalize).
+            route.extra.cors = cors
 
             if error_format:
                 check_error_format(route.extra.error_format)

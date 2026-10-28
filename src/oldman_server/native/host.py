@@ -18,6 +18,7 @@ from oldman_server.application.constants import ServerStage
 from oldman_server.application.state import ApplicationServerInfo
 from oldman_server import compat as _compat
 from oldman_server.compat import Header
+from oldman_server.cors import compile as cors_compile
 from oldman_server.exceptions import (BadRequest, ExpectationFailed, PayloadTooLarge, RequestCancelled,
                               OldmanServerException, RequestTimeout, ServerError, ServiceUnavailable)
 from oldman_server.helpers import has_message_body
@@ -58,6 +59,26 @@ _form.native_multipart = _native.parse_multipart
 # The native host's current Engine; at most one serves at a time. Streamed
 # responses queue their pieces through it.
 _engine = None
+# Whether the served app has a route with a CORS policy of its own: its
+# answers then name their route's policy (see _with_cors).
+_cors_codes = False
+
+
+class _Answered(Exception):
+    """_call_flat: the request was answered before routing (a CORS preflight)."""
+
+
+def _with_cors(request, result):
+    """`result` naming the CORS policy of the request's route for the native
+    host (the decision kind's high bits): unchanged for the default policy."""
+    route = request.route
+    code = getattr(route.extra, "cors_code", 0) if route is not None else 0
+    if not code or result is None:
+        return result
+    if len(result) == 3:
+        return (*result, code << 8, -1)
+    status, body, headers, kind, value = result
+    return (status, body, headers, kind | code << 8, value)
 
 # Exact fork types whose processed_headers/send are the BaseHTTPResponse ones;
 # their headers are encoded inline. Subclasses keep the generic calls.
@@ -470,8 +491,15 @@ class _BufferedExchange:
         # Sanic's stage while a response is being sent: errors can no longer
         # produce an error response, only end the connection.
         self.streaming, self.stage = "open", Stage.RESPONSE
+        kind = STREAM_START
+        if _cors_codes:
+            # The CORS policy of the request's route (see _with_cors).
+            request = Request._current.get(None)
+            route = request.route if request is not None else None
+            if route is not None:
+                kind |= getattr(route.extra, "cors_code", 0) << 8
         await _engine.stream_send(
-            self.native.request_id, self.native.shard, STREAM_START, first, status,
+            self.native.request_id, self.native.shard, kind, first, status,
             tuple(headers), int(lengths[0]) if lengths else -1)
 
     async def _stream_more(self, data, end_stream):
@@ -770,9 +798,15 @@ class NativeApplication:
         # per request. Router methods replaced after startup are not supported.
         self._standard_router = self._flat and app.router._native_routing_methods_standard
         self._cached_routes = cached_routes(app)
-        # Nothing after the send changes the answer (an access log line or a
-        # cached route): sanic_finish may settle the request too.
-        self._settle_natively = not self._access_log and not self._cached_routes
+        # A route with a CORS policy of its own: answers name it (_with_cors).
+        global _cors_codes
+        table = app._cors_table
+        self._cors_codes = _cors_codes = table is not None and table.route_policies
+        # Nothing after the send changes the answer (an access log line, a
+        # cached route or a route's CORS policy): sanic_finish may settle the
+        # request too.
+        self._settle_natively = (not self._access_log and not self._cached_routes
+                                 and not self._cors_codes)
 
     @staticmethod
     def _flat_unsupported(app):
@@ -923,6 +957,8 @@ class NativeApplication:
                 _log_access(request, exchange, started)
             if self._cached_routes and request.method == "GET":
                 result = self._cached(request, result)
+            if self._cors_codes:
+                result = _with_cors(request, result)
             return result
         finally:
             request_class._current.reset(token)
@@ -980,6 +1016,12 @@ class NativeApplication:
                     await app.dispatch("http.routing.before", inline=True, context={"request": request})
                     if app.path_rewriters:
                         app._rewrite_request_path(request)
+                    # A CORS preflight is answered here, before routing
+                    # (OldmanServer.handle_request), when routes have policies
+                    # of their own: the host answers the default policy's.
+                    if (self._cors_codes and request.method == "OPTIONS"
+                            and await app._cors_table.preflight(app, request)):
+                        raise _Answered
                     router = app.router
                     # Host-free router.get() results, kept by the router while its
                     # route table stands (None: the Host is read).
@@ -1155,6 +1197,8 @@ class NativeApplication:
                             await response.eof()
                         elif not hasattr(handler, "is_websocket"):
                             raise ServerError(f"Invalid response type {response!r} (need HTTPResponse)")
+                except _Answered:
+                    pass
                 except asyncio.CancelledError as error:
                     await self._cancelled(request, exchange, error)
                 except Exception as error:
@@ -1174,6 +1218,8 @@ class NativeApplication:
                     _log_access(request, exchange, started)
                 if self._cached_routes and request.method == "GET":
                     result = self._cached(request, result)
+                if self._cors_codes:
+                    result = _with_cors(request, result)
                 answer = result
                 return answer
             finally:
@@ -1326,6 +1372,14 @@ async def open_engine(app, config, *, python_cpu=None):
         error_logger.warning("Stopping the running native server: one native server per process")
         _engine.abandon()
     _tune_gc(app.config)
+    # CORS (oldman_server.cors): the table finalize() compiled (compiled here
+    # for a server created before the app starts), and the fixed responses'
+    # policies; nothing when it is off.
+    table = app._cors_table if app.state.is_started else cors_compile(app)
+    if table is not None:
+        fixed = tuple((path, *response, table.fixed.get(path, 0))
+                      for path, response in app.fixed_responses.items())
+        config = replace(config, server=replace(config.server, fixed_responses=fixed, **table.native()))
     max_response = config.server.max_response_bytes
     if app.state.is_started:
         adapter = NativeApplication(app, max_response)

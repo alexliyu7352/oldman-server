@@ -31,6 +31,14 @@ DEFAULT_CONFIG = {
     "_FALLBACK_ERROR_FORMAT": _default,
     "ACCESS_LOG": False,
     "AUTO_RELOAD": False,
+    # CORS (oldman_server.cors), off while CORS_ORIGINS is not set: the
+    # application's default policy; routes may set their own (cors=).
+    "CORS_ALLOW_CREDENTIALS": False,
+    "CORS_ALLOW_HEADERS": None,  # None: a preflight's requested headers are echoed
+    "CORS_ALLOW_METHODS": "GET, HEAD, POST, PUT, PATCH, DELETE",
+    "CORS_EXPOSE_HEADERS": None,
+    "CORS_MAX_AGE": 600,
+    "CORS_ORIGINS": None,  # "*", or origins: "https://a.example, https://*.b.example"
     "EVENT_AUTOREGISTER": False,
     "DEPRECATION_FILTER": "once",
     "FORWARDED_FOR_HEADER": "X-Forwarded-For",
@@ -144,6 +152,12 @@ class Config(dict, metaclass=DescriptorMeta):
 
     ACCESS_LOG: bool
     AUTO_RELOAD: bool
+    CORS_ALLOW_CREDENTIALS: bool
+    CORS_ALLOW_HEADERS: str | Sequence[str] | None
+    CORS_ALLOW_METHODS: str | Sequence[str]
+    CORS_EXPOSE_HEADERS: str | Sequence[str] | None
+    CORS_MAX_AGE: int
+    CORS_ORIGINS: str | Sequence[str] | None
     EVENT_AUTOREGISTER: bool
     DEPRECATION_FILTER: FilterWarningType
     FORWARDED_FOR_HEADER: str
