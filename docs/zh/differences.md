@@ -62,6 +62,7 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - 响应辅助函数（`text()`、`html()`、`json()`、`raw()`、`redirect()`、`empty()`、`file()`、`file_stream()`）、`ResponseStream` 与 `request.respond()` 的 `headers` 接受任何 Mapping（包括只读的与 multidict，多值保留），并复制进响应自己的响应头，不改动调用方的对象。原版的 `redirect()` 把 `Location` 写进调用方传入的字典（传只读 Mapping 时抛 `TypeError`，重复使用同一个字典时 `Location` 留在里面），`file()`、`file_stream()` 同样往里写 `Last-Modified`、`Cache-Control` 等，`ResponseStream` 直接使用传入的 `Header` 对象。
 - 同一进程里再次运行应用（再次 `app.run()`，或测试客户端的每次调用）时，debug 模式与自动重载按这一次的参数设定，不沿用上一次运行的；同一次运行里再加监听地址的 `prepare()` 仍只能把它们打开。原版在第一次以 debug 运行之后，之后的运行一直是 debug。
 - 监听器、`app.add_task()` 的可调用对象与主进程事件按签名决定传几个参数，不再先调用一次、遇到 `TypeError` 再换参数调用：函数体里抛出的 `TypeError` 照常传出，函数不会被执行两次（原版会再以 `(app, loop)` 调用一次，并记一条误导的“loop 参数已弃用”警告）。
+- WebSocket 的接收按消息到达的顺序进行，连接结束（正常关闭或断开）排在已收到的消息之后：`recv()` 与 `async for` 先交出关闭前收到的每一条消息，之后 `recv()` 抛 `ConnectionClosedOK`（正常关闭：`async for` 随之结束，循环之后的代码照常执行，并派发 `websocket.handler.after`）或 `ConnectionClosedError`（断开或协议错误）。`recv()` 超时或被取消（`asyncio.wait_for`）不丢消息，之后照常可用。连接结束时，handler 正在等消息或还有没读的消息，就由 `recv()` 得知；没有在读的 handler 被取消，与请求方断开时的请求 handler 相同；之后 `send()` 遇到已关闭的连接（`WebsocketClosed`）按请求方离开处理，不派发 `websocket.handler.exception`。原版以取消等待中的 `recv()` 表示对方关闭：`async for` 抛 `CancelledError`，关闭前已到的消息可能丢掉，不派发 `websocket.handler.after`，`asyncio.wait_for(ws.recv(), t)` 超时一次之后每次 `recv()` 都抛 `ServerError`。两种服务器相同。
 
 ## 经原生主机时
 

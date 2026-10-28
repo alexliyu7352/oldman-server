@@ -1,6 +1,7 @@
 import asyncio
 import codecs
 
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -15,279 +16,204 @@ if TYPE_CHECKING:
 
 UTF8Decoder = codecs.getincrementaldecoder("utf-8")
 
+DATA_OPCODES = (Opcode.TEXT, Opcode.BINARY, Opcode.CONT)
+
 
 class WebsocketFrameAssembler:
     """
-    Assemble a message from frames.
-    Code borrowed from aaugustin/websockets project:
-    https://github.com/aaugustin/websockets/blob/6eb98dd8fa5b2c896b9f6be7e8d117708da82a39/src/websockets/sync/messages.py
+    Assemble messages from the frames received, in order, and end the stream
+    after them.
+
+    put() queues each data frame as the protocol receives it; get() returns
+    the next complete message; close() ends the stream after the queued
+    frames, so get() raises EOFError once the queued messages are taken.
+    get() can be cancelled (a timeout, say) at any point: a message leaves the
+    queue only when get() returns it. Reading from the peer pauses while more
+    than ``high`` frames wait and resumes once ``low`` or fewer do.
+
+    After the websockets project's own asyncio assembler:
+    https://github.com/python-websockets/websockets/blob/main/src/websockets/asyncio/messages.py
     """
 
     __slots__ = (
         "protocol",
-        "read_mutex",
-        "write_mutex",
-        "message_complete",
-        "message_fetched",
+        "frames",
+        "complete",
+        "waiter",
         "get_in_progress",
-        "decoder",
-        "completed_queue",
-        "chunks",
-        "chunks_queue",
+        "closed",
+        "high",
+        "low",
         "paused",
-        "get_id",
-        "put_id",
     )
     if TYPE_CHECKING:
         protocol: "WebsocketImplProtocol"
-        read_mutex: asyncio.Lock
-        write_mutex: asyncio.Lock
-        message_complete: asyncio.Event
-        message_fetched: asyncio.Event
-        completed_queue: asyncio.Queue
+        frames: deque[Frame]
+        complete: int
+        waiter: asyncio.Future | None
         get_in_progress: bool
-        decoder: codecs.IncrementalDecoder | None
-        # For streaming chunks rather than messages:
-        chunks: list[Data]
-        chunks_queue: asyncio.Queue[Data | None] | None
+        closed: bool
+        high: int
+        low: int
         paused: bool
 
-    def __init__(self, protocol) -> None:
+    def __init__(self, protocol, high: int = 16, low: int | None = None) -> None:
         self.protocol = protocol
-
-        self.read_mutex = asyncio.Lock()
-        self.write_mutex = asyncio.Lock()
-
-        self.completed_queue = asyncio.Queue(maxsize=1)  # type: asyncio.Queue[Data]
-
-        # put() sets this event to tell get() that a message can be fetched.
-        self.message_complete = asyncio.Event()
-        # get() sets this event to let put()
-        self.message_fetched = asyncio.Event()
-
-        # This flag prevents concurrent calls to get() by user code.
+        # Data frames received and not yet taken, and how many of the messages
+        # they hold are complete (their last frame is queued).
+        self.frames = deque()
+        self.complete = 0
+        # The reader waiting for a frame or the end, if any.
+        self.waiter = None
+        # This flag prevents concurrent calls to get() and get_iter().
         self.get_in_progress = False
-
-        # Decoder for text frames, None for binary frames.
-        self.decoder = None
-
-        # Buffer data from frames belonging to the same message.
-        self.chunks = []
-
-        # When switching from "buffering" to "streaming", we use a thread-safe
-        # queue for transferring frames from the writing thread (library code)
-        # to the reading thread (user code). We're buffering when chunks_queue
-        # is None and streaming when it's a Queue. None is a sentinel
-        # value marking the end of the stream, superseding message_complete.
-
-        # Stream data from frames belonging to the same message.
-        self.chunks_queue = None
-
-        # Flag to indicate we've paused the protocol
+        # The end of the stream: no frame comes after the queued ones.
+        self.closed = False
+        self.high = high
+        self.low = high // 4 if low is None else low
         self.paused = False
+
+    def __len__(self) -> int:
+        return len(self.frames)
+
+    def reaches_reader(self) -> bool:
+        """Whether the end of the stream reaches the reader through get(): it
+        is waiting for a message, or messages it has not taken are queued."""
+        return self.get_in_progress or bool(self.frames)
 
     async def get(self, timeout: float | None = None) -> Data | None:
         """
         Read the next message.
         :meth:`get` returns a single :class:`str` or :class:`bytes`.
-        If the :message was fragmented, :meth:`get` waits until the last frame
+        If the message was fragmented, :meth:`get` waits until the last frame
         is received, then it reassembles the message.
         If ``timeout`` is set and elapses before a complete message is
-        received, :meth:`get` returns ``None``.
+        received, :meth:`get` returns ``None``; ``0`` only takes a message
+        already received.
+        Raises :exc:`EOFError` when the stream has ended and no complete
+        message is left.
         """
-        completed: bool
-        async with self.read_mutex:
-            if timeout is not None and timeout <= 0:
-                if not self.message_complete.is_set():
+        if self.get_in_progress:
+            raise ServerError(
+                "Called get() on Websocket frame assembler "
+                "while asynchronous get is already in progress."
+            )
+        self.get_in_progress = True
+        try:
+            if not self.complete:
+                if timeout is None:
+                    await self._wait_complete()
+                elif timeout <= 0:
+                    if self.closed:
+                        raise EOFError("stream of frames ended")
                     return None
-            if self.get_in_progress:
-                # This should be guarded against with the read_mutex,
-                # exception is only here as a failsafe
-                raise ServerError(
-                    "Called get() on Websocket frame assembler "
-                    "while asynchronous get is already in progress."
-                )
-            self.get_in_progress = True
-
-            # If the message_complete event isn't set yet, release the lock to
-            # allow put() to run and eventually set it.
-            # Locking with get_in_progress ensures only one task can get here.
-            if timeout is None:
-                completed = await self.message_complete.wait()
-            elif timeout <= 0:
-                completed = self.message_complete.is_set()
-            else:
-                try:
-                    await asyncio.wait_for(
-                        self.message_complete.wait(), timeout=timeout
-                    )
-                except asyncio.TimeoutError:
-                    ...
-                finally:
-                    completed = self.message_complete.is_set()
-
-            # Unpause the transport, if its paused
-            if self.paused:
-                self.protocol.resume_frames()
-                self.paused = False
-            if not self.get_in_progress:  # no cov
-                # This should be guarded against with the read_mutex,
-                # exception is here as a failsafe
-                raise ServerError(
-                    "State of Websocket frame assembler was modified while an "
-                    "asynchronous get was in progress."
-                )
+                else:
+                    try:
+                        await asyncio.wait_for(self._wait_complete(), timeout)
+                    except asyncio.TimeoutError:
+                        return None
+            frames = []
+            while True:
+                frame = self._take()
+                frames.append(frame)
+                if frame.fin:
+                    break
+        finally:
             self.get_in_progress = False
-
-            # Waiting for a complete message timed out.
-            if not completed:
-                return None
-            if not self.message_complete.is_set():
-                return None
-
-            self.message_complete.clear()
-
-            joiner: Data = b"" if self.decoder is None else ""
-            # mypy cannot figure out that chunks have the proper type.
-            message: Data = joiner.join(self.chunks)  # type: ignore
-            if self.message_fetched.is_set():
-                # This should be guarded against with the read_mutex,
-                # and get_in_progress check, this exception is here
-                # as a failsafe
-                raise ServerError(
-                    "Websocket get() found a message when "
-                    "state was already fetched."
-                )
-            self.message_fetched.set()
-            self.chunks = []
-            # this should already be None, but set it here for safety
-            self.chunks_queue = None
-            return message
+        data = b"".join(frame.data for frame in frames)
+        if frames[0].opcode is Opcode.TEXT:
+            return data.decode()  # UnicodeDecodeError for invalid UTF-8
+        return data
 
     async def get_iter(self) -> AsyncIterator[Data]:
         """
         Stream the next message.
         Iterating the return value of :meth:`get_iter` yields a :class:`str`
-        or :class:`bytes` for each frame in the message.
+        or :class:`bytes` for each frame in the message, as each arrives. The
+        iterator must be consumed to the end; a cancelled one leaves the rest
+        of its message unread. Raises :exc:`EOFError` when the stream has
+        ended before the message's first frame.
         """
-        async with self.read_mutex:
-            if self.get_in_progress:
-                # This should be guarded against with the read_mutex,
-                # exception is only here as a failsafe
-                raise ServerError(
-                    "Called get_iter on Websocket frame assembler "
-                    "while asynchronous get is already in progress."
-                )
-            self.get_in_progress = True
-
-            chunks = self.chunks
-            self.chunks = []
-            self.chunks_queue = asyncio.Queue()
-
-            # Sending None in chunk_queue supersedes setting message_complete
-            # when switching to "streaming". If message is already complete
-            # when the switch happens, put() didn't send None, so we have to.
-            if self.message_complete.is_set():
-                await self.chunks_queue.put(None)
-
-            # Locking with get_in_progress ensures only one task can get here
-            for c in chunks:
-                yield c
+        if self.get_in_progress:
+            raise ServerError(
+                "Called get_iter on Websocket frame assembler "
+                "while asynchronous get is already in progress."
+            )
+        self.get_in_progress = True
+        try:
+            frame = await self._next()
+            decoder = (
+                UTF8Decoder(errors="strict")
+                if frame.opcode is Opcode.TEXT
+                else None
+            )
             while True:
-                chunk = await self.chunks_queue.get()
-                if chunk is None:
+                if decoder is None:
+                    yield bytes(frame.data)
+                else:
+                    yield decoder.decode(frame.data, frame.fin)
+                if frame.fin:
                     break
-                yield chunk
-
-            # Unpause the transport, if its paused
-            if self.paused:
-                self.protocol.resume_frames()
-                self.paused = False
-            if not self.get_in_progress:  # no cov
-                # This should be guarded against with the read_mutex,
-                # exception is here as a failsafe
-                raise ServerError(
-                    "State of Websocket frame assembler was modified while an "
-                    "asynchronous get was in progress."
-                )
+                frame = await self._next()
+        finally:
             self.get_in_progress = False
-            if not self.message_complete.is_set():  # no cov
-                # This should be guarded against with the read_mutex,
-                # exception is here as a failsafe
-                raise ServerError(
-                    "Websocket frame assembler chunks queue ended before "
-                    "message was complete."
-                )
-            self.message_complete.clear()
-            if self.message_fetched.is_set():  # no cov
-                # This should be guarded against with the read_mutex,
-                # and get_in_progress check, this exception is
-                # here as a failsafe
-                raise ServerError(
-                    "Websocket get_iter() found a message when state was "
-                    "already fetched."
-                )
 
-            self.message_fetched.set()
-            # this should already be empty, but set it here for safety
-            self.chunks = []
-            self.chunks_queue = None
-
-    async def put(self, frame: Frame) -> None:
+    def put(self, frame: Frame) -> None:
         """
-        Add ``frame`` to the next message.
-        When ``frame`` is the final frame in a message, :meth:`put` waits
-        until the message is fetched, either by calling :meth:`get` or by
-        iterating the return value of :meth:`get_iter`.
+        Add ``frame`` to the next message. Control frames are ignored, as is
+        anything after the end of the stream.
         :meth:`put` assumes that the stream of frames respects the protocol.
         If it doesn't, the behavior is undefined.
         """
+        if frame.opcode not in DATA_OPCODES or self.closed:
+            return
+        self.frames.append(frame)
+        if frame.fin:
+            self.complete += 1
+        self._wake()
+        if len(self.frames) > self.high and not self.paused:
+            self.paused = True
+            self.protocol.pause_frames()
 
-        async with self.write_mutex:
-            if frame.opcode is Opcode.TEXT:
-                self.decoder = UTF8Decoder(errors="strict")
-            elif frame.opcode is Opcode.BINARY:
-                self.decoder = None
-            elif frame.opcode is Opcode.CONT:
-                pass
-            else:
-                # Ignore control frames.
-                return
-            data: Data
-            if self.decoder is not None:
-                data = self.decoder.decode(frame.data, frame.fin)
-            else:
-                data = frame.data
-            if self.chunks_queue is None:
-                self.chunks.append(data)
-            else:
-                await self.chunks_queue.put(data)
+    def close(self) -> None:
+        """End the stream after the queued frames."""
+        if not self.closed:
+            self.closed = True
+            self._wake()
 
-            if not frame.fin:
-                return
-            if not self.get_in_progress:
-                # nobody is waiting for this frame, so try to pause subsequent
-                # frames at the protocol level
-                self.paused = self.protocol.pause_frames()
-            # Message is complete. Wait until it's fetched to return.
+    def _wake(self) -> None:
+        if self.waiter is not None and not self.waiter.done():
+            self.waiter.set_result(None)
 
-            if self.chunks_queue is not None:
-                await self.chunks_queue.put(None)
-            if self.message_complete.is_set():
-                # This should be guarded against with the write_mutex
-                raise ServerError(
-                    "Websocket put() got a new message when a message was "
-                    "already in its chamber."
-                )
-            self.message_complete.set()  # Signal to get() it can serve the
-            if self.message_fetched.is_set():
-                # This should be guarded against with the write_mutex
-                raise ServerError(
-                    "Websocket put() got a new message when the previous "
-                    "message was not yet fetched."
-                )
+    async def _wait(self) -> None:
+        """Wait for the next frame or the end of the stream."""
+        self.waiter = asyncio.get_running_loop().create_future()
+        try:
+            await self.waiter
+        finally:
+            self.waiter = None
 
-            # Allow get() to run and eventually set the event.
-            await self.message_fetched.wait()
-            self.message_fetched.clear()
-            self.decoder = None
+    async def _wait_complete(self) -> None:
+        """Wait until a complete message is queued; EOFError at the end of
+        the stream (a message left incomplete is never returned)."""
+        while not self.complete:
+            if self.closed:
+                raise EOFError("stream of frames ended")
+            await self._wait()
+
+    async def _next(self) -> Frame:
+        """The next frame, waiting for it; EOFError at the end of the stream."""
+        while not self.frames:
+            if self.closed:
+                raise EOFError("stream of frames ended")
+            await self._wait()
+        return self._take()
+
+    def _take(self) -> Frame:
+        frame = self.frames.popleft()
+        if frame.fin:
+            self.complete -= 1
+        if self.paused and len(self.frames) <= self.low:
+            self.paused = False
+            self.protocol.resume_frames()
+        return frame

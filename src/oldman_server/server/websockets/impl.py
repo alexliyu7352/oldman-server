@@ -38,9 +38,6 @@ class WebsocketImplProtocol:
     pings: dict[bytes, asyncio.Future]
     conn_mutex: asyncio.Lock
     recv_lock: asyncio.Lock
-    recv_cancel: asyncio.Future | None
-    process_event_mutex: asyncio.Lock
-    can_pause: bool
     # asyncio.Future[None] | None
     data_finished_fut: asyncio.Future | None
     # asyncio.Future[None] | None
@@ -68,27 +65,26 @@ class WebsocketImplProtocol:
         self.close_timeout = close_timeout
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
-        self.assembler = WebsocketFrameAssembler(self)
+        self.assembler = WebsocketFrameAssembler(self, high=max_queue or 16)
         self.pings = {}
         self.conn_mutex = asyncio.Lock()
         self.recv_lock = asyncio.Lock()
-        self.recv_cancel = None
-        self.process_event_mutex = asyncio.Lock()
         self.data_finished_fut = None
-        self.can_pause = True
         self.pause_frame_fut = None
         self.keepalive_ping_task = None
         self.auto_closer_task = None
         self.connection_lost_waiter = None
         self.handler_task = None
+        # Replies the protocol makes (a pong, the closing handshake) that wait
+        # for a send in progress (_send_replies), and the task that writes them.
+        self._replies: list[bytes] | None = None
+        self._replies_task: asyncio.Task | None = None
 
     @property
     def subprotocol(self):
         return self.ws_proto.subprotocol
 
     def pause_frames(self):
-        if not self.can_pause:
-            return False
         if self.pause_frame_fut:
             websockets_logger.debug("Websocket connection already paused.")
             return False
@@ -174,26 +170,23 @@ class WebsocketImplProtocol:
                 # timeout occurs and the moment this coroutine resumes running
                 return self.connection_lost_waiter.done()
 
-    async def process_events(self, events: Sequence[Event]) -> None:
+    def process_events(self, events: Sequence[Event]) -> None:
         """
-        Process a list of incoming events.
+        Process a list of incoming events, in the order they arrived: data
+        frames go to the assembler, pongs acknowledge pings. A close frame is
+        the protocol's (ws_proto answers it); the message stream ends after
+        the frames before it, when the connection is lost.
         """
-        # Wrapped in a mutex lock, to prevent other incoming events
-        # from processing at the same time
-        async with self.process_event_mutex:
-            for event in events:
-                if not isinstance(event, Frame):
-                    # Event is not a frame. Ignore it.
-                    continue
-                if event.opcode == Opcode.PONG:
-                    await self.process_pong(event)
-                elif event.opcode == Opcode.CLOSE:
-                    if self.recv_cancel:
-                        self.recv_cancel.cancel()
-                else:
-                    await self.assembler.put(event)
+        for event in events:
+            if not isinstance(event, Frame):
+                # Event is not a frame. Ignore it.
+                continue
+            if event.opcode == Opcode.PONG:
+                self.process_pong(event)
+            elif event.opcode != Opcode.CLOSE:
+                self.assembler.put(event)
 
-    async def process_pong(self, frame: Frame) -> None:
+    def process_pong(self, frame: Frame) -> None:
         if frame.data in self.pings:
             # Acknowledge all pings up to the one matching this pong.
             ping_ids = []
@@ -515,8 +508,9 @@ class WebsocketImplProtocol:
         Receive the next message.
         Return a :class:`str` for a text frame and :class:`bytes` for a binary
         frame.
-        When the end of the message stream is reached, :meth:`recv` raises
-        :exc:`~websockets.exceptions.ConnectionClosed`. Specifically, it
+        The messages received before the connection closed are returned
+        first. When the end of the message stream is reached, :meth:`recv`
+        raises :exc:`~websockets.exceptions.ConnectionClosed`. Specifically, it
         raises :exc:`~websockets.exceptions.ConnectionClosedOK` after a normal
         connection closure and
         :exc:`~websockets.exceptions.ConnectionClosedError` after a protocol
@@ -524,50 +518,25 @@ class WebsocketImplProtocol:
         If ``timeout`` is ``None``, block until a message is received. Else,
         if no message is received within ``timeout`` seconds, return ``None``.
         Set ``timeout`` to ``0`` to check if a message was already received.
+        Cancelling :meth:`recv` (``asyncio.wait_for``, say) loses no message.
         :raises ~websockets.exceptions.ConnectionClosed: when the
             connection is closed
-        :raises asyncio.CancelledError: if the websocket closes while waiting
         :raises ServerError: if two tasks call :meth:`recv` or
             :meth:`recv_streaming` concurrently
         """
-
         if self.recv_lock.locked():
             raise ServerError(
                 "cannot call recv while another task is "
                 "already waiting for the next message"
             )
-        await self.recv_lock.acquire()
-        if self.ws_proto.state is CLOSED:
-            self.recv_lock.release()
-            raise WebsocketClosed(
-                "Cannot receive from websocket interface after it is closed."
-            )
-        assembler_get: asyncio.Task | None = None
-        try:
-            self.recv_cancel = asyncio.Future()
-            assembler_get = asyncio.create_task(self.assembler.get(timeout))
-            tasks = (self.recv_cancel, assembler_get)
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            done_task = next(iter(done))
-            if done_task is self.recv_cancel:
-                # recv was cancelled
-                for p in pending:
-                    p.cancel()
-                raise asyncio.CancelledError()
-            else:
-                self.recv_cancel.cancel()
-                return done_task.result()
-        except asyncio.CancelledError:
-            # recv was cancelled
-            if assembler_get:
-                assembler_get.cancel()
-            raise
-        finally:
-            self.recv_cancel = None
-            self.recv_lock.release()
+        async with self.recv_lock:
+            try:
+                return await self.assembler.get(timeout)
+            except EOFError:
+                pass
+            except UnicodeDecodeError as exc:
+                self.fail_connection(1007, f"{exc.reason} at position {exc.start}")
+            raise await self._closed_exception()
 
     async def recv_burst(self, max_recv=256) -> Sequence[Data]:
         """
@@ -575,7 +544,8 @@ class WebsocketImplProtocol:
         Return a :class:`list` containing :class:`str` for a text frame
         and :class:`bytes` for a binary frame.
         When the end of the message stream is reached, :meth:`recv_burst`
-        raises :exc:`~websockets.exceptions.ConnectionClosed`. Specifically,
+        returns the messages left and then raises
+        :exc:`~websockets.exceptions.ConnectionClosed`. Specifically,
         it raises :exc:`~websockets.exceptions.ConnectionClosedOK` after a
         normal connection closure and
         :exc:`~websockets.exceptions.ConnectionClosedError` after a protocol
@@ -585,60 +555,26 @@ class WebsocketImplProtocol:
         :raises ServerError: if two tasks call :meth:`recv_burst` or
             :meth:`recv_streaming` concurrently
         """
-
         if self.recv_lock.locked():
             raise ServerError(
                 "cannot call recv_burst while another task is already waiting "
                 "for the next message"
             )
-        await self.recv_lock.acquire()
-        if self.ws_proto.state is CLOSED:
-            self.recv_lock.release()
-            raise WebsocketClosed(
-                "Cannot receive from websocket interface after it is closed."
-            )
-        messages = []
-        assembler_get: asyncio.Task | None = None
-        try:
-            # Prevent pausing the transport when we're
-            # receiving a burst of messages
-            self.can_pause = False
-            self.recv_cancel = asyncio.Future()
-            while True:
-                assembler_get = asyncio.create_task(self.assembler.get(0))
-                tasks = (self.recv_cancel, assembler_get)
-                done, pending = await asyncio.wait(
-                    tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                done_task = next(iter(done))
-                if done_task is self.recv_cancel:
-                    # recv_burst was cancelled
-                    for p in pending:
-                        p.cancel()
-                    raise asyncio.CancelledError()
-                m = done_task.result()
-                if m is None:
-                    # None left in the burst. This is good!
-                    break
-                messages.append(m)
-                if len(messages) >= max_recv:
-                    # Too much data in the pipe. Hit our burst limit.
-                    break
-                # Allow an eventloop iteration for the
-                # next message to pass into the Assembler
-                await asyncio.sleep(0)
-            self.recv_cancel.cancel()
-        except asyncio.CancelledError:
-            # recv_burst was cancelled
-            if assembler_get:
-                assembler_get.cancel()
-            raise
-        finally:
-            self.recv_cancel = None
-            self.can_pause = True
-            self.recv_lock.release()
-        return messages
+        messages: list[Data] = []
+        async with self.recv_lock:
+            try:
+                while len(messages) < max_recv:
+                    message = await self.assembler.get(0)
+                    if message is None:
+                        break
+                    messages.append(message)
+                return messages
+            except EOFError:
+                if messages:
+                    return messages
+            except UnicodeDecodeError as exc:
+                self.fail_connection(1007, f"{exc.reason} at position {exc.start}")
+            raise await self._closed_exception()
 
     async def recv_streaming(self) -> AsyncIterator[Data]:
         """
@@ -654,27 +590,27 @@ class WebsocketImplProtocol:
                 "Cannot call recv_streaming while another task "
                 "is already waiting for the next message"
             )
-        await self.recv_lock.acquire()
-        if self.ws_proto.state is CLOSED:
-            self.recv_lock.release()
-            raise WebsocketClosed(
-                "Cannot receive from websocket interface after it is closed."
-            )
-        try:
-            cancelled = False
-            self.recv_cancel = asyncio.Future()
-            self.can_pause = False
-            async for m in self.assembler.get_iter():
-                if self.recv_cancel.done():
-                    cancelled = True
-                    break
-                yield m
-            if cancelled:
-                raise asyncio.CancelledError()
-        finally:
-            self.can_pause = True
-            self.recv_cancel = None
-            self.recv_lock.release()
+        async with self.recv_lock:
+            try:
+                async for data in self.assembler.get_iter():
+                    yield data
+                return
+            except EOFError:
+                pass
+            except UnicodeDecodeError as exc:
+                self.fail_connection(1007, f"{exc.reason} at position {exc.start}")
+            raise await self._closed_exception()
+
+    async def _closed_exception(self) -> Exception:
+        """The exception for the end of the message stream: the protocol's
+        ConnectionClosedOK or ConnectionClosedError, known once the connection
+        is closed. The stream ends when the connection is lost (its close code
+        and reason are then final), right after the server closes it once the
+        closing handshake is done."""
+        if self.connection_lost_waiter is None:
+            return WebsocketClosed("The websocket connection was never open.")
+        await asyncio.shield(self.connection_lost_waiter)
+        return self.ws_proto.close_exc
 
     async def send(self, message: Data | Iterable[Data]) -> None:
         """
@@ -812,32 +748,38 @@ class WebsocketImplProtocol:
                     # This will fail the connection appropriately
                     ConnectionProtocol.close(self.io_proto, timeout=1.0)
 
-    async def async_data_received(self, data_to_send, events_to_process):
-        if self.ws_proto.state in (OPEN, CLOSING) and len(data_to_send) > 0:
-            # receiving data can generate data to send (eg, pong for a ping)
-            # send connection.data_to_send()
-            await self.send_data(data_to_send)
-        if len(events_to_process) > 0:
-            await self.process_events(events_to_process)
+    def _send_replies(self, data_to_send) -> None:
+        """Write what the protocol produced on receiving (a pong, the closing
+        handshake, the end of the data phase), in order. A send in progress
+        holds conn_mutex and may write a frame in several pieces: the replies
+        then wait for it, so frames never interleave."""
+        if not data_to_send:
+            return
+        if self._replies is not None:  # earlier replies are waiting
+            self._replies.extend(data_to_send)
+        elif self.conn_mutex.locked():
+            self._replies = list(data_to_send)
+            self._replies_task = asyncio.create_task(self._send_replies_later())
+        else:
+            self._write_replies(data_to_send)
 
-    def data_received(self, data):
-        self.ws_proto.receive_data(data)
-        data_to_send = self.ws_proto.data_to_send()
-        events_to_process = self.ws_proto.events_received()
-        if len(data_to_send) > 0 or len(events_to_process) > 0:
-            asyncio.create_task(
-                self.async_data_received(data_to_send, events_to_process)
-            )
+    async def _send_replies_later(self) -> None:
+        async with self.conn_mutex:
+            replies, self._replies = self._replies, None
+            self._replies_task = None
+            self._write_replies(replies or [])
 
-    async def async_eof_received(self, data_to_send, events_to_process):
-        # receiving EOF can generate data to send
-        # send connection.data_to_send()
-        if self.ws_proto.state in (OPEN, CLOSING) and len(data_to_send) > 0:
-            await self.send_data(data_to_send)
-        if len(events_to_process) > 0:
-            await self.process_events(events_to_process)
-        if self.recv_cancel:
-            self.recv_cancel.cancel()
+    def _write_replies(self, data_to_send) -> None:
+        for data in data_to_send:
+            if data:
+                if self.io_proto and self.io_proto.transport:
+                    self.io_proto.transport.write(data)
+            else:
+                # An EOF: not sent as such, it ends the data transfer phase,
+                # after which the auto-closer closes the connection.
+                self._end_data_phase()
+
+    def _end_data_phase(self) -> None:
         if (
             self.auto_closer_task
             and not self.auto_closer_task.done()
@@ -846,31 +788,40 @@ class WebsocketImplProtocol:
         ):
             # Auto-close the connection
             self.data_finished_fut.set_result(None)
-            # Cancel the running handler if its waiting
         else:
             # This will fail the connection appropriately
             ConnectionProtocol.close(self.io_proto, timeout=1.0)
 
+    def data_received(self, data):
+        # Handled at once and in order, as received: the messages queue in
+        # the assembler in the order they arrived.
+        self.ws_proto.receive_data(data)
+        self._send_replies(self.ws_proto.data_to_send())
+        self.process_events(self.ws_proto.events_received())
+
     def eof_received(self) -> bool | None:
         self.ws_proto.receive_eof()
-        data_to_send = self.ws_proto.data_to_send()
-        events_to_process = self.ws_proto.events_received()
-        asyncio.create_task(
-            self.async_eof_received(data_to_send, events_to_process)
-        )
+        self._send_replies(self.ws_proto.data_to_send())
+        self.process_events(self.ws_proto.events_received())
+        # The peer ended its side: the data transfer phase is over (after any
+        # reply still waiting to be written).
+        self._send_replies([b""])
         return False
 
     def connection_lost(self, exc):
         """
         The WebSocket Connection is Closed.
         """
-        if not self.ws_proto.state == CLOSED:
-            # signal to the websocket connection handler
-            # we've lost the connection
-            self.ws_proto.fail(code=1006)
+        if self.ws_proto.state is not CLOSED:
+            # The connection is gone: receive_eof (idempotent) makes the
+            # protocol CLOSED with its close code and reason final, so
+            # close_exc tells a normal closure from a lost connection.
+            self.ws_proto.receive_eof()
             self.ws_proto.state = CLOSED
 
         self.abort_pings()
+        # The message stream ends after the frames received before.
+        self.assembler.close()
         # The transport is gone, so the data transfer phase is over, whoever
         # closed it: the auto-closer finishes instead of waiting for an end
         # (end_connection, an EOF) that can no longer come.
@@ -879,9 +830,15 @@ class WebsocketImplProtocol:
             self.data_finished_fut = None
         if self.connection_lost_waiter and not self.connection_lost_waiter.done():
             self.connection_lost_waiter.set_result(None)
-        # The peer left: a handler still running is cancelled, as a request
-        # handler is when its connection is lost.
-        if self.handler_task is not None and not self.handler_task.done():
+        # A handler still running learns of the end through recv() when it is
+        # waiting for a message or has messages left to read (they come
+        # first, then ConnectionClosed); otherwise it is cancelled, as a
+        # request handler is when its connection is lost.
+        if (
+            self.handler_task is not None
+            and not self.handler_task.done()
+            and not self.assembler.reaches_reader()
+        ):
             self.handler_task.cancel()
 
     async def __aiter__(self):

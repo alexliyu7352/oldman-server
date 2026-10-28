@@ -57,6 +57,7 @@ from oldman_server.exceptions import (
     OldmanServerException,
     ServerError,
     URLBuildError,
+    WebsocketClosed,
 )
 from oldman_server.handlers import ErrorHandler
 from oldman_server.headers import trusted_networks, trusted_sources
@@ -82,7 +83,7 @@ from oldman_server.request import Request
 from oldman_server.request.types import _NATIVE_UNSET
 from oldman_server.response import BaseHTTPResponse, HTTPResponse, ResponseStream
 from oldman_server.router import Router
-from oldman_server.server.websockets.impl import ConnectionClosed
+from oldman_server.server.websockets.impl import ConnectionClosed, ConnectionClosedOK
 from oldman_server.signals import Event, Signal, SignalRouter
 from oldman_server.touchup import TouchUp, TouchUpMeta
 from oldman_server.types.shared_ctx import SharedContext
@@ -1587,7 +1588,10 @@ class OldmanServer(
         ws.handler_task = fut
         cancelled = False
         try:
-            await fut
+            try:
+                await fut
+            except ConnectionClosedOK:
+                pass  # recv() reached the end of a normal closure: an end
             await self.dispatch(
                 "websocket.handler.after",
                 inline=True,
@@ -1595,7 +1599,10 @@ class OldmanServer(
                 reverse=True,
                 fail_not_found=False,
             )
-        except (CancelledError, ConnectionClosed):  # type: ignore
+        except (CancelledError, ConnectionClosed, WebsocketClosed):  # type: ignore
+            # Cancelled (the server stops, the connection was lost), or the
+            # peer left: a recv() after an abnormal closure, a send() after
+            # any closure.
             cancelled = True
         except Exception as e:
             self.error_handler.log(request, e)

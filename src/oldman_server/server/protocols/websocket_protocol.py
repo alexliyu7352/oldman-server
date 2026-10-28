@@ -1,16 +1,10 @@
 from collections.abc import Sequence
 from typing import cast
 
-
-try:  # websockets >= 11.0
-    from websockets.protocol import State  # type: ignore
-    from websockets.server import ServerProtocol  # type: ignore
-except ImportError:  # websockets < 11.0
-    from websockets.connection import State
-    from websockets.server import ServerConnection as ServerProtocol
-
 from websockets import http11
 from websockets.datastructures import Headers as WSHeaders
+from websockets.protocol import State
+from websockets.server import ServerProtocol
 from websockets.typing import Subprotocol
 
 from oldman_server.exceptions import OldmanServerException
@@ -62,6 +56,12 @@ class WebSocketProtocol(HttpProtocol):
         self.log_websocket("CLOSE")
         self.websocket_url = None
         self.websocket_peer = None
+
+    def _cancels_task_on_lost(self) -> bool:
+        # After the upgrade the WebSocket tells the handler itself
+        # (WebsocketImplProtocol.connection_lost): through recv() when it is
+        # reading, so the messages received before the end are not lost.
+        return self.websocket is None
 
     def data_received(self, data):
         if self.websocket is not None:

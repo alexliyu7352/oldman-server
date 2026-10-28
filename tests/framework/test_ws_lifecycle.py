@@ -72,6 +72,143 @@ async def test_a_lost_connection_cancels_a_handler_that_does_not_receive():
         assert await until(lambda: not websocket_tasks()), websocket_tasks()
 
 
+def collecting_app(name):
+    """An app whose handler reads to the end: what it received, and whether
+    the code after its loop and the after signal ran."""
+    app = OldmanServer(name)
+    app.ctx.received, app.ctx.events = [], []
+
+    @app.websocket("/collect")
+    async def collect(request, ws):
+        async for message in ws:
+            app.ctx.received.append(message)
+        app.ctx.events.append("after loop")
+
+    @app.signal("websocket.handler.after")
+    async def after(request, websocket):
+        app.ctx.events.append("after signal")
+
+    @app.signal("websocket.handler.exception")
+    async def failed(request, websocket, exception):
+        app.ctx.events.append(f"exception {type(exception).__name__}")
+
+    return app
+
+
+MESSAGES = [f"m{index}" for index in range(5)]
+
+
+async def send_messages(ws):
+    for message in MESSAGES:
+        await ws.send(message)
+
+
+async def test_a_normal_close_comes_after_every_message():
+    # The client sends five messages and closes at once: the handler gets
+    # all five, its async for ends, and the after signal is dispatched.
+    app = collecting_app("WsNormalClose")
+    async with app.async_test_client as client:
+        async with connect(f"ws://127.0.0.1:{client.port}/collect") as ws:
+            await send_messages(ws)
+        assert await until(lambda: "after signal" in app.ctx.events), app.ctx.events
+    assert app.ctx.received == MESSAGES
+    assert app.ctx.events == ["after loop", "after signal"]
+
+
+def test_a_normal_close_through_the_test_client():
+    app = collecting_app("WsNormalCloseTestClient")
+    app.test_client.websocket("/collect", mimic=send_messages)
+    # The test client sends an empty message after the mimic, then closes.
+    assert app.ctx.received == [*MESSAGES, ""]
+    assert app.ctx.events == ["after loop", "after signal"]
+
+
+def test_a_normal_close_through_the_reusable_client():
+    from oldman_server.testing.reusable import ReusableClient
+
+    app = collecting_app("WsNormalCloseReusable")
+    with ReusableClient(app) as client:
+        client.websocket("/collect", mimic=send_messages)
+        client.get("/collect")  # the server keeps running: a 426 meanwhile
+    assert app.ctx.received == [*MESSAGES, ""]
+    assert app.ctx.events == ["after loop", "after signal"]
+
+
+async def test_a_normal_close_through_the_async_test_client():
+    app = collecting_app("WsNormalCloseAsync")
+    async with app.async_test_client as client:
+        await client.websocket("/collect", mimic=send_messages)
+        assert await until(lambda: "after signal" in app.ctx.events), app.ctx.events
+    assert app.ctx.received == [*MESSAGES, ""]
+    assert app.ctx.events == ["after loop", "after signal"]
+
+
+async def test_recv_after_a_timeout_still_receives():
+    app = OldmanServer("WsRecvAfterTimeout")
+
+    @app.websocket("/late")
+    async def late(request, ws):
+        assert await ws.recv(timeout=0.05) is None
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(ws.recv(), 0.05)
+        await ws.send(await ws.recv())
+
+    async with app.async_test_client as client:
+        async with connect(f"ws://127.0.0.1:{client.port}/late") as ws:
+            await asyncio.sleep(0.3)
+            await ws.send("late")
+            assert await ws.recv() == "late"
+
+
+async def test_a_lost_connection_ends_recv_with_connection_closed_error():
+    app = OldmanServer("WsLostRecv")
+    app.ctx.events = []
+
+    @app.websocket("/held")
+    async def held(request, ws):
+        try:
+            await ws.recv()
+        except BaseException as error:
+            app.ctx.events.append(type(error).__name__)
+            raise
+
+    async with app.async_test_client as client:
+        ws = await connect(f"ws://127.0.0.1:{client.port}/held")
+        await asyncio.sleep(0.2)
+        ws.transport.abort()  # no closing handshake
+        assert await until(lambda: app.ctx.events == ["ConnectionClosedError"]), app.ctx.events
+        assert await until(lambda: not websocket_tasks()), websocket_tasks()
+
+
+async def test_sending_after_the_peer_closed_is_not_a_handler_error():
+    # The handler is busy while the client closes with messages still unread:
+    # it is not cancelled (the end reaches it through recv), and its next
+    # send() finds the connection closed, which ends it as the peer leaving,
+    # without the exception signal.
+    app = OldmanServer("WsSendAfterClose")
+    app.ctx.events = []
+
+    @app.websocket("/echo")
+    async def echo(request, ws):
+        async for message in ws:
+            await asyncio.sleep(0.2)
+            app.ctx.events.append(f"echo {message}")
+            await ws.send(message)
+
+    @app.signal("websocket.handler.exception")
+    async def failed(request, websocket, exception):
+        app.ctx.events.append(f"exception {type(exception).__name__}")
+
+    async with app.async_test_client as client:
+        async with connect(f"ws://127.0.0.1:{client.port}/echo") as ws:
+            await ws.send("a")
+            await ws.send("b")
+        assert await until(lambda: "echo a" in app.ctx.events)
+        await asyncio.sleep(0.3)
+        assert await until(lambda: not websocket_tasks()), websocket_tasks()
+    assert app.ctx.events == ["echo a"]
+
+
 SERVER = textwrap.dedent(
     """
     import asyncio

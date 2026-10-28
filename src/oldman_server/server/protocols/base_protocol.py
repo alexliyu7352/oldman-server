@@ -170,10 +170,15 @@ class ConnectionProtocol(asyncio.Protocol):
             # the CancelledError exception
             self.resume_writing()
             self.conn_info.lost = True
-            if self._task:
+            if self._task and self._cancels_task_on_lost():
                 self._task.cancel()
         except BaseException:
             error_logger.exception("protocol.connection_lost")
+
+    def _cancels_task_on_lost(self) -> bool:
+        """Whether losing the connection cancels its task (the request it
+        is handling): the handler learns that the client left."""
+        return True
 
     def pause_writing(self):
         self._can_write.clear()
