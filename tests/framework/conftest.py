@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from sanic_routing.exceptions import RouteExists
+from oldman_server.routing.exceptions import RouteExists
 from oldman_server.testing.testing import PORT
 
 from oldman_server import OldmanServer

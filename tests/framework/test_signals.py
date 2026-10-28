@@ -5,7 +5,7 @@ from itertools import count
 
 import pytest
 
-from sanic_routing.exceptions import NotFound
+from oldman_server.routing.exceptions import NotFound
 
 from oldman_server import Blueprint, OldmanServer, empty
 from oldman_server.exceptions import InvalidSignal, OldmanServerException

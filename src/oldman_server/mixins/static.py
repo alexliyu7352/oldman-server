@@ -8,7 +8,7 @@ from pathlib import Path, PurePath
 from typing import Any
 from urllib.parse import unquote
 
-from sanic_routing.route import Route
+from oldman_server.routing.route import Route
 
 from oldman_server.base.meta import AppMeta
 from oldman_server.compat import clear_function_annotate, stat_async

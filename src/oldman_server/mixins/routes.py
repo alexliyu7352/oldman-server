@@ -11,7 +11,7 @@ from typing import (
     cast,
 )
 
-from sanic_routing.route import Route
+from oldman_server.routing.route import Route
 
 from oldman_server.base.meta import AppMeta
 from oldman_server.constants import HTTP_METHODS

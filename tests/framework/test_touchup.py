@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from sanic_routing.exceptions import NotFound
+from oldman_server.routing.exceptions import NotFound
 
 from oldman_server.signals import RESERVED_NAMESPACES
 from oldman_server.touchup import TouchUp

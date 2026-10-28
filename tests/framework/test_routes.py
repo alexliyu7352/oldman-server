@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from sanic_routing.exceptions import (
+from oldman_server.routing.exceptions import (
     InvalidUsage,
     ParameterNameConflicts,
     RouteExists,

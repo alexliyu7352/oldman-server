@@ -9,9 +9,9 @@ from inspect import isawaitable
 from logging import DEBUG
 from typing import Any, cast
 
-from sanic_routing import BaseRouter, Route, RouteGroup
-from sanic_routing.exceptions import NotFound
-from sanic_routing.utils import path_to_parts
+from oldman_server.routing import BaseRouter, Route, RouteGroup
+from oldman_server.routing.exceptions import NotFound
+from oldman_server.routing.utils import path_to_parts
 
 from oldman_server.exceptions import InvalidSignal
 from oldman_server.log import error_logger, logger

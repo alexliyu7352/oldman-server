@@ -40,8 +40,8 @@ from typing import (
 )
 from urllib.parse import urlencode, urlunparse
 
-from sanic_routing.exceptions import FinalizationError, NotFound
-from sanic_routing.route import Route
+from oldman_server.routing.exceptions import FinalizationError, NotFound
+from oldman_server.routing.route import Route
 
 from oldman_server.application.state import ApplicationState, ServerStage
 from oldman_server.base.root import BaseApp

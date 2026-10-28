@@ -1,6 +1,6 @@
 import pytest
 
-from sanic_routing.exceptions import RouteExists
+from oldman_server.routing.exceptions import RouteExists
 
 from oldman_server import Blueprint, Request, OldmanServer
 from oldman_server.response import text

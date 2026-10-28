@@ -55,6 +55,7 @@ Every push and PR runs `.github/workflows/ci.yml`, which builds and tests the sa
 - `src/oldman_server/native/host.py`: the adapter between the application and the native host, covering requests, responses, streams, files, protocol errors and WebSocket.
 - `src/oldman_server/native/engine.py`: the Python side of the native runtime (taking events, the per-request Task, reply batches, backpressure, file operations).
 - `native/`: the native host (`server.cc`) and runtime (`runtime.cc`, plus the io_uring build `liboldman_native_uring.so`), based on Asio; HTTP/1.1 parsing and writing (`http1.cc`), multipart parsing (`multipart.hh`), the Python bindings (`bridge.cc`, built as `oldman_server.native._native`).
+- `src/oldman_server/routing/`: the router (from sanic-routing 23.12.0; its license is in `LICENSE.sanic-routing`), with its tests in `tests/routing`.
 - `src/oldman_server/testing/`: the test client (from sanic-testing 24.6.0; its license is in `LICENSE.sanic-testing`).
 - `upstream/`: the upstream versions this is based on (archive URL, commit) and each file's SHA-256. Comparing performance with stock Sanic first needs the archive from `upstream/sanic.json` unpacked into `build/sanic-upstream/` (giving `sanic-<commit>/`), with every file checked before the comparison.
 - `tests/`: this package's tests, with `tests/framework` coming from Sanic's test suite; `scripts/`: build, test and measurement tools; `probes/`: the servers and drivers used for comparisons and diagnostics.

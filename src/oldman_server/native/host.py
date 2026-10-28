@@ -35,7 +35,7 @@ from oldman_server.router import Router
 from oldman_server.signals import RESERVED_NAMESPACES
 from oldman_server.touchup.schemes.base import BaseScheme
 from oldman_server.touchup.schemes.ode import RemoveDispatch
-from sanic_routing.exceptions import NotFound
+from oldman_server.routing.exceptions import NotFound
 
 from . import _native
 from .cpus import parse_cpus, same_thread, shard_count, worker_group

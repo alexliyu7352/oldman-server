@@ -1,0 +1,29 @@
+{
+  "url": "https://codeload.github.com/sanic-org/sanic-routing/tar.gz/7863561c8670a1e990ce2295982e47b93fd3cab1",
+  "commit": "7863561c8670a1e990ce2295982e47b93fd3cab1",
+  "sha256": "c40166d1918f8fd810606e8e804e774bc5e168ec04acaec5032a4f65f99bd165",
+  "tag": "v23.12.0",
+  "scope": "src/oldman_server/routing is sanic_routing/ of this archive (imports renamed); tests/routing is its tests/ (imports renamed); src/oldman_server/routing/LICENSE.sanic-routing is its LICENSE",
+  "original_sha256": {
+    "LICENSE": "963c6adaf52b4a1c13747982dbcec214b8f1bfd86c7509924233bec2b3daa671",
+    "sanic_routing/__init__.py": "cb728def3fb232444375999153f3cc5ed07e8f2077ab8e7d8215d0ce4b20cabc",
+    "sanic_routing/exceptions.py": "d01dc34f9dbeb541fff20abf41de9cc41d180253090b932038e94eeddd25a1c5",
+    "sanic_routing/group.py": "0444610791ff705e6f02aab02728ba7aef9ddc6049159e774d84bb198e9a6a8e",
+    "sanic_routing/line.py": "e226bc81308ace5719623279a1a30e4bef289c4a45fad77e6301c1d656613f63",
+    "sanic_routing/patterns.py": "b272b390a41ebffb2019700893a4c7b1b2650311a0f44110f198d1914f454607",
+    "sanic_routing/py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sanic_routing/route.py": "2c00a978b989b0eb44999c8bf198ea47e835254c7a7f35a872d0a2a9435e83f9",
+    "sanic_routing/router.py": "4172feda79ba02e4a2d98589da94994685d213ab92aa74ccc8af4dc5c7d47fa8",
+    "sanic_routing/tree.py": "c8d18a3d86914f38a8b699fa4246cc9610aa36ce8dab75fefe6c4729ec95b400",
+    "sanic_routing/utils.py": "266f377b6d4ab5c8ba1c30fa102a2288c7bf08489989d027b2d83310f7a39d2a",
+    "tests/conftest.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/test_builtin_param_types.py": "f1540a6a13a684ed42dffeb94cd427a76f6709c161f784eb85b8450032b795a4",
+    "tests/test_custom_param_types.py": "6de43f6acdc2da4130ea3d185eca945e8717a159b1f3572ad51c9bf223a7630d",
+    "tests/test_line.py": "a8895df7dfe1eac8eaf16cb1a94ac11a74691dbd4144fc5e7269d77f38f0e7e4",
+    "tests/test_node.py": "3bdccac4f6d2db7a0d4bd105d34ffb930ad3200129a74baa4c9665d9ccf5621b",
+    "tests/test_router_source.py": "46299560f9d21d81045703061530af611db6ba5205b0ede7ad5b303ecbf77e4b",
+    "tests/test_routing.py": "a6f11e6e8153460c3eb56700d54543a9bd051c152b57b0fa0b66f42db7c69985",
+    "tests/test_routing_utils.py": "4e7fbcccc6f89965d4de57c5cabb60243eb3a6ae70c6d89005ad998a55fdebf0",
+    "tests/test_unquote.py": "bd9f7c93336481a67eea2c4d5642d85f066a789f72ff4ccfa1d991fb4dec43e2"
+  }
+}

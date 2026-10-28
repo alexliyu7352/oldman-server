@@ -67,4 +67,4 @@ This package is only the server and the core framework on the request path. CORS
 
 ## License
 
-MIT (`LICENSE`). The framework layer derives from Sanic 25.12.1 and `oldman_server.testing` from sanic-testing 24.6.0, both MIT (their licenses ship in the package). The licenses of the third-party code in the published wheels (Asio, pybind11, liburing) are in `LICENSES/`, so the package's license expression is `MIT AND BSD-3-Clause AND BSL-1.0`.
+MIT (`LICENSE`). The framework layer derives from Sanic 25.12.1, `oldman_server.routing` from sanic-routing 23.12.0 and `oldman_server.testing` from sanic-testing 24.6.0, all MIT (their licenses ship in the package). The licenses of the third-party code in the published wheels (Asio, pybind11, liburing) are in `LICENSES/`, so the package's license expression is `MIT AND BSD-3-Clause AND BSL-1.0`.

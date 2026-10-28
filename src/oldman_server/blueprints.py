@@ -15,8 +15,8 @@ from typing import (
     overload,
 )
 
-from sanic_routing.exceptions import NotFound
-from sanic_routing.route import Route
+from oldman_server.routing.exceptions import NotFound
+from oldman_server.routing.route import Route
 
 from oldman_server.base.root import BaseApp
 from oldman_server.exceptions import OldmanServerException

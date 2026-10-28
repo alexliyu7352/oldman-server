@@ -55,6 +55,7 @@ python probes/wrk_comparison/run.py --out build/wrk-<新目录> --quiet         
 - `src/oldman_server/native/host.py`：应用与原生主机之间的适配层，包括请求、响应、流、文件、协议错误和 WebSocket。
 - `src/oldman_server/native/engine.py`：原生运行时的 Python 端（事件取出、每请求 Task、回传批次、背压、文件操作）。
 - `native/`：原生主机（`server.cc`）与运行时（`runtime.cc`，另有 io_uring 构建 `liboldman_native_uring.so`），基于 Asio；HTTP/1.1 解析与写出（`http1.cc`）、multipart 解析（`multipart.hh`）、Python 绑定（`bridge.cc`，构建为 `oldman_server.native._native`）。
+- `src/oldman_server/routing/`：路由器（源自 sanic-routing 23.12.0，许可见 `LICENSE.sanic-routing`），它的测试在 `tests/routing`。
 - `src/oldman_server/testing/`：测试客户端（源自 sanic-testing 24.6.0，许可见 `LICENSE.sanic-testing`）。
 - `upstream/`：所依据的上游版本（归档地址、提交）与各文件的 SHA-256。与原版 Sanic 的性能对照要先把 `upstream/sanic.json` 的归档解压到 `build/sanic-upstream/`（得到 `sanic-<提交>/`），对照前逐个文件核对。
 - `tests/`：本项目测试，其中 `tests/framework` 源自 Sanic 的测试集；`scripts/`：构建、测试与测量工具；`probes/`：对照与诊断用的服务端和驱动。

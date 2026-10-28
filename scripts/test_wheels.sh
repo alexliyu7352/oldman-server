@@ -39,6 +39,8 @@ for wheel in "$@"; do
     || failed+=("$tag: framework suites (native host)")
   "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/test_sanic_native_run.py tests/test_sanic_native_workers.py \
     || failed+=("$tag: native host runs")
+  "$venv/bin/python" -m pytest -q -p no:cacheprovider -rf tests/routing \
+    || failed+=("$tag: router suites")
 done
 if (( ${#failed[@]} )); then
   printf 'failed: %s\n' "${failed[@]}"

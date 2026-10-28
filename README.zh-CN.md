@@ -67,4 +67,4 @@ if __name__ == "__main__":
 
 ## 许可证
 
-MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方代码（Asio、pybind11、liburing）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND BSD-3-Clause AND BSL-1.0`。
+MIT（`LICENSE`）。框架层源自 Sanic 25.12.1，`oldman_server.routing` 源自 sanic-routing 23.12.0，`oldman_server.testing` 源自 sanic-testing 24.6.0，均为 MIT（各自的许可证在包内）；发布的 wheel 所含第三方代码（Asio、pybind11、liburing）的许可证见 `LICENSES/`，包的许可证表达式因此是 `MIT AND BSD-3-Clause AND BSL-1.0`。

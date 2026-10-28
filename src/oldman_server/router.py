@@ -6,11 +6,11 @@ from inspect import signature
 from typing import Any
 from uuid import UUID
 
-from sanic_routing import BaseRouter
-from sanic_routing.exceptions import NoMethod
-from sanic_routing.exceptions import NotFound as RoutingNotFound
-from sanic_routing.group import RouteGroup
-from sanic_routing.route import Route
+from oldman_server.routing import BaseRouter
+from oldman_server.routing.exceptions import NoMethod
+from oldman_server.routing.exceptions import NotFound as RoutingNotFound
+from oldman_server.routing.group import RouteGroup
+from oldman_server.routing.route import Route
 
 from oldman_server.constants import HTTP_METHODS
 from oldman_server.errorpages import check_error_format

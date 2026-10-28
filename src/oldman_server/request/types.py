@@ -14,7 +14,7 @@ from typing import (
     cast,
 )
 
-from sanic_routing.route import Route
+from oldman_server.routing.route import Route
 from typing_extensions import TypeVar
 
 from oldman_server.http.stream import Stream
