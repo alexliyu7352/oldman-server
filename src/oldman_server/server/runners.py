@@ -20,7 +20,7 @@ from functools import partial
 from signal import SIG_IGN, SIGINT, SIGTERM
 from signal import signal as signal_func
 
-from oldman_server.log import error_logger, server_logger
+from oldman_server.log import error_logger, logger, server_logger
 from oldman_server.logging.setup import setup_logging
 from oldman_server.models.server_types import Signal
 from oldman_server.native import native_server
@@ -149,31 +149,60 @@ class _Stop:
     A Python-level handler, not the loop's add_signal_handler: uvloop drops a
     signal that arrives while it is not running (between the startup steps'
     run_until_complete calls and run_forever), and the process then never
-    stopped. A signal during startup is kept until the start is complete (a
-    loop stopped in the middle of a startup step fails that step).
+    stopped.
 
-    A later signal stops at once only in a process of its own (`escalates`).
-    One user action reaches a worker the main process manages twice: Ctrl+C
-    sends SIGINT to the whole process group, a systemd stop SIGTERM to every
-    process of the unit, and the main process then stops each worker too.
-    There the main process escalates (its own second signal, or its stop
-    timeout, kills the workers), and a worker stops once.
+    A signal during startup cancels the startup rather than waiting for it:
+    a start that hangs (a database connect, say) would otherwise hold the
+    stop until something killed the process, with no cleanup at all. The
+    startup listener running (before_server_start, after_server_start) is
+    cancelled at its next await and the steps after it do not run; the stop
+    listeners paired with what did run still run (_run_startup_step and its
+    callers). The internal steps between the listeners (the app's startup,
+    the server start) are short and are not cancelled: the stop takes effect
+    when they end. Code that does not await cannot be cancelled and ends
+    first.
+
+    A later signal stops at once only in a process of its own (`escalates`):
+    during a startup listener, by raising KeyboardInterrupt there, which ends
+    even code that does not await. One user action reaches a worker the main
+    process manages twice: Ctrl+C sends SIGINT to the whole process group, a
+    systemd stop SIGTERM to every process of the unit, and the main process
+    then stops each worker too. There the main process escalates (its own
+    second signal, or its stop timeout, kills the workers), and a worker
+    stops once.
     """
 
     def __init__(self, app: OldmanServer, loop: asyncio.AbstractEventLoop,
                  escalates: bool = True):
         self.app, self.loop = app, loop
         self.escalates = escalates
-        self.requested = self.serving = False
+        # requested: a stop, from a signal or app.stop(); signalled: from a
+        # signal, which cancels the startup.
+        self.requested = self.serving = self.signalled = False
+        # The startup listener step running (a Task), which a stop cancels;
+        # cancelled: a stop did; forced: a second signal ended it at once.
+        self.startup: asyncio.Task | None = None
+        self.cancelled = self.forced = False
 
     def __call__(self, signum=None, frame=None) -> None:
-        if self.requested and not self.escalates:
+        if self.signalled and not self.escalates:
             return
-        if self.serving or self.requested:
+        first = not self.signalled
+        self.requested = self.signalled = True
+        if self.serving:
             self.loop.call_soon_threadsafe(
                 partial(self.app.stop, terminate=False)
             )
-        self.requested = True
+        elif first:
+            self.loop.call_soon_threadsafe(self._cancel_startup)
+        elif self.startup is not None:
+            self.forced = True
+            raise KeyboardInterrupt
+
+    def _cancel_startup(self) -> None:
+        if self.startup is not None and not self.startup.done():
+            self.cancelled = True
+            self.startup.cancel()
 
 
 def _setup_system_signals(
@@ -260,49 +289,120 @@ def _run_starting(loop, coro, stop):
             stop.requested = True
 
 
-def _release_after_failed_start(loop, app):
-    """after_server_stop for a server that did not start: it releases what
-    before_server_start set up. Its own failure is logged; the start failure
-    is the one that propagates."""
+def _run_startup_step(loop, coro, stop) -> bool:
+    """Run a startup listener step (before_server_start, after_server_start)
+    as the task a stop signal cancels (_Stop). True if it ran to its end,
+    False if a stop signal ended it. app.stop() from a listener (the loop
+    stops after its current iteration) does not end the step: the server
+    stops once started, as in _run_starting."""
+    task = loop.create_task(coro)
+    if stop is None:
+        loop.run_until_complete(task)
+        return True
+    stop.startup = task
+    try:
+        while True:
+            try:
+                loop.run_until_complete(task)
+                return True
+            except RuntimeError:
+                if task.done():
+                    raise
+                stop.requested = True
+    except asyncio.CancelledError:
+        if stop.cancelled and task.cancelled():
+            return False
+        raise
+    except KeyboardInterrupt:
+        # A second signal in a process of its own, raised by _Stop.
+        if not stop.forced:
+            raise
+        if not task.done():
+            task.cancel()
+        return False
+    finally:
+        stop.startup = None
+
+
+def _startup_interrupted(stop) -> None:
+    """A stop signal ended the start: a stop, not a failed start (a worker
+    exits as a stopped one, which the main process does not count as a
+    failure to start)."""
+    stop.app.state.is_stopping = True
+    logger.info("Startup interrupted by a stop signal")
+
+
+def _release_unstarted(loop, app):
+    """after_server_stop for a server that did not start (its start failed, or
+    a stop signal ended it): it releases what before_server_start set up. Its
+    own failure is logged; a start failure is the one that propagates."""
     try:
         _run_shutdown_coro(
             loop, partial(app._server_event, "shutdown", "after")
         )
     except Exception:
         error_logger.exception(
-            "Exception in after_server_stop after the server failed to start"
+            "Exception in after_server_stop of a server that did not start"
         )
 
 
-def _run_before_start(loop, app):
-    """before_server_start; when it fails, after_server_stop still runs."""
+def _run_before_start(loop, app, stop) -> bool:
+    """before_server_start. True when the start goes on; False when a stop
+    signal ended it (after_server_stop has run if before_server_start began).
+    When it fails, after_server_stop still runs and the failure propagates."""
+    if stop.signalled:
+        _startup_interrupted(stop)
+        return False
     try:
-        loop.run_until_complete(app._server_event("init", "before"))
+        completed = _run_startup_step(
+            loop, app._server_event("init", "before"), stop
+        )
     except BaseException:
-        _release_after_failed_start(loop, app)
+        _release_unstarted(loop, app)
         raise
+    if completed and not stop.signalled:
+        return True
+    _startup_interrupted(stop)
+    _release_unstarted(loop, app)
+    return False
+
+
+async def _after_start(app):
+    await app._server_event("init", "after")
+    app.set_serving(True)
 
 
 def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid,
                         stop=None):
-    """Start (after_server_start), serve until stopped, then stop:
-    before_server_stop, the server's cleanup, after_server_stop.
+    """Start (after_server_start: `start()` gives its coroutine), serve until
+    stopped, then stop: before_server_stop, the server's cleanup,
+    after_server_stop.
 
-    A failing start stops the server the same way, as does a stop signal
-    received while starting (`stop`, from _setup_system_signals). Every stop
+    A failing start stops the server the same way. A stop signal received
+    while starting (`stop`, from _setup_system_signals) cancels
+    after_server_start at its next await, or skips it if it has not begun;
+    before_server_stop runs only if after_server_start began. Every stop
     step runs even if an earlier one failed; the first failure then
     propagates.
     """
     errors = []
+    began = True
     if stop is not None:
         stop.app.state.is_stopping = False
     try:
-        start()
-        server_logger.info("Worker ready [%s]", pid)
-        if stop is not None:
-            stop.serving = True
-        if stop is None or not stop.requested:
-            loop.run_forever()
+        if stop is not None and stop.signalled:
+            began = False
+            _startup_interrupted(stop)
+        elif not _run_startup_step(loop, start(), stop) or (
+            stop is not None and stop.signalled
+        ):
+            _startup_interrupted(stop)
+        else:
+            server_logger.info("Worker ready [%s]", pid)
+            if stop is not None:
+                stop.serving = True
+            if stop is None or not stop.requested:
+                loop.run_forever()
     except BaseException as error:
         errors.append(error)
     server_logger.info("Stopping worker [%s]", pid)
@@ -317,7 +417,7 @@ def _run_server_forever(loop, start, before_stop, after_stop, cleanup, unix, pid
             stop.app.state.is_stopping = True
 
     for step in (
-        partial(_run_shutdown_coro, loop, before_stop),
+        partial(_run_shutdown_coro, loop, before_stop) if began else None,
         cleanup,
         partial(_run_shutdown_coro, loop, after_stop),
     ):
@@ -420,17 +520,23 @@ def _serve_native(
         )
     pid = os.getpid()
     server_logger.info("Starting native worker [%s]", pid)
-    # Before the startup steps: a stop signal from then on stops the server
-    # once its start is complete, so after_server_stop runs whenever
-    # before_server_start did (without it, SIGINT interrupted a step anywhere
-    # and SIGTERM killed the process).
+    # Before the startup steps: a stop signal from then on cancels the start
+    # (_Stop), and after_server_stop runs whenever before_server_start did
+    # (without it, SIGINT interrupted a step anywhere and SIGTERM killed the
+    # process).
     stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     try:
         loop.run_until_complete(app._startup())
-        _run_before_start(loop, app)
+        starting = _run_before_start(loop, app, stop)
     except BaseException:
         close_sockets()
         raise
+    if not starting:
+        close_sockets()
+        remove_unix_socket(bound_unix)
+        loop.close()
+        server_logger.info("Worker complete [%s]", pid)
+        return
     app.ack()
     # A worker process: Python runs on its group's first CPU, apart from its
     # shards and the other workers.
@@ -442,7 +548,7 @@ def _serve_native(
     except BaseException:
         close_sockets()
         error_logger.exception("Unable to start server", exc_info=True)
-        _release_after_failed_start(loop, app)
+        _release_unstarted(loop, app)
         raise  # a failed start: app.run() raises, a worker reports it
 
     def _cleanup():
@@ -465,7 +571,7 @@ def _serve_native(
 
     _run_server_forever(
         loop,
-        partial(_after_start, loop, app),
+        partial(_after_start, app),
         partial(app._server_event, "shutdown", "before"),
         partial(app._server_event, "shutdown", "after"),
         _cleanup,
@@ -473,11 +579,6 @@ def _serve_native(
         pid,
         stop,
     )
-
-
-def _after_start(loop, app):
-    loop.run_until_complete(app._server_event("init", "after"))
-    app.set_serving(True)
 
 
 def _serve_http_1(
@@ -565,14 +666,21 @@ def _serve_http_1(
     # Before the startup steps, as in _serve_native.
     stop = _setup_system_signals(app, run_multiple, register_sys_signals, loop)
     loop.run_until_complete(app._startup())
-    _run_before_start(loop, app)
+    if not _run_before_start(loop, app, stop):
+        server_coroutine.close()
+        if sock is not None:
+            sock.close()
+        remove_unix_socket(unix)
+        loop.close()
+        server_logger.info("Worker complete [%s]", pid)
+        return
     app.ack()
 
     try:
         http_server = _run_starting(loop, server_coroutine, stop)
     except BaseException:
         error_logger.exception("Unable to start server", exc_info=True)
-        _release_after_failed_start(loop, app)
+        _release_unstarted(loop, app)
         raise  # a failed start: app.run() raises, a worker reports it
 
     def _cleanup():
@@ -615,7 +723,7 @@ def _serve_http_1(
 
     _run_server_forever(
         loop,
-        partial(_after_start, loop, app),
+        partial(_after_start, app),
         partial(app._server_event, "shutdown", "before"),
         partial(app._server_event, "shutdown", "after"),
         _cleanup,

@@ -253,8 +253,8 @@ class WorkerManager:
 
     def cleanup(self):
         """Wait up to stop_timeout in all for the processes to end, kill
-        those still running (a worker stuck in its startup: a worker stops
-        once its start is complete), then drop their state."""
+        those still running (a worker stuck in code that does not await: a
+        stop cancels a start at its next await), then drop their state."""
         processes = list(self.processes)
         deadline = monotonic() + self.stop_timeout
         while monotonic() < deadline and not all(
@@ -496,9 +496,17 @@ class WorkerManager:
         return os.getpid()
 
     def _all_workers_ack(self):
+        # A worker a stop signal reached while it started exits cleanly
+        # without acknowledging: stopped, not failed, and not waited for.
+        stopped = {
+            process.name
+            for process in self.processes
+            if not process.is_alive() and process.exitcode == 0
+        }
         acked = [
             worker_state.get("state") == ProcessState.ACKED.name
-            for worker_state in self.worker_state.values()
+            or name in stopped
+            for name, worker_state in self.worker_state.items()
             if worker_state.get("server")
         ]
         return all(acked) and len(acked) == self.num_server
