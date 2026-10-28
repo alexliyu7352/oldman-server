@@ -193,3 +193,30 @@ async def test_ws_frame_reaches_reader():
     await asyncio.sleep(0)
     assert assembler.reaches_reader()
     get.cancel()
+
+
+async def test_ws_replies_wait_for_a_send_in_progress():
+    # The pong a ping asks for is written after a send that holds conn_mutex
+    # (the native tunnel may write one frame in several pieces): frames on
+    # the wire never interleave.
+    from websockets.protocol import State
+    from websockets.server import ServerProtocol
+
+    from oldman_server.server.websockets.impl import WebsocketImplProtocol
+
+    websocket = WebsocketImplProtocol(ServerProtocol(state=State.OPEN), ping_interval=None)
+    written = []
+    websocket.io_proto = Mock()
+    websocket.io_proto.transport.write = written.append
+    ping = Frame(Opcode.PING, b"x").serialize(mask=True)  # as a client sends it
+    async with websocket.conn_mutex:
+        websocket.data_received(ping)
+        await asyncio.sleep(0)
+        assert written == []
+        written.append(b"<the frame being sent>")
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert written == [b"<the frame being sent>", Frame(Opcode.PONG, b"x").serialize(mask=False)]
+
+    websocket.data_received(ping)  # nothing in progress: written at once
+    assert written[-1] == Frame(Opcode.PONG, b"x").serialize(mask=False)
