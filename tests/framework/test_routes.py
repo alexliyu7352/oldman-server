@@ -1260,3 +1260,33 @@ async def test_duplicate_route_error(app):
     )
     with pytest.raises(ServerError, match=message):
         await app._startup()
+
+
+def test_unquote_is_the_route_own(app: OldmanServer):
+    """unquote=True decodes the parameters of that route only, whatever was
+    registered after it, and an ext route next to it still answers."""
+
+    @app.get("/files/<name>", unquote=True)
+    async def files(request, name):
+        return text(name)
+
+    @app.get("/tags/<tag>")
+    async def tags(request, tag):
+        return text(tag)
+
+    @app.get("/images/<file:ext>")
+    async def images(request, file, ext):
+        return json([file, ext])
+
+    @app.get("/docs/<file:ext>", unquote=True)
+    async def docs(request, file, ext):
+        return json([file, ext])
+
+    _, response = app.test_client.get("/files/Python%203")
+    assert response.text == "Python 3"
+    _, response = app.test_client.get("/tags/Python%203")
+    assert response.text == "Python%203"
+    _, response = app.test_client.get("/images/cat.png")
+    assert response.json == ["cat", "png"]
+    _, response = app.test_client.get("/docs/my%20doc.txt")
+    assert response.json == ["my doc", "txt"]

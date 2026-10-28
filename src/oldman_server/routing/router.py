@@ -132,6 +132,14 @@ class BaseRouter(ABC):
                 ):
                     params[param.name] = value
 
+        # The route's own option: a node of the generated matcher is shared by
+        # routes that may differ in it, so it is applied to the route chosen.
+        # Matching ran on the raw segments; only text values are decoded.
+        if route.unquote:
+            for name, value in params.items():
+                if isinstance(value, str):
+                    params[name] = unquote(value)
+
         # Double check that if we made a match it is not a false positive
         # because of strict_slashes
         if route.strict and orig and orig[-1] != route.path[-1]:

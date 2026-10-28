@@ -4,7 +4,7 @@ from logging import getLogger
 
 from .group import RouteGroup
 from .line import Line
-from .patterns import REGEX_PARAM_NAME, REGEX_PARAM_NAME_EXT, alpha, ext, slug
+from .patterns import REGEX_PARAM_NAME, REGEX_PARAM_NAME_EXT
 
 
 logger = getLogger("oldman_server.root")
@@ -18,7 +18,6 @@ class Node:
         parent=None,
         router=None,
         param=None,
-        unquote=False,
     ) -> None:
         self.root = root
         self.part = part
@@ -37,7 +36,6 @@ class Node:
         self.children_param_injected = False
         self.has_deferred = False
         self.equality_check = False
-        self.unquote = unquote
         self.router = router
 
     def __str__(self) -> str:
@@ -271,22 +269,12 @@ class Node:
             Line("pass", indent + 1),
             Line("else:", indent),
         ]
-        if self.unquote and self._cast_as_str(self.param.cast):
-            lines.append(
-                Line(
-                    f"basket['__matches__'][{idx}] = "
-                    f"unquote(basket['__matches__'][{idx}])",
-                    indent + 1,
-                )
-            )
+        # Matching runs on the raw segment; a route's unquote option is
+        # applied by BaseRouter.resolve to the route it selects, since a node
+        # is shared by routes that may differ in it.
         self.base_indent += 1
 
         location.extend(lines)
-
-    @staticmethod
-    def _cast_as_str(cast) -> bool:
-        return_type_hint = t.get_type_hints(cast).get("return")
-        return cast in (str, ext, slug, alpha) or return_type_hint is str
 
     @staticmethod
     def _inject_method_check(location, indent, group):
@@ -444,7 +432,6 @@ class Tree:
         """
         for group in groups:
             current = self.root
-            current.unquote = current.unquote or group.unquote
             for level, part in enumerate(group.parts):
                 param = None
                 dynamic = part.startswith("<")
@@ -461,7 +448,6 @@ class Tree:
                         parent=current,
                         router=self.router,
                         param=param,
-                        unquote=current.unquote,
                     )
                     child.dynamic = dynamic
                     current.add_child(child)
