@@ -1158,7 +1158,13 @@ class NativeApplication:
                 except asyncio.CancelledError as error:
                     await self._cancelled(request, exchange, error)
                 except Exception as error:
-                    await app.handle_exception(request, error, run_middleware=run_middleware)
+                    try:
+                        await app.handle_exception(request, error, run_middleware=run_middleware)
+                    except Exception as failure:
+                        # __call__'s own handle_exception around handle_request
+                        # (Http.error_response on the asyncio server): handling
+                        # the error failed, so that failure gets the error page.
+                        await app.handle_exception(request, failure, False)
                 if settled:
                     return None
                 result = exchange.result

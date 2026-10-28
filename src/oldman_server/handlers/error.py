@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from inspect import isawaitable
+
 from oldman_server.errorpages import BaseRenderer, TextRenderer, exception_response
-from oldman_server.exceptions import ServerError
+from oldman_server.exceptions import OldmanServerException, ServerError
 from oldman_server.log import error_logger
 from oldman_server.models.handler_types import RouteHandler
 from oldman_server.request.types import Request
@@ -112,6 +114,15 @@ class ErrorHandler:
     def response(self, request, exception):
         """Fetch and executes an exception handler and returns a response object.
 
+        One contract, whether the handler and `default` are plain functions or
+        coroutines: the handler's response; on None, the response the handler
+        sent itself (`request.respond()`) or else `default(request,
+        exception)`; when the handler raises a framework exception,
+        `default(request, that exception)`; any other failure, of the handler
+        or of `default`, is logged and answered with a 500. When the handler
+        or `default` returns an awaitable, this returns a coroutine that
+        applies the same rules once awaited.
+
         Args:
             request (sanic.request.Request): Instance of the request.
             exception (sanic.exceptions.OldmanServerException or Exception): Exception to handle.
@@ -122,29 +133,65 @@ class ErrorHandler:
         """  # noqa: E501
         route_name = request.name if request else None
         handler = self._lookup(exception, route_name)
-        response = None
+        if handler is None:
+            return self._default(request, exception)
+        before = _sent(request)
         try:
-            if handler:
-                response = handler(request, exception)
-            if response is None:
-                response = self.default(request, exception)
+            response = handler(request, exception)
+        except OldmanServerException as error:
+            return self._default(request, error)
         except Exception:
-            try:
-                url = repr(request.url)
-            except AttributeError:  # no cov
-                url = "unknown"
-            response_message = (
-                'Exception raised in exception handler "%s" for uri: %s'
-            )
-            # The failing handler may be the default one (handler is None).
-            name = getattr(handler, "__name__", "default")
-            error_logger.exception(response_message, name, url)
-
-            if self.debug:
-                return text(response_message % (name, url), 500)
-            else:
-                return text("An error occurred while handling an error", 500)
+            return self._failed(request, _name(handler))
+        if isawaitable(response):
+            return self._settle(request, exception, handler, response, before)
+        if response is None and _sent(request) is before:
+            return self._default(request, exception)
         return response
+
+    async def _settle(self, request, exception, handler, pending, before):
+        """response()'s rules for a coroutine handler, once it has finished."""
+        try:
+            response = await pending
+        except OldmanServerException as error:
+            response = self._default(request, error)
+        except Exception:
+            return self._failed(request, _name(handler))
+        else:
+            if response is None and _sent(request) is before:
+                response = self._default(request, exception)
+        if isawaitable(response):
+            # A coroutine default(), or one the handler returned unawaited.
+            response = await response
+        return response
+
+    def _default(self, request, exception):
+        """default(request, exception); its failure answered with a 500."""
+        try:
+            response = self.default(request, exception)
+        except Exception:
+            return self._failed(request, "default")
+        if isawaitable(response):
+            return self._settle_default(request, response)
+        return response
+
+    async def _settle_default(self, request, pending):
+        try:
+            return await pending
+        except Exception:
+            return self._failed(request, "default")
+
+    def _failed(self, request, name):
+        """The 500 for a handler (or default) that failed: logged, with the
+        reason only in debug mode."""
+        try:
+            url = repr(request.url)
+        except AttributeError:  # no cov
+            url = "unknown"
+        response_message = 'Exception raised in exception handler "%s" for uri: %s'
+        error_logger.exception(response_message, name, url)
+        if self.debug:
+            return text(response_message % (name, url), 500)
+        return text("An error occurred while handling an error", 500)
 
     def default(self, request: Request, exception: Exception) -> HTTPResponse:
         """Provide a default behavior for the objects of ErrorHandler.
@@ -203,3 +250,14 @@ class ErrorHandler:
             error_logger.exception(
                 "Exception occurred while handling uri: %s", url
             )
+
+
+def _name(handler) -> str:
+    """The handler's name for the log (a partial or callable object has none)."""
+    return getattr(handler, "__name__", None) or repr(handler)
+
+
+def _sent(request):
+    """The response connected to the request's stream: a handler that
+    answers with request.respond() changes it (and then returns None)."""
+    return getattr(getattr(request, "stream", None), "response", None)

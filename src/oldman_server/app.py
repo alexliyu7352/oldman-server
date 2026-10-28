@@ -1240,12 +1240,17 @@ class OldmanServer(
             # middleware is then only logged.
             request._handling_exception = True
             try:
+                # ErrorHandler.response applies the whole contract (None,
+                # exceptions, a coroutine handler or default); this except
+                # only serves a subclass whose own response() raised.
                 response = self.error_handler.response(request, exception)
                 if isawaitable(response):
                     response = await response
             except Exception as e:
                 if isinstance(e, OldmanServerException):
                     response = self.error_handler.default(request, e)
+                    if isawaitable(response):
+                        response = await response
                 elif self.debug:
                     response = HTTPResponse(
                         (
