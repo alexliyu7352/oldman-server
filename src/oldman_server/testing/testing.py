@@ -31,9 +31,14 @@ class TestingResponse(httpx.Response):
         return self.headers.get("content-type")
 
     @property
-    def json(self):
-        if getattr(self, "_json", None):
+    def json(self) -> typing.Any:
+        """The body parsed as JSON, or None when it is not JSON. Typed Any,
+        like httpx's Response.json(): a test checks the status first and then
+        reads the fields it expects."""
+        try:
             return self._json
+        except AttributeError:
+            pass
         try:
             self._json = super().json()
         except (JSONDecodeError, UnicodeDecodeError):
