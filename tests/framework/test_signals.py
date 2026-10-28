@@ -770,3 +770,50 @@ def test_report_exception_runs_task(app: OldmanServer):
     app.test_client.get("/")
 
     assert next(c) == 4
+
+
+@pytest.mark.asyncio
+async def test_event_waits_for_a_concrete_value_of_a_parameterized_signal(app):
+    # What dispatch() can send, event() can wait for: the signal registered
+    # with a parameter, for that value only.
+    received = []
+
+    @app.signal("shop.order.<status>")
+    def record(status, order_id):
+        received.append((status, order_id))
+
+    app.signal_router.finalize()
+
+    paid = asyncio.create_task(app.event("shop.order.paid"))
+    anything = asyncio.create_task(app.event("shop.order.*"))
+    await asyncio.sleep(0)
+    await app.dispatch("shop.order.shipped", context={"order_id": 1})
+    await asyncio.sleep(0)
+    assert anything.done() and not paid.done()
+
+    await app.dispatch("shop.order.paid", context={"order_id": 2})
+    context = await asyncio.wait_for(paid, 1)
+    assert context["order_id"] == 2 and context["status"] == "paid"
+    assert received == [("shipped", 1), ("paid", 2)]
+
+
+@pytest.mark.asyncio
+async def test_autoregister_does_not_shadow_a_parameterized_signal(app):
+    received = []
+
+    @app.signal("shop.order.<status>")
+    def record(status):
+        received.append(status)
+
+    app.config.EVENT_AUTOREGISTER = True
+    app.signal_router.finalize()
+
+    waiter = asyncio.create_task(app.event("shop.order.paid"))
+    await asyncio.sleep(0)
+    await app.dispatch("shop.order.paid")
+    await asyncio.wait_for(waiter, 1)
+    # No second signal was registered for the concrete event, so the
+    # parameterized handler still gets its parameter.
+    await app.dispatch("shop.order.paid")
+    assert received == ["paid", "paid"]
+    assert "shop.order.paid" not in app.signal_router.name_index

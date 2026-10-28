@@ -326,6 +326,16 @@ class SignalRouter(BaseRouter):
         event_definition = self.format_event(event)
         name, trigger, _ = self._get_event_parts(event_definition)
         signal = cast(Signal, self.name_index.get(name))
+        if not signal and not trigger and self.finalized:
+            # A concrete event of a signal registered with a parameter
+            # ("shop.order.paid" for "shop.order.<status>"): the signal that
+            # dispatch() would run for it, found the same way; the waiter
+            # (no trigger) completes for this very event only.
+            try:
+                group, _, _ = self.get(event_definition, condition=condition)
+            except NotFound:
+                return None
+            signal = group.routes[0]
         if not signal:
             return None
 
