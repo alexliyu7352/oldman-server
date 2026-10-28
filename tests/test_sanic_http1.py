@@ -618,6 +618,92 @@ def test_informational_status_from_a_handler_is_an_error():
     assert statuses == ["500", "500", "101", "500"]
 
 
+def unsendable_app(name, request_class=None):
+    """Responses the native host refuses before anything is sent, and the
+    error handler that answers instead."""
+    app = OldmanServer(name, request_class=request_class, configure_logging=False)
+    app.config.ACCESS_LOG = False
+
+    @app.exception(Exception)
+    async def handled(request, exception):
+        return text(f"handled {type(exception).__name__}: {exception}", status=500)
+
+    @app.get("/small")
+    async def small(request):
+        return text("small")
+
+    @app.get("/many-headers")
+    async def many_headers(request):
+        return text("x", headers={f"x-{i}": "v" for i in range(129)})
+
+    @app.get("/big-header")
+    async def big_header(request):
+        return text("x", headers={"x-big": "v" * 9000})
+
+    @app.get("/status99")
+    async def status99(request):
+        return HTTPResponse(b"x", status=99)
+
+    @app.get("/oversize")
+    async def oversize(request):
+        return raw(b"y" * 5000)
+
+    @app.get("/stream-headers")
+    async def stream_headers(request):
+        response = await request.respond(headers={f"x-{i}": "v" for i in range(200)})
+        await response.send(b"a")
+
+    @app.get("/stream-oversize")
+    async def stream_oversize(request):
+        response = await request.respond(content_type="text/plain")
+        await response.send(b"ok")
+        await response.send(b"y" * 5000)
+    return app
+
+
+@pytest.mark.parametrize("path", ["flat", "full"])
+def test_a_response_the_host_cannot_send_goes_to_the_error_handler(path):
+    # Over the header limit, an invalid status, a body over
+    # NATIVE_MAX_RESPONSE_SIZE, too many headers at a stream's start: nothing
+    # is sent yet, so the error handler answers and the connection stays
+    # usable. Once a stream has started, a failure can only end it.
+    from oldman_server.request import Request
+
+    class Custom(Request):
+        pass
+
+    factory = ((lambda name: unsendable_app(name)) if path == "flat"
+               else (lambda name: unsendable_app(name, Custom)))
+
+    def refused(target, message):
+        async def scenario(reader, writer):
+            writer.write(f"GET {target} HTTP/1.1\r\nHost: x\r\n\r\n"
+                         "GET /small HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+            first = await read_response(reader)
+            second = await read_response(reader)
+            return first[0], first[2], second[0], second[2], message
+        return scenario
+
+    async def started(reader, writer):
+        writer.write(b"GET /stream-oversize HTTP/1.1\r\nHost: x\r\n\r\n")
+        head = await reader.readuntil(b"\r\n\r\n")
+        rest = await reader.read()  # the connection ends after what was sent
+        return int(head.split(b" ")[1]), rest
+
+    results = run(f"http1_unsendable_{path}",
+                  refused("/many-headers", b"handled ValueError: response headers exceed the native limit"),
+                  refused("/big-header", b"handled ValueError: response headers exceed the native limit"),
+                  refused("/status99", b"handled RuntimeError: Invalid response status 99"),
+                  refused("/oversize", b"handled ValueError: response body exceeds the native limit"),
+                  refused("/stream-headers", b"handled ValueError: response headers exceed the native limit"),
+                  started, app_factory=factory, max_response_bytes=1000)
+    for status, body, next_status, next_body, message in results[:5]:
+        assert (status, body) == (500, message)
+        assert (next_status, next_body) == (200, b"small")
+    status, rest = results[5]
+    assert status == 200 and b"ok" in rest and not rest.endswith(b"0\r\n\r\n")
+
+
 def test_a_request_subclass_has_the_request_head():
     # A custom request class takes the general path: the same head as the
     # exact class (rebuilt from the parsed request line and fields).

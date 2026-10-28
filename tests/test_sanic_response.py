@@ -71,7 +71,11 @@ def test_send_keeps_repeated_header_names_in_order():
     ([(b"X", b"v" * 8188)], ValueError, 1),
     ([(f"X-{i}".encode(), b"v") for i in range(130)], ValueError, 129),
 ])
-def test_send_rejects_at_original_boundary_and_keeps_failure(headers, exception, seen_count):
+def test_send_rejects_at_original_boundary_and_leaves_the_exchange(headers, exception, seen_count):
+    # Nothing is handed over: the exchange is still the handler's, so the
+    # error handler can answer instead; the same response is refused again,
+    # and with no other response the exchange ends incomplete.
+    from oldman_server.http import Stage
     seen = []
     class Custom(HTTPResponse):
         @property
@@ -85,10 +89,11 @@ def test_send_rejects_at_original_boundary_and_keeps_failure(headers, exception,
         with pytest.raises(exception):
             await exchange.send(b"", end_stream=True)
         assert len(seen) == seen_count
-        with pytest.raises(exception):
-            exchange.finish()
+        assert exchange.stage is Stage.HANDLER and exchange.failure is None
         with pytest.raises(exception):
             await exchange.send(b"", end_stream=True)
+        with pytest.raises(ValueError, match="incomplete response"):
+            exchange.finish()
     uvloop.run(scenario())
 
 

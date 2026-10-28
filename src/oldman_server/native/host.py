@@ -413,6 +413,11 @@ class _BufferedExchange:
         return response
 
     def _fail(self, message):
+        """A failure once the response has been handed over (submitted, or a
+        stream started): it can no longer be replaced, only end the
+        connection. A response refused before that only raises: the stage
+        stays HANDLER and the error handler answers, as in Sanic's Http, whose
+        stage moves on only once the response is sent."""
         self.failure = ValueError(message)
         self.stage = Stage.FAILED
         raise self.failure
@@ -439,30 +444,27 @@ class _BufferedExchange:
             raise self.failure
         if self.result is not None:
             self._fail("response is already submitted")
+        # Nothing is handed over until stream_send below: a response refused
+        # here only raises (see _fail).
         if self.response is None:
-            self._fail("response is missing")
+            raise ValueError("response is missing")
         if _engine is None or self.native is None:
-            self._fail("streaming responses are not supported")
+            raise ValueError("streaming responses are not supported")
         response = self.response
-        try:
-            status = response.status
-            if type(status) is not int or status < 200:
-                status = _final_status(status)
-            body = response.body or b""
-            if type(body) is not bytes:
-                body = _bytes_body(body)
-            if type(data) is not bytes:
-                data = _bytes_body(data)
-            if len(body) + len(data) > self.max_body:
-                self._fail("response body exceeds the native limit")
-            first = body + data if data else body
-            headers, lengths = self._encode_headers(response)
-            if lengths and (len(set(lengths)) > 1 or not lengths[0].isdigit()):
-                self._fail("inconsistent content-length")
-        except Exception as error:
-            self.failure = error
-            self.stage = Stage.FAILED
-            raise
+        status = response.status
+        if type(status) is not int or status < 200:
+            status = _final_status(status)
+        body = response.body or b""
+        if type(body) is not bytes:
+            body = _bytes_body(body)
+        if type(data) is not bytes:
+            data = _bytes_body(data)
+        if len(body) + len(data) > self.max_body:
+            raise ValueError("response body exceeds the native limit")
+        first = body + data if data else body
+        headers, lengths = self._encode_headers(response)
+        if lengths and (len(set(lengths)) > 1 or not lengths[0].isdigit()):
+            raise ValueError("inconsistent content-length")
         if lengths:
             self.response_bytes_left = int(lengths[0]) - len(first)
         # Sanic's stage while a response is being sent: errors can no longer
@@ -522,49 +524,46 @@ class _BufferedExchange:
             if end_stream and not data:
                 return
             self._fail("response is already submitted")
+        # Nothing is handed over until self.result is set: a response refused
+        # here only raises (see _fail).
         if not end_stream:
-            self._fail("streaming responses are not supported")
+            raise ValueError("streaming responses are not supported")
         if self.response is None:
-            self._fail("response is missing")
-        try:
-            body = self.response.body or b""
-            if type(body) is not bytes:
-                body = _bytes_body(body)
-            if type(data) is not bytes:
-                data = _bytes_body(data)
-            if len(body) + len(data) > self.max_body:
-                self._fail("response body exceeds the native limit")
-            body = body + data if data else body
-            response = self.response
-            status = response.status
-            if type(status) is not int or status < 200:
-                status = _final_status(status)
-            if type(response) in _COMPLETE_TYPES and response._headers is None:
-                # Headers never accessed: processed_headers yields only the default
-                # Content-Type, which the response's headers still show afterwards.
-                if (status not in (204, 304)  # has_message_body (status is final)
-                        and response.content_type is not None):
-                    response._headers, headers = _sent_content_type(response.content_type)
-                else:
-                    headers = ()
-                self.result = status, body, headers
-                self.stage = Stage.IDLE
-                return
-            headers, lengths = self._encode_headers(response)
-            # Http.http1_response_header: the host writes the body's length (Sanic
-            # replaces any Content-Length), except that a HEAD response keeps the
-            # length it was given.
-            native = self.native
-            if (lengths and native is not None and lengths[0].isdigit()
-                    and native.method == "HEAD"):
-                self.result = status, body, tuple(headers), 0, int(lengths[0])
+            raise ValueError("response is missing")
+        body = self.response.body or b""
+        if type(body) is not bytes:
+            body = _bytes_body(body)
+        if type(data) is not bytes:
+            data = _bytes_body(data)
+        if len(body) + len(data) > self.max_body:
+            raise ValueError("response body exceeds the native limit")
+        body = body + data if data else body
+        response = self.response
+        status = response.status
+        if type(status) is not int or status < 200:
+            status = _final_status(status)
+        if type(response) in _COMPLETE_TYPES and response._headers is None:
+            # Headers never accessed: processed_headers yields only the default
+            # Content-Type, which the response's headers still show afterwards.
+            if (status not in (204, 304)  # has_message_body (status is final)
+                    and response.content_type is not None):
+                response._headers, headers = _sent_content_type(response.content_type)
             else:
-                self.result = status, body, tuple(headers)
+                headers = ()
+            self.result = status, body, headers
             self.stage = Stage.IDLE
-        except Exception as error:
-            self.failure = error
-            self.stage = Stage.FAILED
-            raise
+            return
+        headers, lengths = self._encode_headers(response)
+        # Http.http1_response_header: the host writes the body's length (Sanic
+        # replaces any Content-Length), except that a HEAD response keeps the
+        # length it was given.
+        native = self.native
+        if (lengths and native is not None and lengths[0].isdigit()
+                and native.method == "HEAD"):
+            self.result = status, body, tuple(headers), 0, int(lengths[0])
+        else:
+            self.result = status, body, tuple(headers)
+        self.stage = Stage.IDLE
 
     def _encode_headers(self, response):
         """processed_headers as owned bytes pairs, plus any Content-Length values."""
@@ -583,7 +582,7 @@ class _BufferedExchange:
                 else:
                     header_bytes += len(name) + len(value) + 4
                     if len(headers) == 128 or header_bytes > 8192:
-                        self._fail("response headers exceed the native limit")
+                        raise ValueError("response headers exceed the native limit")
                     headers.append((name, value))
         else:
             # Snapshot Sanic's encoded/sanitized values at logical send. The
@@ -596,7 +595,7 @@ class _BufferedExchange:
                     original_size = len(name) + len(value) + 4
                     header_bytes += original_size
                     if len(headers) == 128 or header_bytes > 8192:
-                        self._fail("response headers exceed the native limit")
+                        raise ValueError("response headers exceed the native limit")
                     if type(name) is bytes and type(value) is bytes:
                         if not name.isascii():
                             name.decode("ascii")  # Preserve send-time rejection.

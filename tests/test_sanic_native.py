@@ -515,6 +515,10 @@ def test_native_sanic_rejects_unknown_metadata_without_faking_a_connection():
 
 
 def test_native_response_stops_header_conversion_at_native_limit():
+    # Conversion stops at the 129th header. Nothing was handed over, so the
+    # exchange is still the handler's: another response (the error
+    # handler's) replaces the refused one and is the one finished.
+    from oldman_server.http import Stage
     from oldman_server.native.host import _BufferedExchange
     from oldman_server.response import HTTPResponse
     seen = []
@@ -530,8 +534,10 @@ def test_native_response_stops_header_conversion_at_native_limit():
         with pytest.raises(ValueError, match="header"):
             await exchange.send(b"", end_stream=True)
         assert len(seen) == 129
-        with pytest.raises(ValueError):
-            exchange.finish()
+        assert exchange.stage is Stage.HANDLER and exchange.failure is None
+        exchange.respond(HTTPResponse(b"error page", status=500))
+        await exchange.send(b"", end_stream=True)
+        assert exchange.finish()[:2] == (500, b"error page")
     uvloop.run(scenario())
 
 
