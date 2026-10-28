@@ -66,6 +66,7 @@ oldman 原先为这些打的补丁，切换后可以删除。
 - `Connection` 头按选项列表解析，可以分在几个字段里：只有 `close` 选项才结束连接（HTTP/1.0 则是没有 `keep-alive` 选项时）。原版把整个值与 `keep-alive` 比较，`Connection: Upgrade`、`keep-alive, Upgrade`（Firefox 发的就是这个）、`TE` 都会让连接断开，有多个字段时只看最后一个。两种服务器相同。
 - `shared_ctx` 只能在 `main_process_start` 里设置：worker 进程（以及单进程运行开始服务之后）给它赋值会抛 `RuntimeError`，提示改用 `app.ctx`。原版有上锁的代码，但判断“是不是 worker”时 worker 还没设好，锁从未生效，worker 里放入的对象只留在那个 worker、没有任何提示。
 - `main_process_stop` 按注册的倒序执行，与其他停止事件相同（先建立的资源最后释放）；原版按注册顺序（它准备的倒序列表从未被用到）。
+- worker manager 用 SIGTERM 停止服务进程（停止服务、重启、缩减），原版用 SIGINT：还在导入模块、尚未装好信号处理的 worker 因此安静结束，不再在导入的那一行抛 `KeyboardInterrupt`、打印回溯；装好之后两个信号的处理相同。`app.manager.manage()` 启动的进程仍收 SIGINT（`KeyboardInterrupt`）。
 
 ## 经原生主机时
 

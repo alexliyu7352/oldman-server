@@ -66,6 +66,7 @@ oldman patched these itself; those patches can be deleted after switching.
 - The `Connection` header is parsed as a list of options, possibly over several fields: only a `close` option ends the connection (for HTTP/1.0, the lack of a `keep-alive` option). Stock Sanic compared the whole value with `keep-alive`, so `Connection: Upgrade`, `keep-alive, Upgrade` (as Firefox sends) and `TE` closed the connection, and only the last field counted. Both servers behave the same.
 - `shared_ctx` is set only in `main_process_start`: assigning to it in a worker process (or in a single-process run once it serves) raises `RuntimeError`, pointing to `app.ctx`. Stock Sanic has the lock, but it decided whether the process was a worker before the worker was set up, so it never took effect and an object put there in a worker stayed in that worker without any warning.
 - `main_process_stop` runs in the reverse of its registration, like the other stop events (what was set up first is released last); stock Sanic runs it in registration order (the reversed list it prepares is never used).
+- The worker manager stops server processes (service stop, restart, scale-down) with SIGTERM, where stock Sanic uses SIGINT: a worker still importing its modules, its signal handling not set up yet, ends quietly instead of raising `KeyboardInterrupt` at the line it was importing and printing a traceback; once set up it handles both signals alike. Processes started by `app.manager.manage()` still get SIGINT (`KeyboardInterrupt`).
 
 ## Under the native host
 

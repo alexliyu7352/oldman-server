@@ -617,3 +617,33 @@ def test_a_native_worker_whose_engine_cannot_start_ends_the_service(tmp_path, gr
     assert ("terminated before startup was completed" in text
             or "failed after acknowledging" in text), text
     assert process.returncode == 1
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_worker_stopped_while_it_imports_exits_quietly(tmp_path):
+    # The manager stopped every process with SIGINT: a server worker still
+    # importing the application's modules (its signal handling not set up
+    # yet) raised KeyboardInterrupt there and printed a traceback. A server
+    # worker is stopped with SIGTERM, whose default action ends it quietly.
+    process = start(
+        tmp_path,
+        """
+        if os.environ.get("OLDMAN_SERVER_WORKER_NAME", "").startswith("Oldman-Server"):
+            import time
+            print("worker importing", flush=True)
+            time.sleep(30)
+        """,
+    )
+    try:
+        output = read_until(process, b"worker importing", count=2)
+        began = time.monotonic()
+        os.kill(process.pid, signal.SIGTERM)
+        text = output.decode(errors="replace") + finish(process)
+        assert time.monotonic() - began < 10, text
+        assert process.returncode == 0, text
+        assert "Traceback" not in text and "KeyboardInterrupt" not in text, text
+        assert session_gone(process.pid), [describe(pid) for pid in session_processes(process.pid)]
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()

@@ -64,7 +64,7 @@ def test_terminate(os_mock: Mock):
     context.Process.return_value = process
     manager = WorkerManager(1, fake_serve, {}, context, (Mock(), Mock()), {})
     manager.terminate()
-    os_mock.kill.assert_called_once_with(1234, SIGINT)
+    os_mock.kill.assert_called_once_with(1234, SIGTERM)
 
 
 @patch("oldman_server.worker.process.os")
@@ -76,7 +76,7 @@ def test_shutown(os_mock: Mock):
     context.Process.return_value = process
     manager = WorkerManager(1, fake_serve, {}, context, (Mock(), Mock()), {})
     manager.shutdown()
-    os_mock.kill.assert_called_once_with(1234, SIGINT)
+    os_mock.kill.assert_called_once_with(1234, SIGTERM)
 
 
 @posix_kill
@@ -142,7 +142,7 @@ def test_shutdown_signal_send_kill(
     # The signal only requests the shutdown: the main thread begins it.
     process_os_mock.kill.assert_not_called()
     assert manager._shutdown_if_requested() is True
-    process_os_mock.kill.assert_called_once_with(1234, SIGINT)
+    process_os_mock.kill.assert_called_once_with(1234, SIGTERM)
     manager.shutdown_signal(SIGINT, None)
     manager_os_mock.getpgid.assert_called_once_with(1234)
     manager_os_mock.killpg.assert_called_once_with(5678, SIGKILL)
@@ -316,7 +316,7 @@ def test_a_stop_signal_while_a_restart_is_handled_stops_the_new_process(process_
 
     old.terminate.assert_called_once_with()  # by the restart
     new.start.assert_called_once_with()
-    process_os_mock.kill.assert_called_once_with(2, SIGINT)  # by the shutdown
+    process_os_mock.kill.assert_called_once_with(2, SIGTERM)  # by the shutdown
     assert context.Process.call_count == 2  # no scale-up after the stop
     assert manager.num_server == 1
 
@@ -349,7 +349,7 @@ def test_shutdown_stops_a_zero_downtime_restart_s_previous_process(process_os_mo
     manager.shutdown()
 
     old.terminate.assert_called_once_with()
-    process_os_mock.kill.assert_called_once_with(2, SIGINT)
+    process_os_mock.kill.assert_called_once_with(2, SIGTERM)
     (thread,) = waiting
     thread.run()  # returns at once: the shutdown took the previous process
     old.terminate.assert_called_once_with()
@@ -398,7 +398,7 @@ def test_a_shutdown_signal_during_a_shared_state_call_leaves_it_alone(process_os
         process_os_mock.kill.assert_not_called()
         assert manager._shutdown_if_requested()
         assert state[name]["state"] == "TERMINATED"
-        process_os_mock.kill.assert_called_once_with(1234, SIGINT)
+        process_os_mock.kill.assert_called_once_with(1234, SIGTERM)
     finally:
         shared.shutdown()
 
@@ -416,7 +416,7 @@ def test_shutdown_servers(caplog):
             caplog.clear()
             manager.shutdown_server()
 
-            kill.assert_called_once_with(1234, SIGINT)
+            kill.assert_called_once_with(1234, SIGTERM)
             kill.reset_mock()
 
             sanic_errors = [
@@ -450,7 +450,7 @@ def test_shutdown_servers_named():
             manager.shutdown_server("foo")
         manager.shutdown_server("Server-1")
 
-        kill.assert_called_once_with(6543, SIGINT)
+        kill.assert_called_once_with(6543, SIGTERM)
 
 
 def test_scale(caplog):
@@ -645,3 +645,18 @@ def test_a_new_server_worker_takes_the_lowest_free_number(monkeypatch):
     (process2,) = worker2.processes
     process2.start()
     assert worker2.slot == 3 and seen == {"number": 3}
+
+
+@patch("oldman_server.worker.process.os")
+def test_server_workers_stop_on_sigterm_and_managed_processes_on_sigint(os_mock: Mock):
+    # A server worker handles both alike once set up; before that SIGTERM's
+    # default action ends it quietly (SIGINT would print a KeyboardInterrupt
+    # traceback from whatever it was importing). manage() processes keep
+    # their SIGINT (KeyboardInterrupt) contract.
+    server, custom = Mock(pid=1234), Mock(pid=5678)
+    context = Mock()
+    context.Process.side_effect = [server, custom]
+    manager = WorkerManager(1, fake_serve, {}, context, (Mock(), Mock()), {})
+    manager.manage("TEST", fake_serve, kwargs={"foo": "bar"})
+    manager.terminate()
+    assert sorted(os_mock.kill.call_args_list) == [call(1234, SIGTERM), call(5678, SIGINT)]

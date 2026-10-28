@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from functools import partial
 from inspect import signature
 from multiprocessing.context import BaseContext
-from signal import SIGINT
+from signal import SIGINT, SIGTERM
 from threading import Thread
 from time import monotonic, sleep
 from typing import Any
@@ -152,7 +152,7 @@ class WorkerProcess:
                 logger.debug("Could not find worker state to delete.")
 
     def terminate(self):
-        """Stop the process (SIGINT: it stops gracefully), and any previous
+        """Stop the process (gracefully: _stop_signal), and any previous
         process a zero-downtime restart still keeps."""
         while self._previous:
             try:
@@ -175,9 +175,20 @@ class WorkerProcess:
             except (BrokenPipeError, ConnectionResetError, EOFError):
                 pass
             try:
-                os.kill(self.pid, SIGINT)
+                os.kill(self.pid, self._stop_signal)
             except (KeyError, AttributeError, ProcessLookupError):
                 ...
+
+    @property
+    def _stop_signal(self) -> int:
+        """The signal that stops this process gracefully. A server worker
+        handles SIGINT and SIGTERM alike once it has set up its signal
+        handling (server.runners._setup_system_signals); before that, while
+        it still imports its modules, SIGTERM's default action ends it
+        quietly, where SIGINT would raise KeyboardInterrupt at whatever line
+        it was importing and print a traceback. Other processes (those
+        manage() starts, the reloader) stop on SIGINT, their contract."""
+        return SIGTERM if self.SERVER_LABEL in self.name else SIGINT
 
     def restart(self, restart_order=RestartOrder.SHUTDOWN_FIRST, **kwargs):
         logger.debug(
