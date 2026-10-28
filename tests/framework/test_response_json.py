@@ -242,3 +242,29 @@ def test_a_bytes_like_body_is_sent(app: OldmanServer):
 
     _, response = app.test_client.get("/")
     assert response.status == 200 and response.body == b'{"a":1}'
+
+
+def test_decimal_is_encoded_as_a_number(app: OldmanServer):
+    """A Decimal (a database DECIMAL or NUMERIC column) is a JSON number,
+    through float, as ujson encoded it; default= replaces that rule."""
+    from decimal import Decimal
+
+    @app.get("/number")
+    async def number(request: Request):
+        return json_response({"budget": Decimal("1234.50"), "n": [Decimal("1")]})
+
+    @app.get("/text")
+    async def as_text(request: Request):
+        return json_response({"budget": Decimal("1234.50")}, default=str)
+
+    _, response = app.test_client.get("/number")
+    assert response.body == b'{"budget":1234.5,"n":[1.0]}'
+    _, response = app.test_client.get("/text")
+    assert response.body == b'{"budget":"1234.50"}'
+
+
+def test_unknown_types_still_raise():
+    from oldman_server.helpers import json_dumps
+
+    with pytest.raises(TypeError):
+        json_dumps({"value": object()})

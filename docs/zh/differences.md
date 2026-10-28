@@ -22,7 +22,7 @@
 - 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。
 - JSON 默认用 orjson（`json()`、`request.json`、JSON 错误页与 JSON 日志），不再用 ujson：
   - 输出为紧凑的 UTF-8（非 ASCII 字符不再转成 `\uXXXX`）；datetime、UUID、dataclass、enum 可直接编码；非 str 的键照旧转成字符串。
-  - 超过 64 位的整数会抛 `TypeError`；`NaN`、`Infinity` 输出为 `null`（原版输出不合法的 `NaN`）；不认识的对象不再调用 `__json__` 或 `toDict()`，`Decimal`（数据库驱动的 DECIMAL 列）与含孤立代理项的字符串也会抛 `TypeError`，要编码它们就用 `json(..., default=...)`（如 `default=str`，或把 `Decimal` 转成 `float`）。
+  - 超过 64 位的整数会抛 `TypeError`；`NaN`、`Infinity` 输出为 `null`（原版输出不合法的 `NaN`）；`Decimal`（数据库驱动的 DECIMAL 列）与原版的 ujson 一样编码成 JSON 数字（经 `float`，精度与 double 相同；要保留精确的十进制值就用 `json(..., default=str)`）；不认识的对象不再调用 `__json__` 或 `toDict()`，它们与含孤立代理项的字符串会抛 `TypeError`，要编码它们就用 `json(..., default=...)`。
   - `request.json` 用 orjson 解析：超出 64 位的整数会变成 `float`（失去精度），`NaN`、`Infinity` 不被接受（400）；要精确的大整数就用 `OldmanServer(loads=json.loads)`。
   - JSON 与文本错误页里编码器不认识的上下文值显示为它的 `str()`，不会让错误响应本身变成 500。
   - `json()` 的额外关键字参数交给 orjson（`default`、`option`，如 `option=orjson.OPT_SORT_KEYS`）；`json_dumps` 返回 bytes。要换编码器仍可用 `json(..., dumps=...)` 或 `OldmanServer(dumps=..., loads=...)`。

@@ -577,9 +577,9 @@ def test_exception_header_on_renderers(app: OldmanServer, format, expected):
 
 @pytest.mark.parametrize("fmt", ["json", "text"])
 def test_context_the_encoder_does_not_know_keeps_the_error(app, fmt):
-    # A value orjson cannot encode (a Decimal from a database, say) in the
-    # exception's context is shown as text; the client still gets the 400,
-    # not "An error occurred while handling an error".
+    # A context value the error page encodes as text (its str(): a Decimal
+    # keeps its exact digits); the client still gets the 400, not "An error
+    # occurred while handling an error".
     from decimal import Decimal
 
     from oldman_server.exceptions import BadRequest

@@ -15,6 +15,7 @@ from oldman_server.helpers import (
     OPT_NON_STR_KEYS,
     _default,
     has_message_body,
+    json_default,
     json_dumps,
     orjson_dumps,
 )
@@ -424,7 +425,7 @@ class JSONResponse(HTTPResponse):
             dumped = self._use_dumps(body, **kwargs)
         elif self._use_dumps is json_dumps:
             # json_dumps without its Python frame.
-            dumped = orjson_dumps(body, None, OPT_NON_STR_KEYS)
+            dumped = orjson_dumps(body, json_default, OPT_NON_STR_KEYS)
         else:
             dumped = self._use_dumps(body)
         if type(self) is JSONResponse:

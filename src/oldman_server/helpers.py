@@ -2,6 +2,7 @@
 
 import sys
 
+from decimal import Decimal
 from importlib import import_module
 from inspect import ismodule, signature
 
@@ -9,13 +10,24 @@ from orjson import OPT_NON_STR_KEYS
 from orjson import dumps as orjson_dumps
 
 
+def json_default(obj):
+    """orjson's default for the types it does not know: a Decimal (a database
+    DECIMAL or NUMERIC column) becomes a JSON number, through float, as ujson
+    encoded it (the precision of a double). orjson calls it only for such
+    values, so other bodies cost nothing more."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    raise TypeError(f"Type is not JSON serializable: {type(obj).__name__}")
+
+
 def json_dumps(obj, default=None, option=0) -> bytes:
     """The default JSON encoder of json() responses: orjson, which returns
     compact UTF-8 bytes and also encodes datetime, UUID, dataclasses and
-    enums. Dict keys that are not str become strings, as with the standard
-    library. default and option are orjson's (json()'s extra keyword
-    arguments)."""
-    return orjson_dumps(obj, default, option | OPT_NON_STR_KEYS)
+    enums; a Decimal becomes a number (json_default). Dict keys that are not
+    str become strings, as with the standard library. default and option are
+    orjson's (json()'s extra keyword arguments); a default given replaces
+    json_default."""
+    return orjson_dumps(obj, json_default if default is None else default, option | OPT_NON_STR_KEYS)
 
 
 def json_text(obj) -> str:
