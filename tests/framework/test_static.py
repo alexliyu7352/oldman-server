@@ -849,3 +849,16 @@ def test_static_if_range(app, tmp_path):
         )
         assert response.status == status, if_range
         assert response.body == (b"23" if status == 206 else b"0123456789")
+
+
+def test_static_range_on_an_empty_file(app, tmp_path):
+    # No range of an empty file can be sent as 206 (Content-Range has no
+    # form for zero bytes); the Range is ignored (RFC 9110 14.2 allows it).
+    (tmp_path / "empty.bin").write_bytes(b"")
+    app.static("/files", tmp_path, use_content_range=True)
+
+    for value in ("bytes=0-", "bytes=-5", "bytes=3-9"):
+        _, response = app.test_client.get("/files/empty.bin", headers={"Range": value})
+        assert response.status == 200, value
+        assert "content-range" not in response.headers
+        assert response.body == b""
