@@ -98,7 +98,7 @@ class HTTPMethodView:
     as `staticmethod` to avoid this.
 
     Available attributes at the time of subclassing:
-    - **attach** (Optional[Union[Sanic, Blueprint]]): The app or blueprint to
+    - **attach** (Optional[Union[OldmanServer, Blueprint]]): The app or blueprint to
         attach the view to.
     - **uri** (str): The uri to attach the view to.
     - **methods** (Iterable[str]): The HTTP methods to attach the view to.
@@ -236,11 +236,11 @@ class HTTPMethodView:
         stream: bool = False,
         version_prefix: str = "/v",
     ) -> None:
-        """Attaches the view to a Sanic app or Blueprint at the specified URI.
+        """Attaches the view to an app or Blueprint at the specified URI.
 
         Args:
             cls: The class that this method is part of.
-            to (Union[Sanic, Blueprint]): The Sanic application or Blueprint to attach to.
+            to (Union[OldmanServer, Blueprint]): The application or Blueprint to attach to.
             uri (str): The URI to bind the view to.
             methods (Iterable[str], optional): A collection of HTTP methods that the view should respond to. Defaults to `frozenset({"GET"})`.
             host (Optional[str], optional): A specific host or hosts to bind the view to. Defaults to `None`.

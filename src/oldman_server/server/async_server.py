@@ -21,7 +21,7 @@ class AsyncioServer:
         serve_coro,
         connections,
     ):
-        # Note, Sanic already called "before_server_start" events
+        # Note, the application already called "before_server_start" events
         # before this helper was even created. So we don't need it here.
         self.app = app
         self.connections = connections

@@ -57,7 +57,7 @@ class ErrorHandler:
         """Add a new exception handler to an already existing handler object.
 
         Args:
-            exception (sanic.exceptions.OldmanServerException or Exception): Type
+            exception (oldman_server.exceptions.OldmanServerException or Exception): Type
                 of exception that needs to be handled.
             handler (function): Reference to the function that will
                 handle the exception.
@@ -78,7 +78,7 @@ class ErrorHandler:
         This method leverages a dict lookup to speedup the retrieval process.
 
         Args:
-            exception (sanic.exceptions.OldmanServerException or Exception): Type
+            exception (oldman_server.exceptions.OldmanServerException or Exception): Type
                 of exception.
 
         Returns:
@@ -124,8 +124,8 @@ class ErrorHandler:
         applies the same rules once awaited.
 
         Args:
-            request (sanic.request.Request): Instance of the request.
-            exception (sanic.exceptions.OldmanServerException or Exception): Exception to handle.
+            request (oldman_server.request.Request): Instance of the request.
+            exception (oldman_server.exceptions.OldmanServerException or Exception): Exception to handle.
 
         Returns:
             Wrap the return value obtained from the `default` function or the registered handler for that type of exception.
@@ -201,8 +201,8 @@ class ErrorHandler:
         they see fit.
 
         Args:
-            request (sanic.request.Request): Incoming request.
-            exception (sanic.exceptions.OldmanServerException or Exception): Exception object.
+            request (oldman_server.request.Request): Incoming request.
+            exception (oldman_server.exceptions.OldmanServerException or Exception): Exception object.
 
         Returns:
             HTTPResponse: The response object.

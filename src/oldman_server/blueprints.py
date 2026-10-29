@@ -174,7 +174,7 @@ class Blueprint(BaseApp):
         """Get the set of apps that this blueprint is registered to.
 
         Returns:
-            Set[Sanic]: Set of apps that this blueprint is registered to.
+            Set[OldmanServer]: Set of apps that this blueprint is registered to.
 
         Raises:
             OldmanServerException: If the blueprint has not yet been registered to
@@ -235,7 +235,7 @@ class Blueprint(BaseApp):
             version_prefix (Union[str, Default]): The prefix of the version number shown in the URL.
             allow_route_overwrite (Union[bool, Default]): Whether to allow route overwrite or not.
             strict_slashes (Optional[Union[bool, Default]]): Enforce the API URLs are requested with a trailing "/*".
-            with_registration (bool): Whether to register the new blueprint instance with Sanic apps that were registered with the old instance or not. Default is `True`.
+            with_registration (bool): Whether to register the new blueprint instance with apps that were registered with the old instance or not. Default is `True`.
             with_ctx (bool): Whether the ``ctx`` will be copied or not. Default is `False`.
 
         Returns:
@@ -664,7 +664,7 @@ class BlueprintGroup(bpg_base):
 
     The `BlueprintGroup` class allows grouping blueprints under a common
     URL prefix, version, and other shared attributes. It integrates with
-    Sanic's Blueprint system, offering a custom iterator to treat an
+    the Blueprint system, offering a custom iterator to treat an
     object of this class as a list/tuple.
 
     Although possible to instantiate a group directly, it is recommended

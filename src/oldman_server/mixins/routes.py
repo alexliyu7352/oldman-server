@@ -344,7 +344,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             uri (str): URL to be tagged to GET method of HTTP.
             host (Optional[Union[str, List[str]]]): Host IP or FQDN for
                 the service to use.
-            strict_slashes (Optional[bool]): Instruct Sanic to check if the
+            strict_slashes (Optional[bool]): Instruct the router to check if the
                 request URLs need to terminate with a `/`.
             version (Optional[Union[int, str, float]]): API Version.
             name (Optional[str]): Unique name that can be used to identify
@@ -402,7 +402,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             uri (str): URL to be tagged to POST method of HTTP.
             host (Optional[Union[str, List[str]]]): Host IP or FQDN for
                 the service to use.
-            strict_slashes (Optional[bool]): Instruct Sanic to check if the
+            strict_slashes (Optional[bool]): Instruct the router to check if the
                 request URLs need to terminate with a `/`.
             stream (bool): Whether or not to stream the request body.
                 Defaults to `False`.
@@ -458,7 +458,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             uri (str): URL to be tagged to PUT method of HTTP.
             host (Optional[Union[str, List[str]]]): Host IP or FQDN for
                 the service to use.
-            strict_slashes (Optional[bool]): Instruct Sanic to check if the
+            strict_slashes (Optional[bool]): Instruct the router to check if the
                 request URLs need to terminate with a `/`.
             stream (bool): Whether or not to stream the request body.
                 Defaults to `False`.
@@ -514,7 +514,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             uri (str): URL to be tagged to HEAD method of HTTP.
             host (Optional[Union[str, List[str]]]): Host IP or FQDN for
                 the service to use.
-            strict_slashes (Optional[bool]): Instruct Sanic to check if the
+            strict_slashes (Optional[bool]): Instruct the router to check if the
                 request URLs need to terminate with a `/`.
             version (Optional[Union[int, str, float]]): API Version.
             name (Optional[str]): Unique name that can be used to identify
@@ -572,7 +572,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             uri (str): URL to be tagged to OPTIONS method of HTTP.
             host (Optional[Union[str, List[str]]]): Host IP or FQDN for
                 the service to use.
-            strict_slashes (Optional[bool]): Instruct Sanic to check if the
+            strict_slashes (Optional[bool]): Instruct the router to check if the
                 request URLs need to terminate with a `/`.
             version (Optional[Union[int, str, float]]): API Version.
             name (Optional[str]): Unique name that can be used to identify
@@ -630,7 +630,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             uri (str): URL to be tagged to PATCH method of HTTP.
             host (Optional[Union[str, List[str]]]): Host IP or FQDN for
                 the service to use.
-            strict_slashes (Optional[bool]): Instruct Sanic to check if the
+            strict_slashes (Optional[bool]): Instruct the router to check if the
                 request URLs need to terminate with a `/`.
             stream (bool): Set to `True` if full request streaming is needed,
                 `False` otherwise. Defaults to `False`.
@@ -686,7 +686,7 @@ class RouteMixin(BaseMixin, metaclass=AppMeta):
             uri (str): URL to be tagged to the DELETE method of HTTP.
             host (Optional[Union[str, List[str]]]): Host IP or FQDN for the
                 service to use.
-            strict_slashes (Optional[bool]): Instruct Sanic to check if the
+            strict_slashes (Optional[bool]): Instruct the router to check if the
                 request URLs need to terminate with a */*.
             version (Optional[Union[int, str, float]]): API Version.
             name (Optional[str]): Unique name that can be used to identify

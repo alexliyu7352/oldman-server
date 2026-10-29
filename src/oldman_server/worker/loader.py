@@ -24,7 +24,7 @@ class AppLoader:
         module_input (str): The module to load the application from.
         as_factory (bool): Whether the application is a factory.
         args (Any): Arguments to pass to the application factory.
-        factory (Callable[[], SanicApp]): A callable that returns a Sanic application instance.
+        factory (Callable[[], OldmanServer]): A callable that returns an application instance.
     """  # noqa: E501
 
     def __init__(

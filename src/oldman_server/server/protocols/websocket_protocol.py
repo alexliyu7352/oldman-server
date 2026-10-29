@@ -89,7 +89,7 @@ class WebSocketProtocol(HttpProtocol):
             super().close()
 
     def close_if_idle(self):
-        # Called by Sanic Server when shutting down
+        # Called by the server when shutting down
         # If we've upgraded to websocket, shut it down
         if self.websocket is not None:
             if self.websocket.ws_proto.state in (CLOSING, CLOSED):

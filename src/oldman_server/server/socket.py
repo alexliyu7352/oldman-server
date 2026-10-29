@@ -138,7 +138,7 @@ def configure_socket(
     server_settings: dict[str, Any], *, shared=False, mode=0o666
 ) -> socket.SocketType | None:
     # Create a listening socket or use the one in settings. The serving
-    # processes all accept on a TCP socket bound here, as in Sanic; with
+    # processes all accept on a TCP socket bound here; with
     # shared (the native host) on a unix socket bound here as well, instead
     # of each binding and renaming its own over the path.
     sock = server_settings.get("sock")

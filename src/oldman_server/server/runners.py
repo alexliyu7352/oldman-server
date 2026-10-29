@@ -84,7 +84,7 @@ def serve(
     Args:
         host (str): Address to host on
         port (int): Port to host on
-        app (OldmanServer): Sanic app instance
+        app (OldmanServer): Application instance
         sock (Optional[socket.socket], optional): Socket for the server to
             accept connections from. Defaults to `None`.
         unix (Optional[str], optional): Unix socket to listen on instead of
@@ -442,7 +442,7 @@ def _native_unavailable(loop) -> str | None:
     """Why this process's native host cannot serve another server, or None."""
     host = sys.modules.get("oldman_server.native.host")
     if host is not None and host.serving(loop):
-        # A secondary app's server (Sanic._start_servers), say.
+        # A secondary app's server (OldmanServer._start_servers), say.
         return "NATIVE_SERVER serves one server per process"
     engine = sys.modules.get("oldman_server.native.engine")
     if engine is not None and not engine.startable():
@@ -479,13 +479,13 @@ def _serve_native(
             "(glibc 2.28 or later); from a source tree, build it with "
             "scripts/build.sh"
         ) from error
-    # The native host accepts on Sanic's socket (TCP or unix), which stays
+    # The native host accepts on the framework's socket (TCP or unix), which stays
     # open while serving and closes with the server, as asyncio's does; like
     # asyncio's create_server, it is put in the listening state first. Its
     # shard 0 hands the connections to the other shards.
     if sock is None:
-        # create_server() without a socket: bound here as Sanic's bind_socket
-        # binds (a host name resolves), then served like a socket passed in.
+        # create_server() without a socket: bound here by bind_socket
+        # (a host name resolves), then served like a socket passed in.
         sock = bind_socket(host or "127.0.0.1", port or 0, backlog=backlog)
     sockets = [sock]
     accept = None
@@ -608,7 +608,7 @@ def _serve_http_1(
     asyncio_server_kwargs,
 ):
     connections = connections if connections is not None else set()
-    # Each worker process of Sanic's worker manager (run_multiple) serves
+    # Each worker process of the worker manager (run_multiple) serves
     # through its own native host, on the CPUs the main process gave it.
     if native_server(app.config):
         if unavailable := _native_unavailable(loop):

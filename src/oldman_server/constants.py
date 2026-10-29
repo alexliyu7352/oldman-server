@@ -26,8 +26,8 @@ IDEMPOTENT_HTTP_METHODS = (
 )
 CACHEABLE_HTTP_METHODS = (HTTPMethod.GET, HTTPMethod.HEAD)
 DEFAULT_HTTP_CONTENT_TYPE = "application/octet-stream"
-# Connections a listening socket queues before the server accepts them. Sanic
-# uses 100, which a proxy opening many upstream connections at once exceeds
+# Connections a listening socket queues before the server accepts them. A
+# backlog of 100 overflows when a proxy opens many upstream connections at once
 # (connect() on a unix socket then fails; nginx answers 502); the kernel caps
 # it at net.core.somaxconn. Gunicorn and Uvicorn use 2048 too.
 DEFAULT_BACKLOG = 2048

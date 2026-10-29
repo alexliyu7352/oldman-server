@@ -844,11 +844,11 @@ class OldmanServer(
         ```
 
         Args:
-            handler (Callable[[Sanic, Exception], Coroutine[Any, Any, None]]):
+            handler (Callable[[OldmanServer, Exception], Coroutine[Any, Any, None]]):
                 The handler to register.
 
         Returns:
-            Callable[[Sanic, Exception], Coroutine[Any, Any, None]]: The
+            Callable[[OldmanServer, Exception], Coroutine[Any, Any, None]]: The
                 handler that was registered.
         """
 
@@ -1015,7 +1015,7 @@ class OldmanServer(
             _anchor (str): Adds an "#anchor" to the end.
             _scheme (str): Should be either "http" or "https", default is "http".
             _external (bool): Whether to return the path or a full URL with scheme and host.
-            _host (str): Used when one or more hosts are defined for a route to tell Sanic which to use.
+            _host (str): Used when one or more hosts are defined for a route to tell the router which to use.
             _server (str): If not using "_host", this will be used for defining the hostname of the URL.
             **kwargs: Keys and values that are used to build request parameters and
                     query string arguments.
@@ -1825,7 +1825,7 @@ class OldmanServer(
         not typically used directly.
 
         Args:
-            app (OldmanServer): The Sanic application instance.
+            app (OldmanServer): The application instance.
 
         Returns:
             None
@@ -1874,7 +1874,7 @@ class OldmanServer(
         loop has started in the `before_server_start` listener).
 
         Naming tasks is a good practice as it allows you to cancel them later,
-        and allows Sanic to manage them when the server is stopped, if needed.
+        and lets the application manage them when the server is stopped, if needed.
 
         Args:
             task (Union[Future[Any], Coroutine[Any, Any, Any], Awaitable[Any]]):
@@ -1888,7 +1888,7 @@ class OldmanServer(
             Optional[Task[Any]]: The task that was scheduled, if applicable.
         """  # noqa: E501
         try:
-            loop = self.loop  # Will raise SanicError if loop is not started
+            loop = self.loop  # Will raise OldmanServerException if loop is not started
             return self._loop_add_task(
                 task, self, loop, name=name, register=register
             )
@@ -2111,18 +2111,18 @@ class OldmanServer(
 
     @classmethod
     def register_app(cls, app: OldmanServer) -> None:
-        """Register a Sanic instance with the class registry.
+        """Register an OldmanServer instance with the class registry.
 
-        This method adds a Sanic application instance to the class registry,
+        This method adds an application instance to the class registry,
         which is used for tracking all instances of the application. It is
         usually used internally, but can be used to register an application
         that may have otherwise been created outside of the class registry.
 
         Args:
-            app (OldmanServer): The Sanic instance to be registered.
+            app (OldmanServer): The instance to be registered.
 
         Raises:
-            OldmanServerException: If the app is not an instance of Sanic or if the
+            OldmanServerException: If the app is not an instance of OldmanServer or if the
                 name of the app is already in use (unless in test mode).
 
         Examples:
@@ -2141,18 +2141,18 @@ class OldmanServer(
 
     @classmethod
     def unregister_app(cls, app: OldmanServer) -> None:
-        """Unregister a Sanic instance from the class registry.
+        """Unregister an OldmanServer instance from the class registry.
 
-        This method removes a previously registered Sanic application instance
+        This method removes a previously registered application instance
         from the class registry. This can be useful for cleanup purposes,
         especially in testing or when an app instance is no longer needed. But,
         it is typically used internally and should not be needed in most cases.
 
         Args:
-            app (OldmanServer): The Sanic instance to be unregistered.
+            app (OldmanServer): The instance to be unregistered.
 
         Raises:
-            OldmanServerException: If the app is not an instance of Sanic.
+            OldmanServerException: If the app is not an instance of OldmanServer.
 
         Examples:
             ```python
@@ -2170,7 +2170,7 @@ class OldmanServer(
     def get_app(
         cls, name: str | None = None, *, force_create: bool = False
     ) -> OldmanServer:
-        """Retrieve an instantiated Sanic instance by name.
+        """Retrieve an instantiated OldmanServer instance by name.
 
         This method is best used when needing to get access to an already
         defined application instance in another part of an app.
@@ -2201,10 +2201,10 @@ class OldmanServer(
                 not exist, a new instance will be created. Defaults to `False`.
 
         Returns:
-            Sanic: The requested Sanic app instance.
+            OldmanServer: The requested app instance.
 
         Raises:
-            OldmanServerException: If there are multiple or no Sanic apps found, or
+            OldmanServerException: If there are multiple or no apps found, or
                 if the specified name is not found.
 
 
@@ -2286,7 +2286,7 @@ class OldmanServer(
                 self.finalize()
 
     def finalize(self) -> None:
-        """Finalize the routing configuration for the Sanic application.
+        """Finalize the routing configuration for the application.
 
         This method completes the routing setup by calling the router's
         finalize method, and it also finalizes any middleware that has been
@@ -2294,8 +2294,8 @@ class OldmanServer(
         any finalization errors will be raised.
 
         Finalization consists of identifying defined routes and optimizing
-        Sanic's performance to meet the application's specific needs. If
-        you are manually adding routes, after Sanic has started, you will
+        performance to meet the application's specific needs. If
+        you are manually adding routes, after the server has started, you will
         typically want to use the  `amend` context manager rather than
         calling this method directly.
 
@@ -2322,15 +2322,15 @@ class OldmanServer(
         self._cors_table = cors_compile(self)
 
     def signalize(self, allow_fail_builtin: bool = True) -> None:
-        """Finalize the signal handling configuration for the Sanic application.
+        """Finalize the signal handling configuration for the application.
 
         This method completes the signal handling setup by calling the signal
         router's finalize method. If the application is not in test mode,
         any finalization errors will be raised.
 
         Finalization consists of identifying defined signaliz and optimizing
-        Sanic's performance to meet the application's specific needs. If
-        you are manually adding signals, after Sanic has started, you will
+        performance to meet the application's specific needs. If
+        you are manually adding signals, after the server has started, you will
         typically want to use the  `amend` context manager rather than
         calling this method directly.
 
@@ -2414,7 +2414,7 @@ class OldmanServer(
         """Set the serving state of the application.
 
         This method is used to set the serving state of the application.
-        It is used internally by Sanic and should not typically be called
+        It is used internally and should not typically be called
         manually.
 
         Args:
@@ -2461,7 +2461,7 @@ class OldmanServer(
         self,
         passthru: dict[str, Any] | None = None,
     ) -> OldmanServer:
-        """Refresh the application instance. **This is used internally by Sanic**.
+        """Refresh the application instance. **This is used internally by the framework**.
 
         .. warning::
             This method is intended for internal use only and should not be
@@ -2473,7 +2473,7 @@ class OldmanServer(
                 `None`.
 
         Returns:
-            Sanic: The refreshed application instance.
+            OldmanServer: The refreshed application instance.
         """  # noqa: E501
         registered = self.__class__.get_app(self.name)
         if self is not registered:

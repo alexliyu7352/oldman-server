@@ -152,7 +152,7 @@ class MiddlewareMixin(metaclass=AppMeta):
             ```python
             @app.on_response
             async def custom_middleware(request, response):
-                response.headers['X-Server'] = 'Sanic'
+                response.headers['X-Server'] = 'oldman-server'
             ```
         """
         if callable(middleware):
@@ -163,15 +163,15 @@ class MiddlewareMixin(metaclass=AppMeta):
             )
 
     def finalize_middleware(self) -> None:
-        """Finalize the middleware configuration for the Sanic application.
+        """Finalize the middleware configuration for the application.
 
         This method completes the middleware setup for the application.
-        Middleware in Sanic is used to process requests globally before they
+        Middleware is used to process requests globally before they
         reach individual routes or after routes have been processed.
 
         Finalization consists of identifying defined routes and optimizing
-        Sanic's performance to meet the application's specific needs. If
-        you are manually adding routes, after Sanic has started, you will
+        performance to meet the application's specific needs. If
+        you are manually adding routes, after the server has started, you will
         typically want to use the `amend` context manager rather than
         calling this method directly.
 

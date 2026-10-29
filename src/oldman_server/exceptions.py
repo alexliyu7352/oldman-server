@@ -12,7 +12,7 @@ class RequestCancelled(CancelledError):
 
 
 class ServerKilled(Exception):
-    """Exception Sanic server uses when killing a server process for something unexpected happening."""  # noqa: E501
+    """Exception the server uses when killing a server process for something unexpected happening."""  # noqa: E501
 
     quiet = True
 
@@ -266,7 +266,7 @@ class ServiceUnavailable(HTTPException):
 class URLBuildError(HTTPException):
     """500 Internal Server Error
 
-    An exception used by Sanic internals when unable to build a URL.
+    An exception used by the framework internals when unable to build a URL.
 
     Args:
         message (Optional[Union[str, bytes]], optional): The message to be sent to the client. If `None`
@@ -338,7 +338,7 @@ class RequestTimeout(HTTPException):
     the connection. The socket connection has actually been lost - the Web
     server has 'timed out' on that particular socket connection.
 
-    This is an internal exception thrown by Sanic and should not be used
+    This is an internal exception thrown by the server and should not be used
     directly.
 
     Args:
@@ -361,7 +361,7 @@ class RequestTimeout(HTTPException):
 class PayloadTooLarge(HTTPException):
     """413 Payload Too Large
 
-    This is an internal exception thrown by Sanic and should not be used
+    This is an internal exception thrown by the server and should not be used
     directly.
 
     Args:
@@ -384,7 +384,7 @@ class PayloadTooLarge(HTTPException):
 class URITooLong(HTTPException):
     """414 URI Too Long
 
-    This is an internal exception thrown by Sanic and should not be used
+    This is an internal exception thrown by the server and should not be used
     directly.
 
     Args:

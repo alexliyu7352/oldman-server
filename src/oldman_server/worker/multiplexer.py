@@ -10,7 +10,7 @@ from oldman_server.worker.state import WorkerState
 
 
 class WorkerMultiplexer:
-    """Multiplexer for Sanic workers.
+    """Multiplexer for the worker processes.
 
     This is instantiated inside of worker porocesses only. It is used to
     communicate with the monitor process.

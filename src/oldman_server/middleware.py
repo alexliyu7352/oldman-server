@@ -17,7 +17,7 @@ class Middleware:
     """Middleware object that is used to encapsulate middleware functions.
 
     This should generally not be instantiated directly, but rather through
-    the `sanic.OldmanServer.middleware` decorator and its variants.
+    the `oldman_server.OldmanServer.middleware` decorator and its variants.
 
     Args:
         func (MiddlewareType): The middleware function to be called.

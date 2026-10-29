@@ -82,13 +82,13 @@ class ListenerMixin(metaclass=AppMeta):
                 ...
 
         Args:
-            listener_or_event (Union[ListenerType[Sanic], str]): A listener function or an event name.
+            listener_or_event (Union[ListenerType[OldmanServer], str]): A listener function or an event name.
             event_or_none (Optional[str]): The event name to listen for if `listener_or_event` is a function. Defaults to `None`.
             apply (bool): Whether to apply the listener immediately. Defaults to `True`.
             priority (int): The priority of the listener. Defaults to `0`.
 
         Returns:
-            Union[ListenerType[Sanic], Callable[[ListenerType[Sanic]], ListenerType[Sanic]]]: The listener or a callable that takes a listener.
+            Union[ListenerType[OldmanServer], Callable[[ListenerType[OldmanServer]], ListenerType[OldmanServer]]]: The listener or a callable that takes a listener.
 
         Example:
             The following code snippet shows how you can use this method as a decorator:
@@ -108,12 +108,12 @@ class ListenerMixin(metaclass=AppMeta):
             Typically will not be called directly.
 
             Args:
-                listener (ListenerType[Sanic]): The listener function to
+                listener (ListenerType[OldmanServer]): The listener function to
                     register.
                 event (str): The event name to listen for.
 
             Returns:
-                ListenerType[Sanic]: The listener function that was registered.
+                ListenerType[OldmanServer]: The listener function that was registered.
             """
             nonlocal apply
 
@@ -160,7 +160,7 @@ class ListenerMixin(metaclass=AppMeta):
         that are not safe to be initialized in a worker process.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -183,7 +183,7 @@ class ListenerMixin(metaclass=AppMeta):
         add a managed process to the Worker Manager.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -204,7 +204,7 @@ class ListenerMixin(metaclass=AppMeta):
         resources that were initialized in the main_process_start event.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -225,7 +225,7 @@ class ListenerMixin(metaclass=AppMeta):
         except that it is fired only when the reload process is started.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -246,7 +246,7 @@ class ListenerMixin(metaclass=AppMeta):
         except that it is fired only when the reload process is stopped.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -268,7 +268,7 @@ class ListenerMixin(metaclass=AppMeta):
         process is about to be triggered.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -292,7 +292,7 @@ class ListenerMixin(metaclass=AppMeta):
         process has been triggered.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -319,7 +319,7 @@ class ListenerMixin(metaclass=AppMeta):
         pool, or to initialize a cache client.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -347,7 +347,7 @@ class ListenerMixin(metaclass=AppMeta):
         performing a health check.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -372,7 +372,7 @@ class ListenerMixin(metaclass=AppMeta):
         was started in the after_server_start event.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python
@@ -397,7 +397,7 @@ class ListenerMixin(metaclass=AppMeta):
         pool, or to close a cache client.
 
         Args:
-            listener (ListenerType[Sanic]): The listener handler to attach.
+            listener (ListenerType[OldmanServer]): The listener handler to attach.
 
         Examples:
             ```python

@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
     "RESPONSE_TIMEOUT": 60,
     "TOUCHUP": _default,
     # Permission bits of the unix sockets the server binds (unix=,
-    # NATIVE_WORKER_LISTEN): who may connect. 0o666, as Sanic, lets every local
+    # NATIVE_WORKER_LISTEN): who may connect. 0o666 lets every local
     # user connect, whom TRUSTED_PROXIES="unix" then trusts.
     "UNIX_SOCKET_MODE": 0o666,
     "USE_UVLOOP": _default,
@@ -175,9 +175,9 @@ class DetailedConverter(ABC):
 
 
 class Config(dict, metaclass=DescriptorMeta):
-    """Configuration object for Sanic.
+    """Configuration object for the application.
 
-    You can use this object to both: (1) configure how Sanic will operate, and
+    You can use this object to both: (1) configure how the application will operate, and
     (2) manage your application's custom configuration values.
     """
 
@@ -379,7 +379,7 @@ class Config(dict, metaclass=DescriptorMeta):
         """Load environment variables into the config.
 
         Looks for prefixed environment variables and applies them to the
-        configuration if present. This is called automatically when Sanic
+        configuration if present. This is called automatically when the application
         starts up to load environment variables into config. Environment
         variables should start with the defined prefix and should only
         contain uppercase letters.

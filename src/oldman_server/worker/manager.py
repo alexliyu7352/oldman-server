@@ -41,7 +41,7 @@ class WorkerManager:
     """Manage all of the processes.
 
     This class is used to manage all of the processes. It is instantiated
-    by Sanic when in multiprocess mode (which is OOTB default) and is used
+    by the application when in multiprocess mode (which is OOTB default) and is used
     to start, stop, and restart the worker processes.
 
     You can access it to interact with it **ONLY** when on the main process.
@@ -119,7 +119,7 @@ class WorkerManager:
         ident: str = "",
         slot: int | None = None,
     ) -> Worker:
-        """Instruct Sanic to manage a custom process.
+        """Instruct the worker manager to manage a custom process.
 
         Args:
             name (str): A name for the worker process
@@ -416,7 +416,7 @@ class WorkerManager:
         """Kill the worker processes, then raise ServerKilled.
 
         Worker processes share the main process's group, so killing their
-        group (as Sanic does) killed the main process too, before its own
+        group would kill the main process too, before its own
         shutdown: only a worker that leads a group of its own has the group
         killed. The main process then stops as usual and exits with 1.
         """

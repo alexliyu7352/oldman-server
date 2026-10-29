@@ -37,7 +37,7 @@ class ApplicationState:
     app: OldmanServer
     native_loop: AbstractEventLoop | None = field(default=None, repr=False)
     # NATIVE_SERVER serves a run that would use the worker manager from this
-    # process (Sanic.native_single_process); main process listeners run here.
+    # process (OldmanServer.native_single_process); main process listeners run here.
     native_main_process: bool = field(default=False)
     # Worker processes: the shared-memory table with which those sharing one
     # listening socket take turns accepting (oldman_server.native.accept).

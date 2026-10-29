@@ -100,7 +100,7 @@ class Request(Generic[sanic_type, ctx_type]):
         version (str): HTTP version.
         method (str): HTTP method.
         transport (TransportProtocol): Transport protocol.
-        app (OldmanServer): Sanic instance.
+        app (OldmanServer): Application instance.
         head (bytes, optional): Request head. Defaults to `b""`.
     """
 
@@ -436,7 +436,7 @@ class Request(Generic[sanic_type, ctx_type]):
             Request: The current request object
 
         Raises:
-            sanic.exceptions.ServerError: If it is outside of a request
+            oldman_server.exceptions.ServerError: If it is outside of a request
                 lifecycle.
         """  # noqa: E501
         request = cls._current.get(None)
@@ -479,7 +479,7 @@ class Request(Generic[sanic_type, ctx_type]):
         part of the request lifecycle.
 
         Raises:
-            sanic.exceptions.ServerError: If the response has already been
+            oldman_server.exceptions.ServerError: If the response has already been
                 sent.
         """
         try:
@@ -591,7 +591,7 @@ class Request(Generic[sanic_type, ctx_type]):
                 with suppress(ServerError):
                     self.reset_response()
                 raise
-            # Already the error response: send it, as Sanic does.
+            # Already the error response: send it.
             error_logger.exception(
                 "Exception occurred in one of response middleware handlers"
             )
@@ -601,7 +601,7 @@ class Request(Generic[sanic_type, ctx_type]):
     async def receive_body(self):
         """Receive request.body, if not already received.
 
-        Streaming handlers may call this to receive the full body. Sanic calls
+        Streaming handlers may call this to receive the full body. The framework calls
         this function before running any handlers of non-streaming routes.
 
         Custom request classes can override this for custom handling of both
@@ -631,7 +631,7 @@ class Request(Generic[sanic_type, ctx_type]):
 
     @property
     def endpoint(self) -> str | None:
-        """Alias of `sanic.request.Request.name`
+        """Alias of `oldman_server.request.Request.name`
 
         Returns:
             str | None: The route name
@@ -691,16 +691,16 @@ class Request(Generic[sanic_type, ctx_type]):
 
         By default, this will look in a request header defined at:
         `self.app.config.REQUEST_ID_HEADER`. It defaults to
-        `X-Request-ID`. Sanic will try to cast the ID into a `UUID` or an
+        `X-Request-ID`. The framework will try to cast the ID into a `UUID` or an
         `int`.
 
-        If there is not a UUID from the client, then Sanic will try
+        If there is not a UUID from the client, then the framework will try
         to generate an ID by calling `Request.generate_id()`. The default
         behavior is to generate a `UUID`. You can customize this behavior
         by subclassing `Request` and overwriting that method.
 
         ```python
-        from oldman_server import Request, Sanic
+        from oldman_server import OldmanServer, Request
         from itertools import count
 
         class IntRequest(Request):
@@ -1097,7 +1097,7 @@ class Request(Generic[sanic_type, ctx_type]):
 
     @property
     def forwarded(self) -> Options:
-        """Active proxy information obtained from request headers, as specified in Sanic configuration.
+        """Active proxy information obtained from request headers, as specified in the application configuration.
 
         Field names by, for, proto, host, port and path are normalized.
         - for and by IPv6 addresses are bracketed
@@ -1141,7 +1141,7 @@ class Request(Generic[sanic_type, ctx_type]):
         1. proxied remote address `self.forwarded['for']`
         2. local peer address `self.ip`
 
-        New in Sanic 23.6. Prefer this over `remote_addr` for determining the
+        Prefer this over `remote_addr` for determining the
         client address regardless of whether the service runs behind a proxy
         or not (proxy deployment needs separate configuration).
 
@@ -1190,7 +1190,7 @@ class Request(Generic[sanic_type, ctx_type]):
         2. proxied host of original request
         3. request host header
         hostname and port may be separated by
-        `sanic.headers.parse_host(request.host)`.
+        `oldman_server.headers.parse_host(request.host)`.
 
         Returns:
             str: the first matching host found, or empty string
@@ -1258,7 +1258,7 @@ class Request(Generic[sanic_type, ctx_type]):
     def url_for(self, view_name: str, **kwargs) -> str:
         """Retrieve a URL for a given view name.
 
-        Same as `sanic.OldmanServer.url_for`, but automatically determine `scheme`
+        Same as `oldman_server.OldmanServer.url_for`, but automatically determine `scheme`
         and `netloc` base on the request. Since this method is aiming
         to generate correct schema & netloc, `_external` is implied.
 

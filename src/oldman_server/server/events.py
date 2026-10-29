@@ -22,7 +22,7 @@ def trigger_events(
     Args:
         events (Optional[Iterable[Callable[..., Any]]]): [description]
         loop ([type]): [description]
-        app (Optional[Sanic], optional): [description]. Defaults to None.
+        app (Optional[OldmanServer], optional): [description]. Defaults to None.
     """
     if events:
         for event in events:

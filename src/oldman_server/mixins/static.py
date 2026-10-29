@@ -77,7 +77,7 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
                 Defaults to `"static"`.
             host (Optional[str], optional): Host IP or FQDN for the
                 service to use.
-            strict_slashes (Optional[bool], optional): Instruct Sanic to
+            strict_slashes (Optional[bool], optional): Instruct the router to
                 check if the request URLs need to terminate with a slash.
             content_type (Optional[str], optional): User-defined content type
                 for header.
@@ -104,7 +104,7 @@ class StaticMixin(BaseMixin, metaclass=AppMeta):
                 application's, False none. Defaults to `None`.
 
         Returns:
-            List[sanic.router.Route]: Routes registered on the router.
+            List[oldman_server.router.Route]: Routes registered on the router.
 
         Examples:
             Serving a single file:
@@ -182,11 +182,11 @@ class StaticHandleMixin(metaclass=AppMeta):
         self,
         static: FutureStatic,
     ):
-        # TODO: Though sanic is not a file server, I feel like we should
+        # TODO: Though this is not a file server, I feel like we should
         # at least make a good effort here.  Modified-since is nice, but
         # we could also look into etags, expires, and caching
         """
-        Register a static directory handler with Sanic by adding a route to the
+        Register a static directory handler with the application by adding a route to the
         router and registering a handler.
         """
         file_or_directory: PathLike

@@ -157,7 +157,7 @@ class StartupMixin(metaclass=AppMeta):
         """Interface for interacting with the worker processes
 
         This is a shortcut for `app.multiplexer`. It is available only in a
-        worker process using the Sanic server. It allows you to interact with
+        worker process of the server. It allows you to interact with
         the worker processes, such as sending messages and commands.
 
         Returns:
@@ -197,9 +197,9 @@ class StartupMixin(metaclass=AppMeta):
         """Run the HTTP Server and listen until keyboard interrupt or term signal. On termination, drain connections before closing.
 
         .. note::
-            When you need control over running the Sanic instance, this is the method to use.
+            When you need control over running the OldmanServer instance, this is the method to use.
 
-        If you are using this method to run Sanic, make sure you do the following:
+        If you are using this method to run the application, make sure you do the following:
 
         1. Use `if __name__ == "__main__"` to guard the code.
         2. Do **NOT** define the app instance inside the `if` block.
@@ -254,7 +254,7 @@ class StartupMixin(metaclass=AppMeta):
         if not single_process and self.native_single_process(
             workers, fast, dev, auto_reload
         ):
-            # The native host runs its own threads in this process; Sanic's
+            # The native host runs its own threads in this process; the
             # worker manager (and the sockets it pre-binds) is not used.
             single_process = self.state.native_main_process = True
         self.prepare(
@@ -294,7 +294,7 @@ class StartupMixin(metaclass=AppMeta):
         """Whether NATIVE_SERVER serves this run from the current process.
 
         The native host serves HTTP/1.1 over TCP or a unix socket in this
-        process. Otherwise the run goes through Sanic's worker manager as
+        process. Otherwise the run goes through the worker manager as
         usual: for workers, fast or auto-reload each worker process serves
         through its own native host on its own CPUs (see native/cpus.py).
         """
@@ -324,9 +324,9 @@ class StartupMixin(metaclass=AppMeta):
         verbosity: int = 0,
         single_process: bool = False,
     ) -> None:
-        """Prepares one or more Sanic applications to be served simultaneously.
+        """Prepares one or more applications to be served simultaneously.
 
-        This low-level API is typically used when you need to run multiple Sanic applications at the same time. Once prepared, `OldmanServer.serve()` should be called in the `if __name__ == "__main__"` block.
+        This low-level API is typically used when you need to run multiple applications at the same time. Once prepared, `OldmanServer.serve()` should be called in the `if __name__ == "__main__"` block.
 
         .. note::
             "Preparing" and "serving" with this function is equivalent to using `app.run` for a single instance. This should only be used when running multiple applications at the same time.
@@ -467,16 +467,16 @@ class StartupMixin(metaclass=AppMeta):
         noisy_exceptions: bool | None = None,
     ) -> AsyncioServer | None:
         """
-        Low level API for creating a Sanic Server instance.
+        Low level API for creating a server instance.
 
-        This method will create a Sanic Server instance, but will not start
-        it. This is useful for integrating Sanic into other systems. But, you
+        This method will create a server instance, but will not start
+        it. This is useful for integrating it into other systems. But, you
         should take caution when using it as it is a low level API and does
         not perform any of the lifecycle events.
 
         .. note::
             This does not support multiprocessing and is not the preferred
-            way to run a Sanic application. Proceed with caution.
+            way to run an application. Proceed with caution.
 
         You will need to start the server yourself as shown in the example
         below. You are responsible for the lifecycle of the server, including
@@ -589,7 +589,7 @@ class StartupMixin(metaclass=AppMeta):
         )
 
     def stop(self, terminate: bool = True, unregister: bool = False) -> None:
-        """This kills the Sanic server, cleaning up after itself.
+        """This kills the server, cleaning up after itself.
 
         Args:
             terminate (bool): Force kill all requests immediately without
@@ -863,17 +863,17 @@ class StartupMixin(metaclass=AppMeta):
         app_loader: AppLoader | None = None,
         factory: Callable[[], OldmanServer] | None = None,
     ) -> None:
-        """Serve one or more Sanic applications.
+        """Serve one or more applications.
 
-        This is the main entry point for running Sanic applications. It
+        This is the main entry point for running applications. It
         should be called in the `if __name__ == "__main__"` block.
 
         Args:
-            primary (Optional[Sanic], optional): The primary Sanic application
+            primary (Optional[OldmanServer], optional): The primary application
                 to serve. Defaults to `None`.
             app_loader (Optional[AppLoader], optional): An AppLoader instance
                 to use for loading applications. Defaults to `None`.
-            factory (Optional[Callable[[], Sanic]], optional): A factory
+            factory (Optional[Callable[[], OldmanServer]], optional): A factory
                 function to use for loading applications. Defaults to `None`.
 
         Raises:
@@ -1122,7 +1122,7 @@ class StartupMixin(metaclass=AppMeta):
     @classmethod
     @_restores_signal_handlers
     def serve_single(cls, primary: OldmanServer | None = None) -> None:
-        """Serve a single process of a Sanic application.
+        """Serve a single process of an application.
 
         Similar to `serve`, but only serves a single process. When used,
         certain features are disabled, such as `fast`, `workers`,
@@ -1135,7 +1135,7 @@ class StartupMixin(metaclass=AppMeta):
         ```
 
         Args:
-            primary (Optional[Sanic], optional): The primary Sanic application
+            primary (Optional[OldmanServer], optional): The primary application
                 to serve. Defaults to `None`.
 
         Raises:
@@ -1185,7 +1185,7 @@ class StartupMixin(metaclass=AppMeta):
         try:
             if primary.state.native_main_process:
                 # This process is also the main process the worker manager
-                # would have run: its listeners run as in Sanic.serve (the
+                # would have run: its listeners run as in OldmanServer.serve (the
                 # registered functions, with the application and a loop of the
                 # configured kind, before the socket is bound), and
                 # main_process_stop runs below even when they fail.

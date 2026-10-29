@@ -115,7 +115,7 @@ class _NativeConnection:
 
     @property
     def version(self):
-        from oldman_server.http.constants import HTTP  # sanic.http imports this module
+        from oldman_server.http.constants import HTTP  # oldman_server.http imports this module
 
         return HTTP.VERSION_1
 

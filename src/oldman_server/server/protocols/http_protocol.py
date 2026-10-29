@@ -80,7 +80,7 @@ class HttpProtocolMixin:
 class HttpProtocol(HttpProtocolMixin, ConnectionProtocol, metaclass=TouchUpMeta):
     """
     This class provides implements the HTTP 1.1 protocol on top of our
-    Sanic Server transport
+    server transport
     """
 
     HTTP_CLASS = Http
