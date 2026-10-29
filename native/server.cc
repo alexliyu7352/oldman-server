@@ -35,7 +35,7 @@ bool valid_http_response(int status,
     bool upgrade) {
     // Without no_body_statuses, 204/304 and the framing and diagnostic fields
     // are refused. The HTTP/1.1 application host (no_body_statuses) writes
-    // them correctly and sends the application's fields as Sanic does: any
+    // them correctly and sends the application's fields as the asyncio server does: any
     // name, with its own Content-Length / Transfer-Encoding / Connection in
     // place of the application's (http1::append_head); only the syntax is
     // checked. 101 (a protocol switch) only starts a framework host stream
@@ -374,7 +374,7 @@ struct Waiter {
     bool paused = false;
     Event resumed;
     // The response deadline (decide) until it is reported: request body data
-    // arriving restarts it, as Sanic's RESPONSE_TIMEOUT counts from the last
+    // arriving restarts it, as the asyncio server's RESPONSE_TIMEOUT counts from the last
     // data received.
     WheelEntry* response_deadline = nullptr;
 };
@@ -564,7 +564,7 @@ class Service {
             return ::ioctl(socket.native_handle(), FIONREAD, &bytes) == 0 && bytes > 0;
         }
     };
-    // The peer of a connection left: as Sanic's connection_lost, the request
+    // The peer of a connection left: as the asyncio server's connection_lost, the request
     // Python is handling there is cancelled (application_lost; the event's
     // size is the connection key, whose state Python marks lost).
     void peer_left(AppConnection& connection, uint64_t connection_key) {
@@ -972,7 +972,7 @@ class Service {
     }
     // The connections a listener of this process's own has queued as a
     // graceful stop starts: they were made before it, and shutting the
-    // listener down would reset them. Sanic's loop accepts them before its
+    // listener down would reset them. The asyncio server's loop accepts them before its
     // stop gets to closing the server; here the drain can come first, before
     // the accept loop has seen them ready. This shard takes them, so they are
     // open before the drain returns, and serves them as any other (a request
@@ -1035,7 +1035,7 @@ public:
         const auto& config = shared.config;
         asio::error_code ignored;
         const auto local = connection.socket.local_endpoint(ignored);
-        // Over a unix socket Sanic reports no client address and the socket path.
+        // Over a unix socket the framework reports no client address and the socket path.
         const bool unix_socket = local.data()->sa_family == AF_UNIX;
         using Address = std::pair<std::string, unsigned>;
         const Address client = unix_socket ? Address{} : address_of(remote);
@@ -1063,7 +1063,7 @@ public:
             connection.shut_input();
             connection.shut_output();
         };
-        // What a read waits for, and so its deadline. Sanic times each stage
+        // What a read waits for, and so its deadline. The asyncio server times each stage
         // from the last data received: KEEP_ALIVE_TIMEOUT between requests;
         // REQUEST_TIMEOUT while a head arrives (here from its first byte, which
         // a peer sending a byte at a time cannot extend); RESPONSE_TIMEOUT
@@ -1075,7 +1075,7 @@ public:
         auto read_more = [&](Reading reading = Reading::next) -> asio::awaitable<bool> {
             const bool idle = reading == Reading::rest ||
                               (reading == Reading::next && buffer.size() == consumed);
-            if (idle && draining && !connection.input_pending()) co_return false;  // Sanic's close_if_idle
+            if (idle && draining && !connection.input_pending()) co_return false;  // the asyncio server's close_if_idle
             const bool body = reading == Reading::body;
             waiting = idle ? Wait::idle : body ? Wait::response : Wait::request;
             const auto timeout = body ? config.decision_timeout_ms
@@ -1102,14 +1102,14 @@ public:
         try {
             for (bool keep = true; keep && !closing;) {
                 // Responses to pipelined requests are batched into one write,
-                // up to 64 KiB (Sanic's write buffer limit): a client that
+                // up to 64 KiB (the asyncio server's write buffer limit): a client that
                 // pipelines requests and does not read their responses holds
                 // no more than that, until the write deadline.
                 if (output.size() >= 65536) co_await flush_output(connection, output);
                 // Until this request's head is parsed, nothing is known of its origin.
                 if (cors_on) connection.origin.clear();
                 http1::Head head;
-                // No field count of its own: the size limit bounds the head, as in Sanic.
+                // No field count of its own: the size limit bounds the head, as in the framework's Http.
                 const auto parsed = http1::parse_head(std::string_view(buffer).substr(consumed),
                                                       config.max_header_bytes,
                                                       std::numeric_limits<size_t>::max(), head);
@@ -1125,7 +1125,7 @@ public:
                     break;
                 }
                 if (parsed != http1::Parse::complete) {
-                    // Sanic's error_response() over an empty request: the
+                    // The asyncio server's error_response() over an empty request: the
                     // application's error handler renders it; then the connection closes.
                     ApplicationInput input{std::string(head.target), "1.1", {}, client, server,
                                            connection_key, ++sequence, unix_socket};
@@ -1172,10 +1172,10 @@ public:
                     }
                     // Python checks the size as the handler reads (Http.read: a
                     // stream handler has no limit). Too large to be read past
-                    // after the response, as in Sanic: the connection ends then.
+                    // after the response, as on the asyncio server: the connection ends then.
                     close = true;
                 } else if (chunked && framework_errors) {
-                    // Decoded while the handler runs, one event per chunk: a Sanic
+                    // Decoded while the handler runs, one event per chunk: a framework
                     // stream handler reads each chunk on its own.
                 } else if (chunked) {
                     // The generic framework host hands Python complete bodies only.
@@ -1297,7 +1297,7 @@ public:
                 size_t remaining = chunked ? 0 : length - body.size();
                 bool body_ok = true;
                 bool over = false;  // a chunked body declared more than max_body_bytes
-                // At most body_window_bytes ahead of the handler (Sanic pauses
+                // At most body_window_bytes ahead of the handler (the asyncio server pauses
                 // reading at REQUEST_BUFFER_SIZE); none once the response is out.
                 BodyFlow flow(io);
                 body_flows.emplace(root, &flow);
@@ -1325,7 +1325,7 @@ public:
                                 // Past REQUEST_MAX_SIZE (Http.read checks each chunk's
                                 // size): Python raises 413 unless the handler streams
                                 // the body. Either way the connection ends after the
-                                // response: Sanic does not read past the limit then.
+                                // response: the asyncio server does not read past the limit then.
                                 over = true;
                                 close = true;  // read by the response head if not yet written
                                 if (flow.publishing) publish_data({}, "over");
@@ -1367,7 +1367,7 @@ public:
                             // Stopped here, or the rest timed out after the response.
                             if (flow.stopped || !flow.publishing) co_return;
                             if (expired == Wait::response) {
-                                // Sanic's response timeout: the handler is cancelled (a
+                                // The asyncio server's response timeout: the handler is cancelled (a
                                 // streamed response then ends, and the connection).
                                 // While Python has not answered, decide's own deadline,
                                 // restarted with the same piece, reports it.
@@ -1417,11 +1417,11 @@ public:
                     std::rethrow_exception(responding_failure);
                 }
                 // The handler is done with the body: the rest is read past (as
-                // Sanic does after a response), or not at all if the connection
+                // the asyncio server does after a response), or not at all if the connection
                 // ends now.
                 flow.publishing = false;
                 if (!forwarding_done) {
-                    // The response goes out now, as Sanic sends it, not once the
+                    // The response goes out now, as the asyncio server sends it, not once the
                     // rest of the body has come (forward_body does not write).
                     try {
                         co_await flush_output(connection, output);
@@ -1443,7 +1443,7 @@ public:
                 keep = !close && !connection.peer_gone;
             }
             if (expired == Wait::request && config.framework_errors) {
-                // Sanic answers a request that did not arrive in time with
+                // The asyncio server answers a request that did not arrive in time with
                 // RequestTimeout through its error handler.
                 ApplicationInput input{{}, "1.1", {}, client, server, connection_key, ++sequence, unix_socket};
                 bool close = true;
@@ -1547,11 +1547,11 @@ public:
             co_return;
         }
         // The server is stopping: unless a pipelined request follows (served as
-        // Sanic serves a busy connection), this is the connection's last response.
+        // the asyncio server serves a busy connection), this is the connection's last response.
         if (draining && connection.buffer->size() == *connection.consumed) close = true;
         retired = answer->retire;
         const bool streamed = answer->kind == DecisionKind::stream_start;
-        // Sanic closes the connection after a response timeout's error response.
+        // The asyncio server closes the connection after a response timeout's error response.
         if (answer->timed_out) close = true;
         if (answer->code == 3) { reject(answer->reject_status); co_return; }
         // The status and headers were checked where Python handed them over
@@ -1599,7 +1599,7 @@ public:
         const bool write_body = !head_request && http1::status_has_body(answer.code);
         counts.response_bytes += write_body ? answer.body.size() : 0;
         if (head_request && answer.content_length >= 0) {
-            // Sanic keeps a HEAD response's own Content-Length (the GET size).
+            // The framework keeps a HEAD response's own Content-Length (the GET size).
             http1::append_head(output, answer.code, answer.content_length, answer.headers, close,
                                date(), extra);
             return true;
@@ -1635,7 +1635,7 @@ public:
     // head, the chunks are written as raw bytes, and the peer's bytes (first any
     // the request buffer already holds) go to Python as application_data events
     // until EOF ("end"); Python pauses and resumes that reading. Without
-    // timeouts, as Sanic's WebSocket connections. The connection closes after
+    // timeouts, as the asyncio server's WebSocket connections. The connection closes after
     // the tunnel, which Python is told of with "lost".
     asio::awaitable<void> stream_application(AppConnection& connection, Decision& start, uint64_t root,
                                              const std::string& method, bool head_request, bool http11,
@@ -1708,7 +1708,7 @@ public:
                 if (framing == Framing::length && static_cast<int64_t>(data.size()) > start.content_length - sent) {
                     // Never past the declared length (a client would read the rest
                     // as the next response): what fits goes out, then the
-                    // connection ends. Python raises first, as Sanic does.
+                    // connection ends. Python raises first, as on the asyncio server.
                     data = data.substr(0, static_cast<size_t>(std::max<int64_t>(start.content_length - sent, 0)));
                     overrun = true;
                 }
@@ -1721,7 +1721,7 @@ public:
             frame(data);
         };
         // stream_file: the file range goes out in chunk-size pieces, one per read
-        // Sanic's file_stream would make; Python learns the outcome from
+        // the framework's file_stream would make; Python learns the outcome from
         // application_file (bytes written, or "error:<errno>:<message>").
         // False when the connection failed or the stream was aborted meanwhile.
         auto send_file = [&](const Decision& order) -> asio::awaitable<bool> {
@@ -1976,7 +1976,7 @@ public:
         }
     }
     // The response deadline: Python is told and cancels the handler, which may
-    // still answer (Sanic: 503 Response Timeout through its error handler).
+    // still answer (as on the asyncio server: 503 Response Timeout through the error handler).
     // Without an answer within the grace period the host answers 504 itself.
     asio::awaitable<Decision> decide(uint64_t id, const std::string& method) {
         auto begin = clock_ns();
@@ -2136,7 +2136,7 @@ public:
         settle(waiter, std::move(decision));
     }
     // The framework host's listeners accept no more connections (again: a
-    // no-op). A listener of this process's own is shut down, as Sanic's
+    // no-op). A listener of this process's own is shut down, as the asyncio server's
     // server.close(): the kernel refuses new connections or, with
     // SO_REUSEPORT, gives them to the other processes' sockets. On a socket
     // shared with other processes, this process leaves accepting to them.
@@ -2152,7 +2152,7 @@ public:
             stop_heartbeat();
         }
     }
-    // A graceful stop's first step (GRACEFUL_SHUTDOWN_TIMEOUT), as Sanic's
+    // A graceful stop's first step (GRACEFUL_SHUTDOWN_TIMEOUT), as the asyncio server's
     // server.close() and close_if_idle(): no new connections (the ones queued
     // on this process's own listeners are taken first); idle ones close now
     // (nothing of a request received, not even unread in the socket), the

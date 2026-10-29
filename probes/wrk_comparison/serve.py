@@ -73,7 +73,7 @@ def bare(port, workers, same_thread):
             child.join(10)
 
 
-# At module level: Sanic's spawned workers import this module (with these arguments).
+# At module level: the spawned worker processes import this module (with these arguments).
 if sys.argv[1:2] in (["candidate"], ["stock"]):
     from probes.wrk_comparison.apps import make_app
     app = make_app(stock=sys.argv[1] == "stock")

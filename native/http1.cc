@@ -125,7 +125,7 @@ Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& 
     } else if (head.version == "HTTP/1.0") {
         http10 = true;
     } else {
-        return bad();  // Sanic answers other versions with Bad Request too
+        return bad();  // the framework's Http answers other versions with Bad Request too
     }
 
     bool close = false, keep_alive = false, bad_length = false, host = false;
@@ -148,7 +148,7 @@ Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& 
 
         const bool length_field = iequals(name, "content-length");
         if (length_field || iequals(name, "transfer-encoding")) {
-            // Like Sanic, at most one Content-Length or Transfer-Encoding field.
+            // Like the framework's Http, at most one Content-Length or Transfer-Encoding field.
             if (head.has_content_length || head.has_transfer_encoding) return bad();
             if (length_field) {
                 size_t length = 0;
@@ -183,7 +183,7 @@ Parse parse_head(std::string_view data, size_t limit, size_t max_headers, Head& 
         }
     }
     head.keep_alive = !close && (!http10 || keep_alive);
-    // In Sanic's order: the URL, then (with a body) Expect and the length.
+    // In Http.http1_request_header's order: the URL, then (with a body) Expect and the length.
     if (!ascii_target)
         return fail(Parse::bad_request, 400, "URL may only contain US-ASCII characters.");
     if (head.has_content_length || head.has_transfer_encoding) {
@@ -209,7 +209,7 @@ Chunked ChunkedDecoder::feed(std::string_view data, size_t& pos, std::string& bo
         }
         const auto end = data.find("\r\n", pos);
         if (end == std::string_view::npos) {
-            // Sanic bounds a chunk size line to 64 bytes.
+            // Http.read bounds a chunk size line to 64 bytes.
             return data.size() - pos > 64 ? Chunked::bad_request : Chunked::incomplete;
         }
         const auto line = data.substr(pos, end - pos);
@@ -220,7 +220,7 @@ Chunked ChunkedDecoder::feed(std::string_view data, size_t& pos, std::string& bo
             state_ = State::size;
             break;
         case State::size: {
-            // Sanic's 64-byte bound, whether the line arrives at once or not; no
+            // Http.read's 64-byte bound, whether the line arrives at once or not; no
             // control characters in an extension (a bare LF in one could end the
             // line for a proxy that forwards the body).
             if (line.size() > 64) return Chunked::bad_request;
@@ -244,7 +244,7 @@ Chunked ChunkedDecoder::feed(std::string_view data, size_t& pos, std::string& bo
         }
         case State::trailer:
             // Trailer bytes left on a keep-alive connection could be read as a
-            // smuggled request; Sanic rejects any.
+            // smuggled request; Http.read rejects any.
             return line.empty() ? Chunked::complete : Chunked::bad_request;
         case State::data:
             break;

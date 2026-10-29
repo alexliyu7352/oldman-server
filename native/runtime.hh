@@ -8,7 +8,7 @@
 #include "server.hh"
 
 namespace probe {
-// File operations of the framework host (Sanic's file responses), run by the
+// File operations of the framework host (the framework's file responses), run by the
 // runtime's file threads (on the shards' CPUs), as they may block.
 // file_open: open(path) for reading and fstat it (a check before streaming).
 enum FileOperation : int { file_stat = 0, file_read = 1, file_open = 2 };

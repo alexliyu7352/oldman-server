@@ -126,7 +126,7 @@ def make_app(name):
 
     @app.get("/informational")
     async def informational(request):
-        # Not a final status: Sanic raises RuntimeError("Invalid response status").
+        # Not a final status: the framework raises RuntimeError("Invalid response status").
         kind = request.args.get("kind")
         if kind == "stream":
             response = await request.respond(status=101, headers={"Upgrade": "x"})
@@ -198,7 +198,7 @@ def test_keep_alive_pipelining_and_content_length_framing():
         replies = [await read_response(reader) for _ in range(4)]
         for status, headers, body in replies[:3]:
             assert (status, body) == (200, b'{"message":"Hello, World!"}')
-            # Sanic's header set: no Date; Connection on every response.
+            # The framework's header set: no Date; Connection on every response.
             assert "transfer-encoding" not in names(headers) and "date" not in names(headers)
             assert ("Connection", "keep-alive") in headers
             assert ("content-type", "application/json") in [(k.lower(), v) for k, v in headers]
@@ -260,7 +260,7 @@ def test_expect_continue():
 
 
 def test_malformed_and_limited_requests_close_with_errors():
-    # Statuses and messages of Sanic's Http for the same input, rendered by the
+    # Statuses and messages of the framework's Http for the same input, rendered by the
     # application's error handler.
     cases = [
         (b"GET /small\r\n\r\n", 400, b"Bad Request"),
@@ -299,12 +299,12 @@ def test_keep_alive_idle_and_request_deadlines():
     async def slow_head(reader, writer):
         writer.write(b"GET /small HTTP/1.1\r\nHost:")
         status, headers, body = await asyncio.wait_for(read_response(reader), 2)
-        # RequestTimeout through the error handler, as Sanic.
+        # RequestTimeout through the error handler, as on the asyncio server.
         assert status == 408 and ("Connection", "close") in headers and b"Request Timeout" in body
         assert await reader.read() == b""
 
     async def slow_body(reader, writer):
-        # While the handler runs, Sanic times the body by RESPONSE_TIMEOUT
+        # While the handler runs, the asyncio server times the body by RESPONSE_TIMEOUT
         # (from the last data received), not REQUEST_TIMEOUT.
         writer.write(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc")
         status, _, body = await asyncio.wait_for(read_response(reader), 2)
@@ -326,7 +326,7 @@ def test_keep_alive_idle_and_request_deadlines():
 
 def test_sanic_timeouts_map_to_the_host():
     # 0 meant "no deadline" to the host but "at the first check" (0.1 s) to
-    # Sanic; values past a day or infinite made the server fail to start.
+    # the asyncio server; values past a day or infinite made the server fail to start.
     from oldman_server.native.host import native_config
     app = OldmanServer("timeout_mapping", configure_logging=False)
     app.config.KEEP_ALIVE_TIMEOUT, app.config.REQUEST_TIMEOUT = 0, 0.05
@@ -402,7 +402,7 @@ def test_streamed_responses():
 
 def test_stream_failure_ends_the_stream_and_disconnect_cancels_handler():
     async def failure(reader, writer):
-        # Like Sanic's Http, an error after the response started is only logged;
+        # Like the framework's Http, an error after the response started is only logged;
         # the stream then ends normally and the connection stays usable.
         writer.write(b"GET /stream-fail HTTP/1.1\r\nHost: x\r\n\r\n")
         status, _, body = await asyncio.wait_for(read_chunked(reader), 2)
@@ -438,7 +438,7 @@ def test_chunked_request_bodies_and_stream_handlers():
         assert (await read_response(reader))[0::2] == (200, b"1:data")
 
     async def chunks_as_reads(reader, writer):
-        # A stream handler reads each chunk on its own, as with Sanic's Http.
+        # A stream handler reads each chunk on its own, as with the framework's Http.
         writer.write(b"POST /streamed-in HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
                      b"3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n")
         assert (await read_response(reader))[0::2] == (200, b"2:foobar")
@@ -500,7 +500,7 @@ def test_request_bodies_arriving_while_the_handler_runs():
 
 
 def sanic_semantics_app(name):
-    """Routes whose behavior Sanic defines beyond the wire format."""
+    """Routes whose behavior the framework defines beyond the wire format."""
     from oldman_server.exceptions import PayloadTooLarge
     from oldman_server.response import HTTPResponse
     app = make_app(name)
@@ -598,7 +598,7 @@ def test_sanic_error_handling_timeouts_and_connection_state():
 
 def test_informational_status_from_a_handler_is_an_error():
     # Only the WebSocket handshake sends a 101; a handler's 1xx response goes
-    # to the error handler (500), as RuntimeError in Sanic's response header.
+    # to the error handler (500), as RuntimeError in Http.http1_response_header.
     def request(query):
         async def scenario(reader, writer):
             writer.write(f"GET /informational?{query} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
@@ -759,7 +759,7 @@ def test_blank_lines_before_a_request_count_towards_the_head_limit():
 
 
 def test_many_short_header_fields_within_the_size_limit():
-    # Only the head's size is limited, as in Sanic: 150 short fields fit.
+    # Only the head's size is limited, as in the framework's Http: 150 short fields fit.
     async def scenario(reader, writer):
         fields = b"".join(b"X-%d: v\r\n" % index for index in range(150))
         writer.write(b"GET /small HTTP/1.1\r\nHost: x\r\n" + fields + b"\r\n")
@@ -901,7 +901,7 @@ def test_a_peer_leaving_cancels_its_handler_on_io_uring():
 def peer_leaving(backend):
     # The handler of a request whose client closes (FIN) or resets (RST) the
     # connection is cancelled, and RequestCancelled goes to the error
-    # handler, as Sanic does; the native host ran it to the end unnoticed.
+    # handler, as the asyncio server does; the native host ran it to the end unnoticed.
     async def leave(how):
         async def scenario(reader, writer):
             writer.write(b"GET /wait HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -1128,7 +1128,7 @@ def body_app(name):
 def test_a_request_body_arrives_as_fast_as_the_handler_reads_it():
     # A stream handler reading slower than the client sends: the host read the
     # whole body into Python's memory (64 MiB within 2.5 s, not counted in
-    # NATIVE_MAX_MEMORY). As Sanic pauses reading at REQUEST_BUFFER_SIZE, it
+    # NATIVE_MAX_MEMORY). As the asyncio server pauses reading at REQUEST_BUFFER_SIZE, it
     # forwards at most the window ahead of what the handler has read.
     size = 32 << 20
 
@@ -1156,7 +1156,7 @@ def test_a_request_body_arrives_as_fast_as_the_handler_reads_it():
 
 
 def test_a_stream_handler_reads_a_body_past_request_max_size():
-    # Sanic lifts REQUEST_MAX_SIZE for stream=True handlers; the host answered
+    # The framework lifts REQUEST_MAX_SIZE for stream=True handlers; the host answered
     # 413 to their reads. A plain handler still gets 413.
     body = b"s" * 5000
 
@@ -1194,7 +1194,7 @@ def test_a_stream_handler_reads_a_body_past_request_max_size():
 
 def test_request_max_size_beyond_128_mib():
     # REQUEST_MAX_SIZE above 128 MiB was cut to 128 MiB without a word: a
-    # 129 MiB body got 413 (200 from Sanic).
+    # 129 MiB body got 413 (200 from the asyncio server).
     from oldman_server.native.host import native_config
     app = OldmanServer("max_size_config", configure_logging=False)
     app.config.REQUEST_MAX_SIZE = 200 << 20
@@ -1247,7 +1247,7 @@ def length_app(name):
 def test_a_streamed_response_never_goes_past_its_content_length():
     # The host wrote whatever was sent after a declared Content-Length, under
     # a keep-alive head: a client reading on would take the rest for the next
-    # response. Sanic raises "Response was bigger than content-length" instead
+    # response. The framework raises "Response was bigger than content-length" instead
     # of sending it; the host also holds the line itself and ends the connection.
     def fetch(target):
         async def scenario(reader, writer):
@@ -1357,7 +1357,7 @@ def _settable(locale, name):
 
 
 def test_a_response_goes_out_before_the_rest_of_its_body():
-    # A handler that answers without reading the body: Sanic sends the
+    # A handler that answers without reading the body: the asyncio server sends the
     # response at once (and reads the body's rest after it); the host held it
     # until the whole body had come, so a client waiting for the answer
     # before sending more waited until the keep-alive deadline.
@@ -1434,7 +1434,7 @@ def test_a_failing_connection_lost_does_not_lose_the_other_events(monkeypatch):
 def test_a_body_that_stalls_under_a_streamed_response_times_out():
     # Once a streamed response went out, the body read had no deadline at all:
     # a client that stopped sending held the connection and the handler for
-    # good. As in Sanic's response stage, RESPONSE_TIMEOUT counts from the
+    # good. As in the asyncio server's response stage, RESPONSE_TIMEOUT counts from the
     # last data received: the handler is cancelled and the connection ends.
     async def stall(reader, writer):
         writer.write(b"POST /stream-echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc")

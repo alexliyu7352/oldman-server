@@ -1,5 +1,5 @@
 """File responses on the native host: file(), file_stream() and app.static()
-read by the native file threads with Sanic's headers and errors; a large
+read by the native file threads with the framework's headers and errors; a large
 file()'s body goes from the file to the connection."""
 import asyncio
 from email.utils import formatdate
@@ -246,7 +246,7 @@ def test_file_streams(tmp_path):
         return await read_chunked(reader)
 
     async def small_chunks(reader, writer):
-        # Each read Sanic's file_stream makes is one chunk on the wire.
+        # Each read file_stream makes is one chunk on the wire.
         writer.write(get("/stream/small.txt?chunk=10"))
         head = await reader.readuntil(b"\r\n\r\n")
         raw = await reader.readuntil(b"0\r\n\r\n")
@@ -289,13 +289,13 @@ def test_file_streams(tmp_path):
     assert line == b"HTTP/1.1 200 OK"
     assert raw == (b"a\r\n0123456789\r\na\r\nabcdefghij\r\na\r\nklmnopqrst\r\n"
                    b"6\r\nuvwxyz\r\n0\r\n\r\n")
-    assert missing[0] == 500  # open() fails before the response starts, as in Sanic
+    assert missing[0] == 500  # open() fails before the response starts, as on the asyncio server
     assert empty[:1] == (200,) and empty[2] == b"" and ("content-length", "0") in [
         (k.lower(), v) for k, v in empty[1]]
     assert later[0] == 200 and later[2] == contents["small.txt"]
     assert mixed_body[2] == b"A" * 1000 + big[5:100005] + b"B" * 70000
     # The shard could not open the file: file_stream raises in the handler after
-    # the response started, and the stream ends as Sanic ends it (final chunk,
+    # the response started, and the stream ends as the asyncio server ends it (final chunk,
     # connection kept).
     assert vanished[0] == 200 and vanished[2] == b""
     assert next_one[2] == contents["small.txt"]

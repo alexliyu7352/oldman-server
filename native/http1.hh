@@ -16,13 +16,13 @@ enum class Parse { complete, incomplete, bad_request, too_large };
 enum class Chunked { complete, incomplete, bad_request, too_large, chunk };
 
 // Incremental decoder of a chunked request body (RFC 9112 7.1), as strict as
-// Sanic's Http.read: extensions are ignored, trailer fields are rejected.
+// the framework's Http.read: extensions are ignored, trailer fields are rejected.
 class ChunkedDecoder {
     enum class State { size, data, data_end, trailer } state_ = State::size;
     size_t remaining_ = 0;
     size_t declared_ = 0;
 public:
-    // The chunk sizes read so far (Sanic's Http.request_bytes), saturating.
+    // The chunk sizes read so far (Http.request_bytes), saturating.
     size_t declared() const { return declared_; }
     // Decodes from data[pos...] into body, advancing pos past what it used.
     // With one_chunk it stops after each chunk's data (Chunked::chunk).
@@ -40,7 +40,7 @@ struct Head {
     bool chunked = false;  // Transfer-Encoding is exactly "chunked"
     bool keep_alive = true;
     bool expect_continue = false;
-    // When parsing fails: the status and message Sanic's Http.http1_request_header
+    // When parsing fails: the status and message Http.http1_request_header
     // reports for the same input (BadRequest, PayloadTooLarge, ExpectationFailed).
     int error_status = 400;
     std::string error;
@@ -95,7 +95,7 @@ void append_stream_head(std::string& out, int status,
                         std::string_view framing);
 
 // The head of a protocol switch (101): exactly the application's headers, as
-// Sanic writes the WebSocket handshake response.
+// the asyncio server writes the WebSocket handshake response.
 void append_upgrade_head(std::string& out, int status,
                          const std::vector<std::pair<std::string, std::string>>& headers);
 

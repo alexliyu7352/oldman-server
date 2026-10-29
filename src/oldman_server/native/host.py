@@ -49,7 +49,7 @@ from websockets.typing import Subprotocol
 
 
 # Multipart forms are parsed natively when the result is the same (see
-# native/multipart.hh); otherwise Sanic's parser runs.
+# native/multipart.hh); otherwise the Python parser runs.
 _form.native_multipart = _native.parse_multipart
 
 # The native host's current Engine; at most one serves at a time. Streamed
@@ -88,13 +88,13 @@ _HTTP_EVENTS = frozenset(RESERVED_NAMESPACES["http"])
 _ENCODED_HEADERS = {}
 
 
-# Exceptions Sanic's Http raises for what the native host rejects while reading
-# a request, by status; the message is the host's (the same text as Sanic's).
+# Exceptions the framework's Http raises for what the native host rejects while reading
+# a request, by status; the message is the host's (the same text as Http's).
 _PROTOCOL_ERRORS = {400: BadRequest, 408: RequestTimeout, 413: PayloadTooLarge, 417: ExpectationFailed}
 
 
 def _timeout_ms(seconds):
-    """A Sanic timeout in the host's milliseconds, 0 meaning none. Sanic checks
+    """A config timeout in the host's milliseconds, 0 meaning none. The asyncio server checks
     its timeouts at least 0.1 s apart, so a shorter one (0 included) acts as
     0.1 s; one past a day is cut to a day; infinity is none."""
     seconds = float(seconds)
@@ -186,7 +186,7 @@ def _sent_content_type(content_type):
 
 
 class _TunnelTransport:
-    """The asyncio transport calls WebsocketImplProtocol and SanicProtocol.close
+    """The asyncio transport calls WebsocketImplProtocol and ConnectionProtocol.close
     make, over a native tunnel."""
     __slots__ = ("_tunnel",)
 
@@ -224,7 +224,7 @@ class _TunnelTransport:
 class _NativeTunnel:
     """WebSocketProtocol over a native tunnel (the connection after a 101): the
     io_proto WebsocketImplProtocol uses (loop, transport, send, and what
-    SanicProtocol.close reads), fed by the Engine with the peer's bytes."""
+    ConnectionProtocol.close reads), fed by the Engine with the peer's bytes."""
 
     def __init__(self, exchange, request, loop):
         self.exchange, self.request, self.loop = exchange, request, loop
@@ -259,7 +259,7 @@ class _NativeTunnel:
         for kind, data in early:
             getattr(self, kind)(*data)
 
-    # SanicProtocol.send
+    # ConnectionProtocol.send
     async def send(self, data):
         if self.transport is None or self.closing:
             raise RequestCancelled
@@ -433,7 +433,7 @@ class _BufferedExchange:
         """A failure once the response has been handed over (submitted, or a
         stream started): it can no longer be replaced, only end the
         connection. A response refused before that only raises: the stage
-        stays HANDLER and the error handler answers, as in Sanic's Http, whose
+        stays HANDLER and the error handler answers, as in the framework's Http, whose
         stage moves on only once the response is sent."""
         self.failure = ValueError(message)
         self.stage = Stage.FAILED
@@ -484,7 +484,7 @@ class _BufferedExchange:
             raise ValueError("inconsistent content-length")
         if lengths:
             self.response_bytes_left = int(lengths[0]) - len(first)
-        # Sanic's stage while a response is being sent: errors can no longer
+        # The framework's stage while a response is being sent: errors can no longer
         # produce an error response, only end the connection.
         self.streaming, self.stage = "open", Stage.RESPONSE
         kind = STREAM_START
@@ -503,7 +503,7 @@ class _BufferedExchange:
             raise self.failure
         if self.streaming == "ended":
             if end_stream and not data:
-                return  # Sanic finalizes once more after an explicit eof.
+                return  # The framework finalizes once more after an explicit eof.
             self._fail("response is already submitted")
         if type(data) is not bytes:
             data = _bytes_body(data)
@@ -519,7 +519,7 @@ class _BufferedExchange:
     def _count_sent(self, size, end_stream):
         """Http.http1_response_normal: nothing past a declared Content-Length is
         sent, nor an end before it. The stream fails then: the connection ends
-        after it (Sanic stops keep-alive once an error comes after the response
+        after it (Http stops keep-alive once an error comes after the response
         started)."""
         left = self.response_bytes_left - size
         if left < 0 or (end_stream and left):
@@ -544,7 +544,7 @@ class _BufferedExchange:
         if self.failure is not None:
             raise self.failure
         if self.result is not None:
-            # Sanic finalizes once more after an explicit request.respond/send.
+            # The framework finalizes once more after an explicit request.respond/send.
             if end_stream and not data:
                 return
             self._fail("response is already submitted")
@@ -578,7 +578,7 @@ class _BufferedExchange:
             self.stage = Stage.IDLE
             return
         headers, lengths = self._encode_headers(response)
-        # Http.http1_response_header: the host writes the body's length (Sanic
+        # Http.http1_response_header: the host writes the body's length (Http
         # replaces any Content-Length), except that a HEAD response keeps the
         # length it was given.
         native = self.native
@@ -609,7 +609,7 @@ class _BufferedExchange:
                         raise ValueError("response headers exceed the native limit")
                     headers.append((name, value))
         else:
-            # Snapshot Sanic's encoded/sanitized values at logical send. The
+            # Snapshot the framework's encoded/sanitized values at logical send. The
             # native batch later copies these owned bytes; no Response is queued.
             for name, value in response.processed_headers:
                 lower = name.lower()
@@ -653,13 +653,13 @@ class _BufferedExchange:
         """file_stream's reads and writes, done by the native host: `size` bytes
         of `path` from `offset` (None: to the end), framed as chunk_size writes.
         The file is opened first: a missing or unreadable one raises before the
-        response starts, as open() does in Sanic's file_stream."""
+        response starts, as open() does in the framework's file_stream."""
         stat = await _engine.file_open_stat(path)
         length = max(0, stat.st_size - offset)
         if size is not None:
             length = min(length, size)
         if not length:
-            return  # Sanic writes nothing for an empty read
+            return  # the framework's file_stream writes nothing for an empty read
         if self.streaming is None:
             await self._stream_start(b"")
         if self.response_bytes_left is not None:
@@ -681,7 +681,7 @@ class _BufferedExchange:
             response.body = b""
             self.complete()
             return True
-        # As Sanic sets it for a complete body, replacing any other value.
+        # As the framework sets it for a complete body, replacing any other value.
         response.headers["content-length"] = str(length)
         await self._stream_start(b"")
         self._count_sent(length, False)
@@ -771,7 +771,7 @@ class _BufferedExchange:
 
 
 class NativeApplication:
-    """One native request -> Sanic processing -> one owned complete response."""
+    """One native request -> framework processing -> one owned complete response."""
     def __init__(self, app, max_response_bytes):
         self.app = app
         self.max_response_bytes = max_response_bytes
@@ -782,7 +782,7 @@ class NativeApplication:
         self._request_class = request_class
         self._make_request = (Request._from_native if request_class is Request
                               else self._compat_request)
-        # Reuse the pinned Sanic TouchUp event matcher after signal finalization.
+        # Reuse the pinned TouchUp event matcher after signal finalization.
         # Bind per adapter: compiling one app must not modify another app's entry.
         handler = NativeApplication._dispatch_request
         if app.config.TOUCHUP and app.signal_router.finalized:
@@ -922,13 +922,13 @@ class NativeApplication:
         if _engine is not None and _engine.timed_out(exchange.native.request_id):
             exception = ServiceUnavailable("Response Timeout")
         elif _engine is not None and _engine.lost(exchange.native.request_id):
-            exception = RequestCancelled()  # the peer left: Sanic's connection_lost
+            exception = RequestCancelled()  # the peer left: the asyncio server's connection_lost
         elif asyncio.current_task().cancelling():
             raise error
         else:
             exception = error
         if exchange.result is not None or exchange.streaming is not None:
-            raise error  # a response is already out: Sanic can only end it
+            raise error  # a response is already out: the framework can only end it
         app = self.app
         try:
             request_middleware = not isinstance(exception, (ServiceUnavailable, RequestCancelled))
@@ -1029,7 +1029,7 @@ class NativeApplication:
                 request.stream = exchange
                 token = Request._current.set(request)
             try:
-                # ---- Sanic.handle_request ----
+                # ---- OldmanServer.handle_request ----
                 # An exception from the first two dispatches reaches __call__'s
                 # handle_exception(request, error) on the other path: the same call.
                 run_middleware = True
@@ -1090,7 +1090,7 @@ class NativeApplication:
                     response = None
                     middleware = extra.request_middleware
                     if middleware:
-                        # ---- Sanic._run_request_middleware ----
+                        # ---- OldmanServer._run_request_middleware ----
                         request._request_middleware_started = True
                         for item in middleware:
                             await app.dispatch("http.middleware.before", inline=True,
@@ -1168,7 +1168,7 @@ class NativeApplication:
                                           ) or app.response_middleware
                             if middleware and not request._response_middleware_started:
                                 request._response_middleware_started = True
-                                # ---- Sanic._run_response_middleware ----
+                                # ---- OldmanServer._run_response_middleware ----
                                 # `response` changes only if the whole runner returns,
                                 # as with the original assignment of its result.
                                 final = response
@@ -1292,10 +1292,10 @@ def cached_routes(app):
 
 def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=None, accept=None,
                   worker_sock=None, worker_unix=None):
-    """engine.Config that serves `app` with its Sanic settings.
+    """engine.Config that serves `app` with its settings.
 
     With listen_sock (a listening TCP or AF_UNIX socket the caller keeps open
-    while serving, as Sanic's server does), the host accepts on it instead of
+    while serving, as the asyncio server does), the host accepts on it instead of
     binding host:port; over AF_UNIX, requests report `unix` (or the socket's
     name) as the server address. accept: ServerConfig fields for a listen_sock
     that worker processes share (listen_shared, and the accept turns of
@@ -1303,7 +1303,7 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
     listening socket as well (NATIVE_WORKER_LISTEN), whose requests report
     `worker_unix` (or its name) as the server address over AF_UNIX.
 
-    REQUEST_MAX_SIZE, REQUEST_MAX_HEADER_SIZE (with Sanic's buffer limits),
+    REQUEST_MAX_SIZE, REQUEST_MAX_HEADER_SIZE (with the framework's buffer limits),
     RESPONSE_TIMEOUT (until the response starts; at most 24 h), REQUEST_TIMEOUT,
     KEEP_ALIVE and KEEP_ALIVE_TIMEOUT map to the native host.
     Native-only settings: NATIVE_SHARDS / NATIVE_SHARD_CPUS, NATIVE_MAX_REQUESTS
@@ -1314,7 +1314,7 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
     config = app.config
     shards = _shard_cpus(config)
     # Python checks the body size as the handler reads it (Http.read); the host
-    # reads no further than this after a response (as Sanic).
+    # reads no further than this after a response (as the asyncio server).
     max_body = int(min(float(config.REQUEST_MAX_SIZE), 1 << 62))
     memory = int(config.get("NATIVE_MAX_MEMORY") or
                  max(1 << 30, len(shards) * (2 * min(max_body, 128 << 20) + (1 << 20))))
@@ -1332,11 +1332,11 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
         **listener, **(accept or {}), application_dispatch_all=True,
         max_requests=int(config.get("NATIVE_MAX_REQUESTS") or 4096), max_bytes=memory,
         max_body_bytes=max_body,
-        # Sanic pauses reading at REQUEST_BUFFER_SIZE.
+        # The asyncio server pauses reading at REQUEST_BUFFER_SIZE.
         body_window_bytes=max(1, min(int(config.REQUEST_BUFFER_SIZE), 1 << 30)),
         max_response_bytes=int(config.get("NATIVE_MAX_RESPONSE_SIZE") or 128 * 1024 * 1024),
         decision_timeout_ms=_timeout_ms(config.RESPONSE_TIMEOUT) or 86_400_000,
-        # Sanic writes no Date header.
+        # The framework writes no Date header.
         generate_date_header=False, coalesce_notifications=True, probe_headers="none",
         # Http.set_header_max_size (Config._configure_header_size).
         max_header_bytes=max(1, min(int(config.REQUEST_MAX_HEADER_SIZE),
@@ -1346,7 +1346,7 @@ def native_config(app, host="127.0.0.1", port=8000, *, listen_sock=None, unix=No
         fixed_responses=tuple((path, *response) for path, response in app.fixed_responses.items()),
         response_cache=bool(cached_routes(app)),
         keep_alive_timeout_ms=_timeout_ms(config.KEEP_ALIVE_TIMEOUT),
-        # Sanic hands a response to its transport and closes an idle connection
+        # The asyncio server hands a response to its transport and closes an idle connection
         # after KEEP_ALIVE_TIMEOUT, waiting GRACEFUL_TCP_CLOSE_TIMEOUT for the
         # unsent rest: a peer that stops reading is cut off after about that.
         write_timeout_ms=_timeout_ms(float(config.KEEP_ALIVE_TIMEOUT)
@@ -1382,13 +1382,13 @@ def _tune_gc(app_config):
 
 
 async def open_engine(app, config, *, python_cpu=None):
-    """Start the native host for `app` after its Sanic startup and before
+    """Start the native host for `app` after its startup and before
     listeners: lifecycle events stay with the caller. Returns the Engine.
     With python_cpu, this thread runs there from before the server serves."""
     if config.server is None or not config.server.application_dispatch_all:
         raise ValueError("the native host requires application_dispatch_all")
     if not config.server.framework_errors:
-        # Sanic's error handler renders protocol errors.
+        # The framework's error handler renders protocol errors.
         config = replace(config, server=replace(config.server, framework_errors=True))
     global _engine
     if _engine is not None and not _engine.closed:
@@ -1447,7 +1447,7 @@ async def open_engine(app, config, *, python_cpu=None):
 
 
 class _NativeFiles:
-    """sanic.compat.native_files while an Engine serves: file stat and reads run
+    """oldman_server.compat.native_files while an Engine serves: file stat and reads run
     on its file threads instead of aiofiles' thread pool."""
     __slots__ = ("_engine",)
 
@@ -1545,7 +1545,7 @@ async def _cancel_tasks(app, owner):
 
 @asynccontextmanager
 async def serve(app, config):
-    """Own the native runtime and Sanic listeners, including failure cleanup."""
+    """Own the native runtime and the application's listeners, including failure cleanup."""
     if not isinstance(app, OldmanServer):
         raise TypeError("the native host serves an OldmanServer application")
     if app.state.is_started or app.state.native_loop is not None:

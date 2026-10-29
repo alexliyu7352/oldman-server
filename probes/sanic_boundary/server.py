@@ -1,4 +1,4 @@
-"""Fresh-process Sanic service for the cost probe."""
+"""Fresh-process oldman-server service for the cost probe."""
 import argparse
 import asyncio
 from contextlib import asynccontextmanager

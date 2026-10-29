@@ -98,7 +98,7 @@ def connections(address, pids):
         lines = subprocess.run(['ss', '-Htnp', 'state', 'established', f'( sport = :{address} )'],
                                capture_output=True, text=True, check=True).stdout.splitlines()
     else:
-        # Sanic binds a temporary name (the path, a dot and a token) and renames
+        # The framework binds a temporary name (the path, a dot and a token) and renames
         # it, so accepted sockets show that name.
         names = (f' {address} ', f' {address}.')
         lines = [line for line in subprocess.run(['ss', '-Hxp'], capture_output=True, text=True,

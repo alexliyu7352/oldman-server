@@ -32,7 +32,7 @@ async def _off_loop(func, *args):
     """func(*args), a blocking native lifecycle call, on its own daemon thread.
     Not the loop's default executor: a signal can interrupt its submit after
     the worker thread started but before the executor recorded it, and that
-    non-daemon thread then keeps the process from exiting (a Sanic worker
+    non-daemon thread then keeps the process from exiting (a worker process
     told to stop while it starts, say)."""
     loop = asyncio.get_running_loop()
     future = loop.create_future()
@@ -138,14 +138,14 @@ class Config:
 # persistent=True share one and start/stop only its network server:
 # (runtime, shard CPUs, backend, same-thread mode).
 _persistent = None
-# A process forked after the runtime started (Sanic's "fork" start method, say)
+# A process forked after the runtime started (the framework's "fork" start method, say)
 # has the runtime's memory but not its threads, and a process starts one
 # runtime only: such a child cannot serve natively.
 _started = False
 _forked_after_start = False
 
 # How long aclose waits for cancelled handlers. One that ignores its
-# cancellation is left running, as Sanic leaves it when it closes the loop.
+# cancellation is left running, as the asyncio server leaves it when it closes the loop.
 _CANCELLED_WAIT = 1.0
 
 
@@ -426,7 +426,7 @@ class Engine:
                                         if application_connections is not None else {})
         self._application_timeouts = set()
         # Requests whose peer left (FIN or RST) while they ran: cancelled,
-        # as Sanic's connection_lost cancels the handler.
+        # as the asyncio server's connection_lost cancels the handler.
         self._application_lost = set()
         self._application_bytes_headers = application_bytes_headers
         self._application_tasks = {}
@@ -952,7 +952,7 @@ class Engine:
             if route == "application_lost":
                 # The peer left; size is the connection's key. Its state is
                 # marked lost (False: created later, as lost) before the
-                # cancellation, as Sanic's connection_lost does.
+                # cancellation, as the asyncio server's connection_lost does.
                 connections = self.application_connections
                 state = connections.get(size)
                 if state:
@@ -960,7 +960,7 @@ class Engine:
                 elif size in connections:
                     connections[size] = False
                 if parent in self._application_tasks:
-                    # Cancelled after the handler's first step, as Sanic's
+                    # Cancelled after the handler's first step, as the asyncio server's
                     # connection_lost lands on a running handler: a request that
                     # arrived with the peer's FIN (both in one drain) is still
                     # started, and answered with RequestCancelled.
@@ -1202,7 +1202,7 @@ class Engine:
         return self._close_task is not None and self._close_task.done()
 
     async def drain_applications(self, timeout):
-        """A graceful stop, as Sanic's within GRACEFUL_SHUTDOWN_TIMEOUT: the
+        """A graceful stop, as the asyncio server's within GRACEFUL_SHUTDOWN_TIMEOUT: the
         server accepts no more connections and closes idle ones (the others
         after their response); requests keep being served for up to `timeout`
         seconds, until no request runs and no connection is open (a response

@@ -140,7 +140,7 @@ def test_a_worker_takes_its_own_address_by_number(monkeypatch):
 
 
 def test_the_main_process_listens_on_a_tcp_address():
-    # The workers all accept on this socket, as in Sanic. Listening from the
+    # The workers all accept on this socket, as on the asyncio server. Listening from the
     # start, it holds the address while no worker accepts (as they start, or
     # all restart): connections wait in its queue rather than being refused,
     # and another server cannot bind the address then.

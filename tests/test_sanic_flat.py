@@ -1,4 +1,4 @@
-"""The flat native path must match Sanic's generic handle_request path exactly."""
+"""The flat native path must match the generic handle_request path exactly."""
 import asyncio
 import logging
 

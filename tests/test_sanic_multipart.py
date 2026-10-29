@@ -1,7 +1,7 @@
-"""Native multipart parsing (native/multipart.hh) against Sanic's parser.
+"""Native multipart parsing (native/multipart.hh) against the Python parser.
 
-Whenever the native parser answers, the answer must equal Sanic's; when Sanic's
-parser raises or logs, the native one must decline (None) so Sanic's runs.
+Whenever the native parser answers, the answer must equal the Python one's; when the Python
+parser raises or logs, the native one must decline (None) so the Python one runs.
 """
 import asyncio
 import logging
@@ -19,7 +19,7 @@ from test_sanic_http1 import read_response
 
 
 def python_parse(body, boundary):
-    """Sanic's own parser: its result, or the exception it raises, and whether it logged."""
+    """The Python parser: its result, or the exception it raises, and whether it logged."""
     saved, form.native_multipart = form.native_multipart, None
     records = []
     handler = logging.Handler(logging.DEBUG)

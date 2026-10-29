@@ -1,9 +1,9 @@
 #pragma once
-// Sanic's parse_multipart_form (sanic/request/form.py) over raw bytes, for the
+// parse_multipart_form (oldman_server/request/form.py) over raw bytes, for the
 // forms whose result needs no Python codec or Unicode handling: ASCII part
 // headers, UTF-8 field values, names present, no RFC 2231 filename*. Anything
-// else, including the malformed input Sanic's parser raises on, is declined
-// and the caller runs Sanic's parser, so the result is the same either way.
+// else, including the malformed input the Python parser raises on, is declined
+// and the caller runs the Python parser, so the result is the same either way.
 #include <cstring>
 #include <optional>
 #include <string>
@@ -102,7 +102,7 @@ inline bool utf8_charset(std::string_view name) {
 }
 }  // namespace detail
 
-// The parts in body order, or nullopt when Sanic's parser must decide.
+// The parts in body order, or nullopt when the Python parser must decide.
 inline std::optional<std::vector<Part>> parse(std::string_view body, std::string_view boundary) {
     using namespace detail;
     if (boundary.empty()) return std::nullopt;  // bytes.split raises
@@ -125,7 +125,7 @@ inline std::optional<std::vector<Part>> parse(std::string_view body, std::string
         for (;;) {
             const auto line_end = line_index <= part.size() ? part.find("\r\n", line_index)
                                                             : std::string_view::npos;
-            if (line_end == std::string_view::npos) return std::nullopt;  // Sanic's odd slicing
+            if (line_end == std::string_view::npos) return std::nullopt;  // the Python parser's odd slicing
             const auto line = part.substr(line_index, line_end - line_index);
             line_index = line_end + 2;
             if (line.empty()) break;
@@ -147,7 +147,7 @@ inline std::optional<std::vector<Part>> parse(std::string_view body, std::string
                 charset = given ? *given : "utf-8";
             }
         }
-        if (!name || name->empty()) return std::nullopt;  // Sanic logs and skips the part
+        if (!name || name->empty()) return std::nullopt;  // the Python parser logs and skips the part
         if (!out.filename && !utf8_charset(charset)) return std::nullopt;
         // form_part[line_index:-4], with Python's slice clamping.
         const auto stop = part.size() >= 4 ? part.size() - 4 : 0;

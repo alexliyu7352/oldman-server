@@ -390,7 +390,7 @@ def test_hostless_routing_preserves_dynamic_types_and_method_errors(path, method
         if body is not None:
             assert result[1] == body
         assert source.reads["header_bytes"] == 0
-        # Sanic's error formatter may read Accept from public headers.
+        # The framework's error formatter may read Accept from public headers.
         if status == 200:
             assert source.reads["sanic_headers"] == 0
     uvloop.run(scenario())

@@ -1,4 +1,4 @@
-"""Sanic WebSocket routes on the native host (a tunnel after the 101)."""
+"""WebSocket routes on the native host (a tunnel after the 101)."""
 import asyncio
 
 from oldman_server import OldmanServer

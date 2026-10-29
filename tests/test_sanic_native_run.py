@@ -1,4 +1,4 @@
-"""Sanic's standard entry points serve through the native host (NATIVE_SERVER).
+"""The framework's standard entry points serve through the native host (NATIVE_SERVER).
 
 Each scenario runs in its own interpreter: a process starts one native runtime.
 """
@@ -157,7 +157,7 @@ def test_environment_switch_with_default_run():
     ''', env={"OLDMAN_SERVER_NATIVE_SERVER": "true", "OLDMAN_SERVER_NATIVE_SHARDS": "1"})
     assert json.loads(lines["NATIVE"]) == [True, True]
     # Main process listeners get the application and the main process's loop,
-    # a uvloop loop as in Sanic.serve.
+    # a uvloop loop as in OldmanServer.serve.
     assert json.loads(lines["MAINLOOPS"]) == [["OldmanServer", "uvloop.Loop"]]
     assert json.loads(lines["RESULTS"])[1] == ["200", "hi"]
     # The default run would use the worker manager; serving it from this process
@@ -175,7 +175,7 @@ def test_native_server_leaves_worker_processes_to_the_worker_manager():
         app.prepare(host="127.0.0.1", port=0, workers=2)
     ''')
     # One worker: served natively from this process; with worker processes
-    # Sanic's worker manager runs them, each serving natively (below).
+    # the framework's worker manager runs them, each serving natively (below).
     assert json.loads(lines["SINGLE"]) == [True, False, False]
     assert "asyncio server" not in result.stdout + result.stderr
 
@@ -284,7 +284,7 @@ WORKERS_APP = textwrap.dedent('''
         listener = os.fstat(host._engine.config.server.listen_fd).st_ino
         print("LISTENER " + json.dumps([os.environ["OLDMAN_SERVER_WORKER_NAME"], listener]), flush=True)
         open(f"ready-{os.getpid()}", "w").close()
-        # One worker drives, once its startup is complete. Named, Sanic keeps
+        # One worker drives, once its startup is complete. Named, the application keeps
         # the task: the loop holds tasks weakly, and an unreferenced one waiting
         # on its own server's sockets can be collected (closing them).
         if os.environ["OLDMAN_SERVER_WORKER_NAME"].startswith("Oldman-Server-0-"):
@@ -354,7 +354,7 @@ def check_worker_cpus(results, same_thread=False):
 
 @LAYOUTS
 def test_workers_serve_natively_on_their_own_cpus(short_dir, same_thread):
-    # The workers accept on the main process's socket, as in Sanic, and each
+    # The workers accept on the main process's socket, as on the asyncio server, and each
     # serves through its own native host, Python and shards on the CPU group
     # the main process planned for it.
     port = free_port()
@@ -716,7 +716,7 @@ UNIX_DRIVE = '''
 
 @pytest.fixture
 def short_dir():
-    # Sanic binds a temporary name 44 characters longer than the socket path;
+    # The framework binds a temporary name 44 characters longer than the socket path;
     # AF_UNIX paths are limited to 107 bytes.
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="om") as directory:
         yield Path(directory)
@@ -735,12 +735,12 @@ def test_unix_socket_served_natively(short_dir):
     mode, results = json.loads(lines["RESULTS"])
     assert mode == oct(0o666)
     wheres = results[0::2]
-    # Sanic's unix socket ConnInfo: the socket path, no client address.
+    # The framework's unix socket ConnInfo: the socket path, no client address.
     assert {tuple(where[:5]) for where in wheres} == {(str(path), "", 0, None, "")}
     assert {where[5] for where in wheres} == {0, 1}  # both shards serve
     assert results[1::2] == ["hi"] * 4
     exists, events = json.loads(lines["AFTER"])
-    assert not exists  # removed at exit, as Sanic does
+    assert not exists  # removed at exit, as on the asyncio server
     assert events[:3] == ["main_process_start", "main_process_ready", "before_server_start"]
     assert "does not serve" not in result.stdout + result.stderr
 
@@ -794,9 +794,9 @@ def test_a_second_server_on_the_loop_uses_the_asyncio_server():
 
 
 def test_tcp_run_serves_on_sanics_socket():
-    # The native host accepts on the socket Sanic bound (shard 0 hands
+    # The native host accepts on the socket the framework bound (shard 0 hands
     # connections to the others); it stays open while serving, so
-    # app.serve_location (read by sanic-ext's OpenAPI) works as with Sanic.
+    # app.serve_location (read by sanic-ext's OpenAPI) works as on the asyncio server.
     port = free_port()
     lines, _ = run(f'''
         app.config.NATIVE_SERVER = True
@@ -827,7 +827,7 @@ def test_tcp_run_serves_on_sanics_socket():
 
 
 def test_a_child_forked_after_the_native_host_started_uses_asyncio():
-    # Sanic's "fork" start method from a process where the native runtime already ran
+    # The framework's "fork" start method from a process where the native runtime already ran
     # (a test client's server, say): the child has the runtime's memory but
     # not its threads, so its servers use the asyncio server.
     lines, _ = run('''
@@ -982,7 +982,7 @@ def test_unknown_reactor_backend_is_refused():
 
 
 def test_failing_main_process_start_still_runs_main_process_stop():
-    # As Sanic.serve: main_process_start runs before the socket is bound, and
+    # As OldmanServer.serve: main_process_start runs before the socket is bound, and
     # main_process_stop runs even when it fails.
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, "app.sock")
@@ -1080,7 +1080,7 @@ def test_a_native_host_that_cannot_start_fails_the_run():
 
 
 def test_create_server_with_a_host_name():
-    # Without a socket, create_server() binds as Sanic does: a host name works.
+    # Without a socket, create_server() binds as the asyncio server does: a host name works.
     port = free_port()
     lines, _ = run(f'''
         app.config.NATIVE_SERVER = True
@@ -1106,7 +1106,7 @@ def test_create_server_with_a_host_name():
 
 def test_a_passed_socket_is_served_as_it_is():
     # Bound, not listening, with SO_REUSEPORT (as an application may prepare
-    # it): the host listens on this socket, as Sanic does.
+    # it): the host listens on this socket, as the asyncio server does.
     lines, _ = run('''
         import socket
         sock = socket.socket()
@@ -1168,7 +1168,7 @@ DRAIN_SERVER = textwrap.dedent('''
 
 
 def test_a_graceful_stop_stops_accepting_and_finishes_what_is_in_progress(tmp_path):
-    # As Sanic: on SIGTERM the server stops accepting and closes idle
+    # As on the asyncio server: on SIGTERM the server stops accepting and closes idle
     # connections, while requests in progress finish, a file stream and a
     # large response still being read by a slow client included. The native
     # host went on accepting and answered new requests with 503, failed

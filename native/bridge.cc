@@ -169,7 +169,7 @@ struct ApplicationRequest {
         return value ? py::object(py::bytes(*value)) : fallback;
     }
 
-    // validate_sanic_request() followed by the reads a native Sanic request
+    // validate_sanic_request() followed by the reads a native framework request
     // needs first, in one call: (target, http_version, method, body, more_body).
     py::tuple sanic_request() const {
         validate_sanic_request();
@@ -247,7 +247,7 @@ void request_dealloc(PyObject* self) {
 
 // ApplicationRequest(method, target, headers, body, *, http_version="",
 // client=None, server=None). Socket metadata is optional so tests and
-// in-process measurement can build complete Sanic requests without a
+// in-process measurement can build complete framework requests without a
 // listening runtime.
 PyObject* request_new(PyTypeObject*, PyObject* args, PyObject* kwargs) {
     static const char* names[] = {"method", "target", "headers", "body", "http_version", "client", "server",
@@ -1146,9 +1146,9 @@ PYBIND11_MODULE(_native, m) {
                 }
                 c.fixed_responses = std::move(fixed);
             });
-    // Sanic's parse_multipart_form for the forms native/multipart.hh accepts:
+    // The framework's parse_multipart_form for the forms native/multipart.hh accepts:
     // (fields, files) dicts of lists, file parts as file_type(type, body, name);
-    // None means Sanic's parser decides.
+    // None means the Python parser decides.
     m.def("parse_multipart", [](py::handle body, py::handle boundary, py::handle file_type) -> py::object {
         if (!PyBytes_CheckExact(body.ptr()) || !PyBytes_CheckExact(boundary.ptr())) return py::none();
         const auto parts = probe::multipart::parse(
@@ -1164,7 +1164,7 @@ PYBIND11_MODULE(_native, m) {
             } else {
                 auto* text = PyUnicode_DecodeUTF8(part.data.data(), static_cast<Py_ssize_t>(part.data.size()),
                                                   nullptr);
-                if (!text) {  // Sanic's decode raises
+                if (!text) {  // the Python parser's decode raises
                     PyErr_Clear();
                     return py::none();
                 }

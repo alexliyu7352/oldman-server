@@ -1,4 +1,4 @@
-"""Direct Sanic processing over real native sockets, isolated per test."""
+"""Direct framework processing over real native sockets, isolated per test."""
 import asyncio
 import contextvars
 import threading
@@ -97,7 +97,7 @@ def test_native_sanic_send_snapshot_waits_for_chain_and_preserves_terminal_prior
                 replies = await asyncio.gather(*jobs)
                 assert replies[0][0::2] == (201, b"frozen")
                 assert replies[0][1]["X-Value"] == "café"
-                # Sanic logs ordinary exceptions after send and keeps the first
+                # The framework logs ordinary exceptions after send and keeps the first
                 # response; cancellation/deadline still terminate via Engine.
                 assert replies[1][0::2] == (201, b"frozen")
                 assert [reply[0] for reply in replies[2:]] == [503, 504]
@@ -123,7 +123,7 @@ def test_native_sanic_final_responses_isolate_invalid_siblings():
             final = raw(f"final-{value}".encode(), status=201,
                         headers={"X-Value": str(value), "X-Latin": "café"})
             if value == 3:
-                # Rejected by the native validator, after Sanic finishes (a
+                # Rejected by the native validator, after the framework finishes (a
                 # control character; a Connection field is framed by the host).
                 final.headers["X-Bad"] = "a\x01b"
             retained.append(final)
@@ -319,7 +319,7 @@ def test_native_sanic_timeout_and_shutdown_cancel_real_tasks():
         cfg = config(application_dispatch_all=True, decision_timeout_ms=200)
         async with aiohttp.ClientSession() as client:
             async with serve(app, cfg) as engine:
-                # Sanic's RESPONSE_TIMEOUT: the handler is cancelled and the error
+                # RESPONSE_TIMEOUT: the handler is cancelled and the error
                 # handler answers 503 Response Timeout.
                 status, _, body = await exchange(client, cfg.server.http_port, "/wait/timeout")
                 assert status == 503 and b"Response Timeout" in body
@@ -377,15 +377,15 @@ def test_native_sanic_invalid_and_streaming_responses_do_not_escape_limits():
         async with serve(app, cfg) as engine:
             async with aiohttp.ClientSession() as client:
                 assert (await exchange(client, cfg.server.http_port, "/oversize"))[0] == 500
-                # As in Sanic, the server's Connection replaces the application's.
+                # As on the asyncio server, the server's Connection replaces the application's.
                 status, headers, body = await exchange(client, cfg.server.http_port, "/framing")
                 assert (status, headers["Connection"], body) == (200, "keep-alive", b"ok")
                 # Data after a complete response raises ServerError in the handler
-                # (Http.send is None); as in Sanic, the first response stands.
+                # (Http.send is None); as on the asyncio server, the first response stands.
                 assert (await exchange(client, cfg.server.http_port, "/double"))[0::2] == (200, b"first")
-                # Like Sanic, a complete response's Content-Length is its body size.
+                # As on the asyncio server, a complete response's Content-Length is its body size.
                 assert (await exchange(client, cfg.server.http_port, "/length"))[0::2] == (200, b"ok")
-                # Streamed responses are supported: Sanic's own final send ends the stream.
+                # Streamed responses are supported: the framework's own final send ends the stream.
                 assert (await exchange(client, cfg.server.http_port, "/stream"))[0::2] == (200, b"part")
                 # Repeated names are written as separate field lines (see test_sanic_http1).
                 assert (await exchange(client, cfg.server.http_port, "/duplicate"))[0::2] == (200, b"cookies")

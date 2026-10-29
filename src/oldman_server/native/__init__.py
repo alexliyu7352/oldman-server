@@ -54,7 +54,7 @@ def native_cache(seconds: float):
 def native_server(config) -> bool:
     """Whether the native host serves. NATIVE_SERVER unset (None, the default):
     on Linux when the extension is installed (without it, noted once). On
-    (True, or 1 as Sanic's environment loader may give it): on Linux, where
+    (True, or 1 as the framework's environment loader may give it): on Linux, where
     starting without the extension then fails; elsewhere noted once. Off: no.
     Elsewhere the asyncio server serves. Plain Python, so the worker manager
     can ask without loading the extension."""

@@ -1,4 +1,4 @@
-"""Three unmodified Sanic HTTP workers or one Sanic native service."""
+"""Three unmodified Sanic HTTP workers or one oldman-server native service."""
 import argparse
 import cProfile
 from dataclasses import asdict
@@ -197,7 +197,7 @@ def main():
                 accept = None
                 if args.workers > 1:
                     # The parent's listening socket, on which the worker
-                    # processes take turns accepting, as Sanic's workers do
+                    # processes take turns accepting, as the framework's workers do
                     # with NATIVE_SERVER (oldman_server.native.accept).
                     import ctypes
                     from oldman_server.native.accept import SLOTS
@@ -267,10 +267,10 @@ def main():
     args.requests, args.bytes = 1024, 64*1024*1024
     cpus = sorted(os.sched_getaffinity(0))
     # Stock: one worker per CPU. Candidate: `workers` processes, each a Python
-    # CPU and its shard CPUs, or one CPU each (the layouts Sanic's NATIVE_SERVER
+    # CPU and its shard CPUs, or one CPU each (the layouts the framework's NATIVE_SERVER
     # workers get).
     size = len(cpus) // args.workers
-    # A candidate worker of one CPU runs same-thread (as Sanic's workers would on these CPUs).
+    # A candidate worker of one CPU runs same-thread (as the framework's workers would on these CPUs).
     if (len(cpus) not in (3, 4) or (args.workers > 1 and args.mode != 'candidate')
             or args.workers < 1 or size * args.workers != len(cpus)):
         raise ValueError('three or four service CPUs, split evenly between candidate workers')

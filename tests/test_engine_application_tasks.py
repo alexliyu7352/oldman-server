@@ -155,7 +155,7 @@ def test_requests_in_handlers_at_close_get_no_answer():
 def test_a_handler_that_ignores_its_cancellation_does_not_hold_up_close():
     # aclose waited for every cancelled handler: one that catches its
     # CancelledError and carries on kept the server from ever stopping. It is
-    # left running, as Sanic leaves it, and its late answer is dropped.
+    # left running, as the asyncio server leaves it, and its late answer is dropped.
     async def stubborn(req):
         try:
             await asyncio.sleep(30)

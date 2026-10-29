@@ -1,4 +1,4 @@
-"""Bounded Sanic entry cost study. Every service lifecycle gets a new process."""
+"""Bounded oldman-server entry cost study. Every service lifecycle gets a new process."""
 import argparse
 import hashlib
 import json

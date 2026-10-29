@@ -3,7 +3,7 @@ CPU and its native shards on others, or, in the same-thread mode, its one
 shard on the Python thread (one CPU per process, no shard thread).
 
 One process takes NATIVE_SHARD_CPUS, or the last NATIVE_SHARDS CPUs of its
-affinity, for the shards. With Sanic's worker processes the main process
+affinity, for the shards. With the framework's worker processes the main process
 splits its CPUs into one group per worker (NATIVE_WORKER_CPUS: Python CPU
 first, then the shard CPUs; one CPU in the same-thread mode) and passes the
 groups to the workers.

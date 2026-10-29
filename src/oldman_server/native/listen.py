@@ -21,7 +21,7 @@ from string import Formatter
 
 from oldman_server.native.cpus import worker_number
 
-# sockaddr_un holds 107 path bytes; Sanic binds the path with a suffix of 44
+# sockaddr_un holds 107 path bytes; the framework binds the path with a suffix of 44
 # (".", then a temporary name) before renaming it into place.
 _UNIX_PATH_MAX = 107 - 44
 

@@ -19,7 +19,7 @@ def test_send_keeps_encoded_bytes_and_freezes_response():
         assert (status, body) == (201, b"before")
         assert dict(headers) == {b"X-Value": b"caf\xc3\xa9\xff", b"content-type": b"text/plain"}
         assert all(type(name) is type(value) is bytes for name, value in headers)
-        # Sanic's second finalization: the exchange no longer sends (Http.send
+        # The framework's second finalization: the exchange no longer sends (Http.send
         # is None), so BaseHTTPResponse.send ignores it.
         assert exchange.send is None
         await response.send(end_stream=True)

@@ -57,7 +57,7 @@ struct ServerConfig {
     // 0 disable the deadline; the defaults keep the earlier probe behavior.
     std::string http_host = "127.0.0.1";
     // Instead of binding http_host:http_port: a listening socket (TCP or
-    // AF_UNIX) that Python bound and keeps open, as Sanic does for its
+    // AF_UNIX) that Python bound and keeps open, as the framework does for its
     // server. Shard 0 accepts on a duplicate and hands each connection to the
     // shard with the fewest. Requests over an AF_UNIX one report unix_path as
     // the server address.
@@ -78,7 +78,7 @@ struct ServerConfig {
     std::string worker_unix_path;
     size_t max_header_bytes = 8192;
     // A request body still arriving while its handler runs: at most this many
-    // bytes go to Python ahead of what the handler has read (Sanic pauses
+    // bytes go to Python ahead of what the handler has read (the asyncio server pauses
     // reading at REQUEST_BUFFER_SIZE).
     size_t body_window_bytes = 65536;
     bool keep_alive = true;
@@ -88,7 +88,7 @@ struct ServerConfig {
     // reading holds the connection and the response's memory only that long.
     unsigned write_timeout_ms = 0;
     // Protocol errors go to Python as error requests and body error events (the
-    // framework renders them, as Sanic's error handler does); otherwise the host
+    // framework renders them, as on the asyncio server); otherwise the host
     // answers them with a plain error response.
     bool framework_errors = false;
     // The framework owns all HTTP routing; required with any listener.
@@ -163,7 +163,7 @@ struct RequestEvent {
 // (start with status/headers/first data, then data, end or abort).
 // A stream_start with status 101 switches the connection to a tunnel (WebSocket):
 // raw bytes both ways; tunnel_pause/resume stop and restart reading the peer.
-// stream_file writes part of a file into an open stream (Sanic's file_stream):
+// stream_file writes part of a file into an open stream (the framework's file_stream):
 // body "<offset> <length> <chunk size> <path>"; the shard reads it and reports
 // application_file when done.
 // cached: a complete response the shard may keep for its cache_ms (response_cache).
