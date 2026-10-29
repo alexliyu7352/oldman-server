@@ -222,7 +222,7 @@ oxapy 没有用满服务端的 4 个 CPU（3.1–3.8 核），所以每请求 CP
 ### 名次
 
 - 不经框架的函数：服务端满载（2 个 CPU）时本项目排第一，9.05 µs，weft-wsgi 10.05、fastpysgi 10.13，少约 10%（`16fd826` 时为 10.06 对 10.02，并列）。省下的约 1 µs 来自同线程模式下 shard 直接完成裸函数的调用与记账，以及连接循环先用一次 send 写出响应。4 个 CPU 时三者都受 wrk 所限（RPS 约 31–32 万），本项目的每请求 CPU 仍最低。
-- 框架：服务端满载（2 个 CPU）时本项目排第一，13.7 µs，wred 14.3、oxapy 15.8。对 wred 领先约 4%，主要在 `GET /user/0`（13.9 对 15.0 µs），`GET /` 与 `POST /user` 少约 0.3 µs。4 个 CPU 时按每请求 CPU 与 oxapy 并列第一（14.54 对 14.51 µs，oxapy 没有用满 4 个 CPU），wred 15.14，两种连接数的 RPS 本项目都最高。oxapy 的路由与请求处理在 Rust 里，Python 端只有同步的 handler；wred 是约 120 行的 ASGI 微框架（跑在 weft 上），按路径查字典找到 handler，handler 直接返回（正文, 响应头, 状态），没有中间件、信号、异常处理与请求生命周期；weft 自己驱动 ASGI 的协程，不为每个请求建 asyncio Task。本项目保留了 Sanic 的这些功能和每请求一个 Task（contextvars、取消、超时都靠它），满载时每请求 CPU 是原版 Sanic（29.4 µs）的 0.47 倍。
+- 框架：服务端满载（2 个 CPU）时本项目排第一，13.7 µs，wred 14.3、oxapy 15.8。对 wred 领先约 4%，主要在 `GET /user/0`（13.9 对 15.0 µs），`GET /` 与 `POST /user` 少约 0.3 µs。4 个 CPU 时按每请求 CPU 与 oxapy 并列第一（14.54 对 14.51 µs，oxapy 没有用满 4 个 CPU），wred 15.14，两种连接数的 RPS 本项目都最高。oxapy 的路由与请求处理在 Rust 里，Python 端只有同步的 handler；wred 是约 120 行的 ASGI 微框架（跑在 weft 上），按路径查字典找到 handler，handler 直接返回（正文, 响应头, 状态），没有中间件、信号、异常处理与请求生命周期；weft 自己驱动 ASGI 的协程，不为每个请求建 asyncio Task。本项目保留了这些框架功能和每请求一个 Task（contextvars、取消、超时都靠它），满载时每请求 CPU 是原版 Sanic（29.4 µs）的 0.47 倍。
 - `6fcf554` 时用 perf 看本项目的框架路由（2 个 CPU 满载）：内核的网络收发约占 39%，Python 约 35%（分散在框架的快速路径、每请求 Task 的建立与调度、请求与响应对象上，没有单个热点），原生主机约 14%，libc 约 6%。内核那部分每请求约 6 µs，对各家都差不多。
 
 ## 挂上 oldman 的五个扩展

@@ -2,7 +2,7 @@
 
 English | [简体中文](https://github.com/alexliyu7352/oldman-server/blob/main/README.zh-CN.md)
 
-`oldman-server` (import name `oldman_server`) is a Python web framework with a native C++ HTTP/1.1 host built on Asio. It is made mainly for [oldman](https://github.com/alexliyu7352/oldman) and also works on its own. The framework layer is a fork of Sanic 25.12.1 (MIT), and its interface largely follows Sanic.
+`oldman-server` (import name `oldman_server`) is a Python web framework with a native C++ HTTP/1.1 host built on Asio. It is made mainly for [oldman](https://github.com/alexliyu7352/oldman) and also works on its own. The framework layer is forked from Sanic 25.12.1 (MIT).
 
 On Linux the native host serves by default: native shards do the network I/O, HTTP parsing and writing, while routing, middleware, exception handling, the lifecycle and your code still run in Python, each request in its own Task as before. In a single process the shards are separate threads, and the Python side is one process with one regular GIL interpreter and one uvloop event loop. With several workers, each worker gets one CPU by default and runs its shard on its Python thread (same-thread mode).
 
@@ -49,16 +49,16 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)   # fast=True runs one worker per CPU
 ```
 
-Routing, middleware, blueprints and signals work as in Sanic; see the [Sanic documentation](https://sanic.dev/). The names differ: the application class is `OldmanServer`, the environment prefix for settings is `OLDMAN_SERVER_`, and the loggers are `oldman_server.*`. The other differences are listed in [Differences from Sanic](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/differences.md).
+The usage guide (routing, middleware, blueprints, signals, WebSocket, testing) is the oldman-server section of the [oldman documentation](https://alexliyu7352.github.io/oldman/), published with oldman's next release. The application class is `OldmanServer`, the environment prefix for settings is `OLDMAN_SERVER_`, and the loggers are `oldman_server.*`. Coming from Sanic, see [Differences from Sanic](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/differences.md).
 
-This package is only the server and the core framework on the request path. CORS is built in and applied by the server itself, configured at startup ([Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md#cors)), and HEAD and OPTIONS are answered by the routing layer for every route ([Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md#automatic-head-and-options)). The worker manager restarts a worker whose event loop stops answering ([Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md#worker-health)). Templates, OpenAPI and dependency injection (which Sanic gets from sanic-ext) are not included; a framework on top, such as oldman, or the application provides them.
+This package is only the server and the core framework on the request path. CORS is built in and applied by the server itself, configured at startup ([Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md#cors)), and HEAD and OPTIONS are answered by the routing layer for every route ([Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md#automatic-head-and-options)). The worker manager restarts a worker whose event loop stops answering ([Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md#worker-health)). Templates, OpenAPI and dependency injection are not included; a framework on top, such as oldman, or the application provides them.
 
 ## Documentation
 
 | Page | Contents |
 |---|---|
 | [Installation](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/installation.md) | Native wheels and the compatibility build, choosing the server, building from source |
-| [Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md) | How Sanic's settings apply under the native host, native host settings, memory allocators |
+| [Configuration](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/configuration.md) | How the settings apply under the native host, native host settings, memory allocators |
 | [Native host](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/native-host.md) | File responses, listening sockets, multiple workers, the fast path, fixed responses and the native micro-cache |
 | [Deployment](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/deployment.md) | Behind nginx |
 | [Differences from Sanic](https://github.com/alexliyu7352/oldman-server/blob/main/docs/en/differences.md) | Interface differences, removed features, behavior fixes, differences under the native host |

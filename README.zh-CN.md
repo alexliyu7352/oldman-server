@@ -2,7 +2,7 @@
 
 [English](https://github.com/alexliyu7352/oldman-server/blob/main/README.md) | 简体中文
 
-`oldman-server`（import 名 `oldman_server`）是带 C++ 原生 HTTP/1.1 主机（基于 Asio）的 Python Web 框架，主要配合 [oldman](https://github.com/alexliyu7352/oldman) 使用，也可单独使用。框架层源自 Sanic 25.12.1 的 fork（MIT），接口大体沿用 Sanic。
+`oldman-server`（import 名 `oldman_server`）是带 C++ 原生 HTTP/1.1 主机（基于 Asio）的 Python Web 框架，主要配合 [oldman](https://github.com/alexliyu7352/oldman) 使用，也可单独使用。框架层从 Sanic 25.12.1 分叉而来（MIT）。
 
 在 Linux 上默认由原生主机服务：网络 IO、HTTP 解析与写出由原生 shard 承担，路由、中间件、异常处理、生命周期和业务代码仍在 Python 中执行，每个请求照旧在自己的 Task 里运行。单进程时 shard 是另外的线程，Python 端只有一个进程、一个普通 GIL 解释器和一个 uvloop 事件循环；多 worker 时默认每个 worker 一个 CPU，shard 就在它的 Python 线程上运行（同线程模式）。
 
@@ -49,16 +49,16 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)   # 加 fast=True 则每个 CPU 一个 worker
 ```
 
-路由、中间件、蓝图、信号等用法与 Sanic 相同，见 [Sanic 的文档](https://sanic.dev/)。名称不同：应用类是 `OldmanServer`，配置环境变量前缀是 `OLDMAN_SERVER_`，日志名是 `oldman_server.*`；其他差异见[与 Sanic 的差异](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/differences.md)。
+使用指南（路由、中间件、蓝图、信号、WebSocket、测试）是 [oldman 文档](https://alexliyu7352.github.io/oldman/)中的 oldman-server 一节，随 oldman 的下一个版本发布。应用类是 `OldmanServer`，配置环境变量前缀是 `OLDMAN_SERVER_`，日志名是 `oldman_server.*`。从 Sanic 迁移见[与 Sanic 的差异](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/differences.md)。
 
-本包只是服务器与请求路径上的核心框架。CORS 内置，在启动时配置、由服务器自己附加（见[配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md#cors)）；HEAD 与 OPTIONS 由路由层为每个路由回答（见[配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md#自动-head-与-options)）；worker manager 重启事件循环不再应答的 worker（见[配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md#worker-存活监视)）；模板、OpenAPI、依赖注入这类配套（Sanic 由 sanic-ext 提供）不在包里，由上层框架（如 oldman）或应用自己提供。
+本包只是服务器与请求路径上的核心框架。CORS 内置，在启动时配置、由服务器自己附加（见[配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md#cors)）；HEAD 与 OPTIONS 由路由层为每个路由回答（见[配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md#自动-head-与-options)）；worker manager 重启事件循环不再应答的 worker（见[配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md#worker-存活监视)）；模板、OpenAPI、依赖注入这类配套不在包里，由上层框架（如 oldman）或应用自己提供。
 
 ## 文档
 
 | 页面 | 内容 |
 |---|---|
 | [安装](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/installation.md) | 原生 wheel 与兼容版、选择服务器、从源码构建 |
-| [配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md) | Sanic 的设置在原生主机上的行为、原生主机的设置、内存分配器 |
+| [配置](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/configuration.md) | 各项设置在原生主机上的行为、原生主机的设置、内存分配器 |
 | [原生主机](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/native-host.md) | 文件响应、监听 socket、多 worker、快速路径、固定响应与原生微缓存 |
 | [部署](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/deployment.md) | 放在 nginx 之后 |
 | [与 Sanic 的差异](https://github.com/alexliyu7352/oldman-server/blob/main/docs/zh/differences.md) | 接口的差异、已移除的功能、行为修正、经原生主机时的差异 |

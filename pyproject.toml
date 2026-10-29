@@ -96,7 +96,7 @@ constraint-dependencies = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 addopts = "--strict-markers"
-# Async tests and fixtures need no marker, as the suites from Sanic and Sanic Extensions expect.
+# Async tests and fixtures need no marker, as the suites that came from Sanic expect.
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # A test that never stops its server must not stall the run.

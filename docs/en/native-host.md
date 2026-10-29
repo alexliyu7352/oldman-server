@@ -10,19 +10,19 @@ The native host serves plain HTTP/1.1 inside the current process, listening on T
 
 The stat and reads of `file()`, `file_stream()` and `app.static()` are done by the native host's file thread (on the shard's CPU; reading the disk does not block the shard), no longer through the aiofiles thread pool.
 
-- The contents of `file_stream()`, and of `file()` for files of 128 KiB or more, are read by the file thread and written by the shard straight to the connection, without Python (for the resulting differences of `file()`, see [Differences from Sanic](differences.md#under-the-native-host)). `file_stream()` chunks as stock Sanic does (for the fix with Range, see [Behavior fixes](differences.md#behavior-fixes)).
+- The contents of `file_stream()`, and of `file()` for files of 128 KiB or more, are read by the file thread and written by the shard straight to the connection, without Python (for the resulting differences of `file()`, see [Differences from Sanic](differences.md#under-the-native-host)). `file_stream()` writes the same `chunk_size` chunks as on the asyncio server (for the fix with Range, see [Behavior fixes](differences.md#behavior-fixes)).
 - Smaller files are read into the response by `file()`, which is cheaper.
-- Response headers, 304/206 and error types match stock Sanic.
+- Response headers, 304/206 and error types are the same as on the asyncio server.
 
 ## Multipart forms
 
-`request.form` / `request.files` are parsed in C++ (`native/multipart.hh`), with the same results as Sanic's `parse_multipart_form`; forms that need Python decoding or Unicode handling (non-ASCII part headers, non-UTF-8 fields, `filename*`, parts without a name, malformed input) are still handled by Sanic's parser.
+`request.form` / `request.files` are parsed in C++ (`native/multipart.hh`), with the same results as the Python parser (`parse_multipart_form` in `oldman_server.request.form`); forms that need Python decoding or Unicode handling (non-ASCII part headers, non-UTF-8 fields, `filename*`, parts without a name, malformed input) are still handled by the Python parser.
 
 ## Listening sockets
 
-Sanic binds the listening socket as it always has (a unix socket gets a temporary name and permissions 0o666 by default (`UNIX_SOCKET_MODE`), is renamed into place, and is removed on exit), and the native host accepts connections on that socket (shard 0 accepts and hands them out to the shards). The socket stays open while serving and closes with the server, so a passed-in `sock` (TCP or AF_UNIX) and `app.serve_location` behave as in stock Sanic.
+The listening socket is bound in Python, as on the asyncio server (a unix socket gets a temporary name and permissions 0o666 by default (`UNIX_SOCKET_MODE`), is renamed into place, and is removed on exit), and the native host accepts connections on that socket (shard 0 accepts and hands them out to the shards). The socket stays open while serving and closes with the server, so a passed-in `sock` (TCP or AF_UNIX) and `app.serve_location` behave as on the asyncio server.
 
-With multiple workers, as with stock Sanic's TCP, the main process binds and listens once, and every worker accepts on that one socket (unix sockets too; the main process removes it on exit). The main process listens from startup until exit:
+With multiple workers, the main process binds and listens once, and every worker accepts on that one socket (unix sockets too; the main process removes it on exit). The main process listens from startup until exit:
 
 - While no worker is accepting yet (at startup, or when all workers restart together), new connections wait in the queue instead of being refused, and no other program can bind the address in the meantime.
 - One worker stopping (restart, scale-down) does not close the socket that the other workers still use; connections already in the queue are taken by the other workers.
@@ -36,7 +36,7 @@ A front proxy (such as nginx) terminates TLS; this package provides neither TLS 
 
 ## Multiple workers
 
-Runs that start worker processes (`workers > 1`, `fast`, `auto_reload`, `dev`) are managed by Sanic's worker manager as in stock Sanic (restarts, scaling and `app.m` are all the same), and each worker process runs its own native host:
+Runs that start worker processes (`workers > 1`, `fast`, `auto_reload`, `dev`) are managed by the worker manager as on the asyncio server (restarts, scaling and `app.m` are all the same), and each worker process runs its own native host:
 
 - The main process splits the CPUs into one group per worker; the worker's Python thread is pinned to the group's first CPU and the shards use the rest (groups are taken by worker number; for the numbering see [`NATIVE_WORKER_LISTEN`](configuration.md#native-host-settings)).
 - When there are not enough CPUs to give each worker one more for a shard (`fast=True` with one worker per CPU, or `workers` more than half the CPU count), each worker takes only one CPU and its shard runs on its Python thread (same-thread mode, `NATIVE_SAME_THREAD`): twice as many processes run Python on the same cores, and the hand-off between threads is saved. On 4 cores, the same empty-text route serves about 215k RPS against 167k for 2 workers × (1 + 1); with the handler spending 25 µs of CPU itself, 90k against 62k (stock Sanic with 4 workers: 129k and 70k).
@@ -48,7 +48,7 @@ There is one native server per process: a second server on the same event loop i
 
 ## Fast path
 
-For an ordinary application, the native host builds the request object in one step and native code finishes the request and does its accounting, which saves a few microseconds per request over the full path (the same as Sanic's `handle_request`). The following fall back to the full path, with the same behavior, and an INFO record in `oldman_server.server` at startup says why:
+For an ordinary application, the native host builds the request object in one step and native code finishes the request and does its accounting, which saves a few microseconds per request over the full path (`OldmanServer.handle_request`). The following fall back to the full path, with the same behavior, and an INFO record in `oldman_server.server` at startup says why:
 
 - debug mode (TOUCHUP off);
 - a replaced `request_class` or router;
@@ -57,7 +57,7 @@ For an ordinary application, the native host builds the request object in one st
 
 ## Protocol errors
 
-Protocol errors (such as a malformed request line, oversized headers, bad chunked encoding, an oversized body) report the same status codes and messages as stock Sanic and go to the application's error handler.
+Protocol errors (such as a malformed request line, oversized headers, bad chunked encoding, an oversized body) report the same status codes and messages as the asyncio server and go to the application's error handler.
 
 ## Answers without Python
 

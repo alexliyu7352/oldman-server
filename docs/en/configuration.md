@@ -2,20 +2,20 @@ English | [简体中文](../zh/configuration.md)
 
 # Configuration
 
-Settings are given the Sanic way: `app.config.X = ...`, or the environment variable `OLDMAN_SERVER_X`.
+Settings are given as `app.config.X = ...`, or as the environment variable `OLDMAN_SERVER_X`.
 
-## Sanic settings
+## Framework settings
 
-Sanic's settings apply as usual; the native host carries them out as follows:
+The framework's settings apply on both servers; the native host carries them out as follows:
 
 | Setting | Native host behavior |
 |---|---|
-| `REQUEST_MAX_SIZE`, `REQUEST_MAX_HEADER_SIZE`, `REQUEST_BUFFER_SIZE` | The request body and header limits, computed as in Sanic (the body limit is checked when the handler reads the body; a `stream=True` handler is not bound by it). A body still arriving is flow-controlled by `REQUEST_BUFFER_SIZE`: the part handed to Python but not yet read by the handler never exceeds it, so a handler that reads slowly makes the connection receive slowly |
-| `REQUEST_TIMEOUT`, `KEEP_ALIVE`, `KEEP_ALIVE_TIMEOUT` | Enforced by the native layer and timed by Sanic's phases: `KEEP_ALIVE_TIMEOUT` between two requests, `REQUEST_TIMEOUT` while the request header arrives (on expiry the error handler answers 408), `RESPONSE_TIMEOUT` while the handler runs (including while the body is still arriving). As in stock Sanic, values under 0.1 s (including 0) count as 0.1 s, and infinity means no limit; values over 24 h count as 24 h (the write deadline too) |
-| `RESPONSE_TIMEOUT` | On expiry the handler is cancelled and the error handler answers 503 "Response Timeout"; while the body is still arriving, the timer restarts whenever data is received (as in stock Sanic). It runs until the response starts: a streaming response is not timed once it has started (both servers). Values over 24 h count as 24 h |
+| `REQUEST_MAX_SIZE`, `REQUEST_MAX_HEADER_SIZE`, `REQUEST_BUFFER_SIZE` | The request body and header limits, computed as on the asyncio server (the body limit is checked when the handler reads the body; a `stream=True` handler is not bound by it). A body still arriving is flow-controlled by `REQUEST_BUFFER_SIZE`: the part handed to Python but not yet read by the handler never exceeds it, so a handler that reads slowly makes the connection receive slowly |
+| `REQUEST_TIMEOUT`, `KEEP_ALIVE`, `KEEP_ALIVE_TIMEOUT` | Enforced by the native layer and timed by phase: `KEEP_ALIVE_TIMEOUT` between two requests, `REQUEST_TIMEOUT` while the request header arrives (on expiry the error handler answers 408), `RESPONSE_TIMEOUT` while the handler runs (including while the body is still arriving). As on the asyncio server, values under 0.1 s (including 0) count as 0.1 s, and infinity means no limit; values over 24 h count as 24 h (the write deadline too) |
+| `RESPONSE_TIMEOUT` | On expiry the handler is cancelled and the error handler answers 503 "Response Timeout"; while the body is still arriving, the timer restarts whenever data is received (as on the asyncio server). It runs until the response starts: a streaming response is not timed once it has started (both servers). Values over 24 h count as 24 h |
 | `GRACEFUL_SHUTDOWN_TIMEOUT` | On stop, the server stops accepting connections and closes idle ones, waits this long for in-flight requests to finish and their responses to be written, then cancels and cuts off the rest (see [Differences from Sanic](differences.md#under-the-native-host)) |
 | `KEEP_ALIVE_TIMEOUT` + `GRACEFUL_TCP_CLOSE_TIMEOUT` | The write deadline: a client that does not take the response for this long (per write; large responses per 1 MiB) is disconnected, and the handler is cancelled as when the client leaves; the same on the asyncio server |
-| `ACCESS_LOG`, `WEBSOCKET_*`, error handlers, `FALLBACK_ERROR_FORMAT` | As in stock Sanic |
+| `ACCESS_LOG`, `WEBSOCKET_*`, error handlers, `FALLBACK_ERROR_FORMAT` | As on the asyncio server |
 
 ## Native host settings
 

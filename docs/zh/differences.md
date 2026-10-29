@@ -2,7 +2,7 @@
 
 # 与 Sanic 的差异
 
-框架层源自 Sanic 25.12.1，接口大体沿用 Sanic，路由、中间件、蓝图、信号等用法见 [Sanic 的文档](https://sanic.dev/)。本包不再追求与 Sanic 的公开接口一致，下面列出刻意的差异，oldman 等按 Sanic 写的代码据此调整；每处改动在同一个 commit 里改测试。
+oldman-server 的框架层源自 Sanic 25.12.1（MIT），接口大体沿用 Sanic，但不再追求与 Sanic 的公开接口一致。下面列出刻意的差异，oldman 等按 Sanic 写的代码据此调整；每处改动在同一个 commit 里改测试。
 
 ## 接口
 
@@ -13,7 +13,7 @@
 - 测试客户端随包提供为 `oldman_server.testing`（源自 sanic-testing 24.6.0），`app.test_client` 需要 httpx；不再需要 sanic-testing。与 sanic-testing 不同：不指定端口时每次调用绑定一个由系统分配的新端口（sanic-testing 固定第一次的端口，服务器先关闭连接之后下一次调用报 “Address already in use”）；一次调用不改变应用的持久状态（`debug=True` 打开的访问日志等设置调用后恢复，不再在应用上登记自己的 405 处理函数，PUT、PATCH、DELETE 的 405 与生产环境一样有错误页）；httpx 的 `follow_redirects=False` 照样生效（`allow_redirects` 是它的别名）；`ReusableClient` 的方法与参数和 `app.test_client` 相同，端口由系统分配；`websocket()` 用 websockets 的 asyncio 客户端，额外的请求头写 `additional_headers=`（原来的 `extra_headers=`），依赖下限因此是 websockets 13.0；返回的 `(request, response)` 里 `response` 永远不是 None，拿不到响应（服务器起不来、连接失败）时抛出异常说明原因，`allow_none=` 参数已去掉（`request` 在 `gather_request=False` 或服务器没收到请求时为 None）。
 - 新增 `response.abort()`：对 `request.respond()` 得到的流式响应，在已发出的数据之后关闭连接、不完成响应（没有结束块，或少于 Content-Length），请求方因此知道内容不完整；之后再 `send()` 会抛出，handler 在下一次 await 被取消（与请求方断开时相同）。还没发出任何数据时抛 `ServerError`（这时应抛异常或返回错误响应），响应已结束时什么都不做。asyncio 服务器与原生主机行为相同；oldman 代理里的 `request.transport.get_protocol().close()`（在原生主机上不起作用）可以换成它。
 - 新增 `@app.rewrite_path`：注册的函数在路由与所有中间件之前对每个请求执行，返回新路径（以 `/` 开头）或 None；按注册顺序依次执行。之后请求的 `path` 和路由都用新路径，查询串保留，`raw_url` 仍是请求方发来的。抛出的异常交给错误处理器。oldman 的 `I18nRequest`（重写私有的 `_parsed_url`）可以换成它：自定义请求类会让原生主机走一般路径，用这个钩子则保留快速路径。
-- 新增设置 `UNIX_SOCKET_MODE`：服务器绑定的 unix socket（`unix=`、`NATIVE_WORKER_LISTEN`）的权限位，默认 0o666（与 Sanic 相同）；可写 `0o660` 或八进制字符串（环境变量写 `OLDMAN_SERVER_UNIX_SOCKET_MODE=0o660`）。不是 0–0o777 的值在绑定时报 `ValueError`。
+- 新增设置 `UNIX_SOCKET_MODE`：服务器绑定的 unix socket（`unix=`、`NATIVE_WORKER_LISTEN`）的权限位，默认 0o666（与原版 Sanic 相同）；可写 `0o660` 或八进制字符串（环境变量写 `OLDMAN_SERVER_UNIX_SOCKET_MODE=0o660`）。不是 0–0o777 的值在绑定时报 `ValueError`。
 - 新增设置 `TRUSTED_PROXIES`：地址或网段（列表，或逗号分隔的字符串，如 `"127.0.0.1, 10.0.0.0/8"`），`"unix"` 表示 unix socket 连接（能连上 socket 的进程都被信任，权限见 `UNIX_SOCKET_MODE`）。设置后，只有来自这些来源的连接，其 `Forwarded` / `X-Forwarded-*` 等转发头才按 `FORWARDED_SECRET`、`REAL_IP_HEADER`、`PROXIES_COUNT` 生效；其他连接的 `remote_addr` 为空，`client_ip`、`scheme`、`host` 取实际连接。双栈监听收到的 IPv4 映射地址（`::ffff:a.b.c.d`）按 IPv4 网段比较。格式错误在服务器启动时报 `ValueError`。不设置时与原版相同：转发头对所有连接都按上述设置生效。
 - 新增 `HTTPMethodView.before_dispatch(request, *args, **kwargs)`：覆写后在方法 handler 之前以同样的参数执行（可为同步或协程），返回响应则直接用它回应，返回 None 才进入 handler；抛出的异常交给错误处理器。不覆写时没有额外开销。oldman 的 `HTTPMethodView` 不必再复制整个 `dispatch_request`，把登录与权限检查放进这里即可。
 - 新增 `TooManyRequests`（429，`oldman_server` 与 `oldman_server.exceptions` 都可导入）：限流拒绝请求时抛出，与其他 4xx 异常一样默认不记 traceback；知道要等多久时用 `headers={"Retry-After": "30"}` 给出。
@@ -21,7 +21,7 @@
 - 新增 `AsyncTestClient`（`oldman_server.testing`，也可用 `app.async_test_client`）：在已运行的事件循环里（`IsolatedAsyncioTestCase`、pytest-asyncio 等异步测试）`await` 的测试客户端，`app.test_client` 自己运行事件循环，在那里调用不了。它在当前循环里用本包自己的服务器（按 `NATIVE_SERVER` 是原生主机或 asyncio 服务器）服务应用，经本机 socket 用 httpx 发真实的 HTTP 请求，与 ASGI 无关；方法、参数与返回值和 `app.test_client` 相同。不在 `async with` 里时每次调用启动一次服务器、发一个请求再停止；在 `async with` 里时整段共用一个服务器，服务器监听器只执行一次。原版 Sanic 在异步测试里只能用 `app.asgi_client`（ASGI，本包已移除）。
 - 请求头的值去掉两端的空白（RFC 9110 的可选空白；原版只去掉开头，`X-A: v␠␠` 原版得到 `"v  "`），两种服务器相同；迭代 `request.headers` 得到的名字都是小写（原版的解析器本来如此，原生主机现在也一样）。
 - 状态行的原因短语与错误页的说明按 RFC 9110（`oldman_server.helpers.STATUS_CODES`，如 413 Content Too Large、414 URI Too Long、416 Range Not Satisfiable、422 Unprocessable Content，并有 421、425），两种服务器用同一张表（原生主机在启动时取得它）；表里没有的状态码短语为空（原版写 `UNKNOWN`）。异常的默认消息随之变化（如 `PayloadTooLarge` 为 “Content Too Large”）。
-- 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。
+- 监听 socket 的 backlog 默认 2048（`oldman_server.constants.DEFAULT_BACKLOG`，与 Gunicorn、Uvicorn 相同），原版 Sanic 为 100：nginx 等代理同时打开上百条上游连接时，unix socket 的 `connect()` 超出 backlog 即失败，nginx 回 502；仍可用 `run(backlog=...)` 指定，内核以 `net.core.somaxconn` 为上限。
 - JSON 默认用 orjson（`json()`、`request.json`、JSON 错误页与 JSON 日志），不再用 ujson：
   - 输出为紧凑的 UTF-8（非 ASCII 字符不再转成 `\uXXXX`）；datetime、UUID、dataclass、enum 可直接编码；非 str 的键照旧转成字符串。
   - 超过 64 位的整数会抛 `TypeError`；`NaN`、`Infinity` 输出为 `null`（原版输出不合法的 `NaN`）；`Decimal`（数据库驱动的 DECIMAL 列）与原版的 ujson 一样编码成 JSON 数字（经 `float`，精度与 double 相同；要保留精确的十进制值就用 `json(..., default=str)`）；不认识的对象不再调用 `__json__` 或 `toDict()`，它们与含孤立代理项的字符串会抛 `TypeError`，要编码它们就用 `json(..., default=...)`。
@@ -31,7 +31,7 @@
 
 ## 已移除
 
-- 命令行（`oldman-server` 命令与 `python -m oldman_server`，包括 `--simple` 静态文件服务器，以及只供命令行的 `sanic exec` 执行的 `@app.command()`）：由 `app.run()` 或上层框架自己的命令启动，多进程加载应用照旧可用 `AppLoader`。
+- 命令行（`oldman-server` 命令与 `python -m oldman_server`，包括 `--simple` 静态文件服务器，以及只供命令行的 `exec` 执行的 `@app.command()`）：由 `app.run()` 或上层框架自己的命令启动，多进程加载应用照旧可用 `AppLoader`。
 - 静态目录的列表页（`app.static(..., directory_view=True)` 与 `DirectoryHandler` 的 `directory_view`）：目录只按 `index` 回答索引文件。
 - 启动信息（MOTD 与标志；`run()` / `prepare()` 的 `motd`、`motd_display`，设置 `MOTD`、`MOTD_DISPLAY`）：主进程开始服务时改为一行 INFO 日志（`oldman_server.root`），写出应用名、地址、运行方式与 worker 数。
 - coffee 模式（`app.make_coffee()`、`prepare(coffee=...)`、`--coffee`，Sanic 标志的彩蛋）。
