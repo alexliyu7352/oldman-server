@@ -22,11 +22,6 @@ from oldman_server.response import text
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="no unix sockets on Windows")
 
 
-# import platform
-# import subprocess
-# import sys
-
-
 pytestmark = [
     pytest.mark.skipif(os.name != "posix", reason="UNIX only"),
     pytest.mark.xdist_group(name="unix_socket"),
@@ -202,86 +197,6 @@ def test_unix_connection_multiple_workers():
         app_multi.get("/")(handler)
         app_multi.listener("after_server_start")(client)
         app_multi.run(host="myhost.invalid", unix=SOCKPATH, workers=2)
-
-
-# @pytest.mark.xfail(
-#     condition=platform.system() != "Linux",
-#     reason="Flaky Test on Non Linux Infra",
-# )
-# async def test_zero_downtime():
-#     """Graceful server termination and socket replacement on restarts"""
-#     from signal import SIGINT
-#     from time import monotonic as current_time
-
-#     async def client():
-#         if httpx_version >= (0, 20):
-#             transport = httpx.AsyncHTTPTransport(uds=SOCKPATH)
-#         else:
-#             transport = httpcore.AsyncConnectionPool(uds=SOCKPATH)
-#         for _ in range(40):
-#             async with httpx.AsyncClient(transport=transport) as client:
-#                 r = await client.get("http://localhost/sleep/0.1")
-#                 assert r.status_code == 200, r.text
-#                 assert r.text == "Slept 0.1 seconds.\n"
-
-#     def spawn():
-#         command = [
-#             sys.executable,
-#             "-m",
-#             "sanic",
-#             "--debug",
-#             "--unix",
-#             SOCKPATH,
-#             "examples.delayed_response.app",
-#         ]
-#         DN = subprocess.DEVNULL
-#         return subprocess.Popen(
-#             command, stdin=DN, stdout=DN, stderr=subprocess.PIPE
-#         )
-
-#     try:
-#         processes = [spawn()]
-#         while not os.path.exists(SOCKPATH):
-#             if processes[0].poll() is not None:
-#                 raise Exception(
-#                     "Worker did not start properly. "
-#                     f"stderr: {processes[0].stderr.read()}"
-#                 )
-#             await asyncio.sleep(0.0001)
-#         ino = os.stat(SOCKPATH).st_ino
-#         task = asyncio.get_event_loop().create_task(client())
-#         start_time = current_time()
-#         while current_time() < start_time + 6:
-#             # Start a new one and wait until the socket is replaced
-#             processes.append(spawn())
-#             while ino == os.stat(SOCKPATH).st_ino:
-#                 await asyncio.sleep(0.001)
-#             ino = os.stat(SOCKPATH).st_ino
-#             # Graceful termination of the previous one
-#             processes[-2].send_signal(SIGINT)
-#         # Wait until client has completed all requests
-#         await task
-#         processes[-1].send_signal(SIGINT)
-#         for worker in processes:
-#             try:
-#                 worker.wait(1.0)
-#             except subprocess.TimeoutExpired:
-#                 raise Exception(
-#                     f"Worker would not terminate:\n{worker.stderr}"
-#                 )
-#     finally:
-#         for worker in processes:
-#             worker.kill()
-#     # Test for clean run and termination
-#     return_codes = [worker.poll() for worker in processes]
-
-#     # Removing last process which seems to be flappy
-#     return_codes.pop()
-#     assert len(processes) > 5
-#     assert all(code == 0 for code in return_codes)
-
-#     # Removing this check that seems to be flappy
-#     # assert not os.path.exists(SOCKPATH)
 
 
 @pytest.mark.parametrize("mode, expected", [(None, 0o666), (0o660, 0o660), ("0o600", 0o600)])

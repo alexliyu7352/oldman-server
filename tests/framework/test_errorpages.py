@@ -87,7 +87,7 @@ def test_should_return_html_valid_setting(
 ):
     # Note: if fallback is None or "auto", prior to PR #2668 base was returned
     # and after that a text response is given because it matches */*. Changed
-    # base to TextRenderer in this test, like it is in Sanic itself, so the
+    # base to TextRenderer in this test, like it is in the framework, so the
     # test passes with either version but still covers everything that it did.
     if fallback:
         fake_request.app.config.FALLBACK_ERROR_FORMAT = fallback

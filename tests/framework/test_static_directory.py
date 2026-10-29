@@ -202,10 +202,7 @@ def test_symlink_serving_permutations(
     ],
 )
 def test_static_index_with_cjk_directory_name(app: OldmanServer, dir_name: str):
-    """Test static file serving with CJK characters in directory names.
-
-    See: https://github.com/sanic-org/sanic/issues/3008
-    """
+    """Test static file serving with CJK characters in directory names."""
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create directory with CJK name containing an index file
         cjk_dir = Path(tmpdir) / dir_name

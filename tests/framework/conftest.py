@@ -55,8 +55,8 @@ def loop():
 async def _handler(request):
     """
     Dummy placeholder method used for route resolver when creating a new
-    route into the sanic router. This router is not actually called by the
-    sanic app. So do not worry about the arguments to this method.
+    route into the router. This router is not actually called by the
+    application. So do not worry about the arguments to this method.
 
     If you change the return value of this method, make sure to propagate the
     change to any test case that leverages RouteStringGenerator.

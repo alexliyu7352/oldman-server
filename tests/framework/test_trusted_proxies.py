@@ -1,6 +1,6 @@
 """TRUSTED_PROXIES: forwarded headers count only on connections from these
-addresses, networks, or (with "unix") a unix socket. Unset, Sanic's rules
-apply to every connection."""
+addresses, networks, or (with "unix") a unix socket. Unset, they count on
+every connection."""
 import os
 import sys
 

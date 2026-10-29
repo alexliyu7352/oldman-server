@@ -389,8 +389,8 @@ def test_malformed_chunks_are_rejected_on_either_server(client, chunk):
     ),
 )
 def test_bad_chunk_size_line(size_line, client):
-    # Both servers parse chunk size lines alike: Sanic only bounded one that
-    # had not ended yet, and took any bytes in an extension.
+    # Both servers parse chunk size lines alike: a line is bounded even when
+    # it arrives at once, and an extension takes no bare LF or control bytes.
     client.send(
         b"POST /upload HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n"
         + size_line + b"\r\nhello\r\n0\r\n\r\n"

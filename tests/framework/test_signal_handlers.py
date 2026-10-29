@@ -38,7 +38,7 @@ def registered(app, loop):
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows: the Ctrl+C workaround, below")
 def test_register_system_signals(app):
-    """Test if sanic register system signals"""
+    """Test that the app registers system signals"""
 
     @app.route("/hello")
     async def hello_route(request):
@@ -52,7 +52,7 @@ def test_register_system_signals(app):
 
 
 def test_no_register_system_signals_fails(app):
-    """Test if sanic don't register system signals"""
+    """Test that the app does not register system signals"""
 
     @app.route("/hello")
     async def hello_route(request):
@@ -71,7 +71,7 @@ def test_no_register_system_signals_fails(app):
 
 
 def test_dont_register_system_signals(app):
-    """Test if sanic don't register system signals"""
+    """Test that the app does not register system signals"""
 
     @app.route("/hello")
     async def hello_route(request):
@@ -133,7 +133,7 @@ def test_windows_workaround():
 
 
 def test_signals_with_invalid_invocation(app):
-    """Test if sanic register fails with invalid invocation"""
+    """Test that registering fails with an invalid invocation"""
 
     @app.route("/hello")
     async def hello_route(request):

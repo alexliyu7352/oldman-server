@@ -90,7 +90,7 @@ async def test_dispatch_signal_triggers_event(app):
 
 @pytest.mark.asyncio
 async def test_dispatch_signal_triggers_correct_event(app):
-    # Check for https://github.com/sanic-org/sanic/issues/2826
+    # A dispatch wakes only the waiter on that event, not one on a sibling.
 
     @app.signal("foo.bar.baz")
     def sync_signal_baz(*args):

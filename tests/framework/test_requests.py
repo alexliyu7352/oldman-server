@@ -799,7 +799,7 @@ def test_request_string_representation(app):
             "\r\n"
             "OK\r\n"
             "------sanic--\r\n",
-            "filename_\u00e4_test",  # Sanic should normalize to NFC
+            "filename_\u00e4_test",  # the framework should normalize to NFC
         ),
     ],
 )

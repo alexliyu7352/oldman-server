@@ -230,8 +230,6 @@ def test_keep_alive_connection_context(port):
 def test_keep_alive_config_false(port):
     """When KEEP_ALIVE=False, server should respond with Connection: close
     and not reuse the connection, even if client requests keep-alive.
-
-    See: https://github.com/sanic-org/sanic/issues/2984
     """
     loops = 0
     while True:

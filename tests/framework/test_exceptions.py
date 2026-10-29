@@ -189,7 +189,7 @@ def test_unauthorized_exception(exception_app):
 
 
 def test_handled_unhandled_exception(exception_app):
-    """Test that an exception not built into sanic is handled"""
+    """Test that an exception not built into the framework is handled"""
     request, response = exception_app.test_client.get("/divide_by_zero")
     assert response.status == 500
     soup = BeautifulSoup(response.body, "html.parser")
@@ -227,7 +227,7 @@ def test_exception_in_exception_handler_debug_on(exception_app):
 
 
 def test_sanic_exception(exception_app):
-    """Test sanic exceptions are handled"""
+    """Test the framework's exceptions are handled"""
     request, response = exception_app.test_client.get("/abort/401")
     assert response.status == 401
 
@@ -433,7 +433,7 @@ def test_exception_quiet_attribute():
 
 
 def test_request_middleware_exception_on_404(app: OldmanServer):
-    """See https://github.com/sanic-org/sanic/issues/2950"""
+    """Request middleware raising on a 404 path runs once and gives 500."""
     counter = count()
 
     @app.on_request

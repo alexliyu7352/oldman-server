@@ -49,7 +49,7 @@ def test_set_startup_catch():
 )
 def test_set_startup_when_the_expected_method_is_already_set():
     # Another library (or the application) set the context first, to the
-    # method Sanic wants: nothing to change.
+    # method the framework wants: nothing to change.
     OldmanServer.START_METHOD_SET = False
     set_start_method("spawn", force=True)
     OldmanServer.test_mode = False

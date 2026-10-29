@@ -95,7 +95,6 @@ def test_serve_app_explicit(wm: Mock, mock_app):
 def test_serve_app_loader(wm: Mock, mock_app):
     OldmanServer.serve(app_loader=AppLoader(factory=lambda: mock_app))
     wm.call_args[0] == mock_app.state.workers
-    # Sanic.serve(factory=lambda: mock_app)
 
 
 @patch("oldman_server.mixins.startup.WorkerManager")

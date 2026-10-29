@@ -1,5 +1,5 @@
-"""A listening socket queues a burst of connections larger than Sanic's
-backlog of 100, as a proxy opening many upstream connections at once makes:
+"""A listening socket queues a burst of connections larger than a backlog
+of 100, as a proxy opening many upstream connections at once makes:
 past the backlog, connect() on a unix socket fails (nginx answers 502)."""
 import socket
 import sys
